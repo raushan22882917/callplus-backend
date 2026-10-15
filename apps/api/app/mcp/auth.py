@@ -16,12 +16,22 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.core.api_keys import API_KEY_PREFIXES, hash_api_key
+from app.core.mcp_oauth import ACCESS_PREFIX
 from app.core.rate_limit import enforce_rate_limit
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import ApiKey, McpApiKey, Tenant, TenantStatus
+from packages.database.models import (
+    ApiKey,
+    McpApiKey,
+    McpOAuthToken,
+    MembershipStatus,
+    Tenant,
+    TenantStatus,
+    TenantUser,
+    User,
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +74,31 @@ async def resolve_tenant(headers: Mapping[str, str] | None, db: AsyncSession) ->
     return (await resolve_principal(headers, db)).tenant_id
 
 
+async def valid_oauth_token(db: AsyncSession, token: str) -> McpOAuthToken | None:
+    """The live OAuth access-token row for `token`, or None if unknown, expired,
+    revoked, or its user/membership/tenant is no longer active."""
+    row = (
+        await db.execute(
+            select(McpOAuthToken).where(McpOAuthToken.hashed_access_token == hash_api_key(token))
+        )
+    ).scalar_one_or_none()
+    if row is None or row.revoked_at is not None or row.access_expires_at <= datetime.now(UTC):
+        return None
+    user = await db.get(User, row.user_id)
+    membership = (
+        await db.execute(
+            select(TenantUser).where(
+                TenantUser.user_id == row.user_id,
+                TenantUser.tenant_id == row.tenant_id,
+                TenantUser.status == MembershipStatus.ACTIVE,
+            )
+        )
+    ).scalar_one_or_none()
+    if user is None or not user.is_active or membership is None:
+        return None
+    return row
+
+
 async def resolve_principal(headers: Mapping[str, str] | None, db: AsyncSession) -> McpPrincipal:
     token = _bearer_token(headers)
     if token is None:
@@ -75,7 +110,14 @@ async def resolve_principal(headers: Mapping[str, str] | None, db: AsyncSession)
 
     hashed = hash_api_key(token)
     now = datetime.now(UTC)
-    if token.startswith(API_KEY_PREFIXES):
+    if token.startswith(ACCESS_PREFIX):
+        oauth_row = await valid_oauth_token(db, token)
+        if oauth_row is None:
+            raise McpAuthError("Invalid or expired access token")
+        key_id, tenant_id = oauth_row.id, oauth_row.tenant_id
+        user_id, scopes = oauth_row.user_id, frozenset(oauth_row.scopes)
+        oauth_row.last_used_at = now
+    elif token.startswith(API_KEY_PREFIXES):
         dev_key = (
             await db.execute(select(ApiKey).where(ApiKey.hashed_key == hashed))
         ).scalar_one_or_none()

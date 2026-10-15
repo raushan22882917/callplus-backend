@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
 
+from app.api.mcp_oauth import router as mcp_oauth_router
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.exceptions import AppError
+from app.mcp.gate import McpAuthGate
 from app.mcp.server import mcp, mcp_asgi_app
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -83,7 +85,8 @@ async def healthz() -> dict[str, str]:
 
 
 app.include_router(api_router)
+app.include_router(mcp_oauth_router)
 # External MCP clients (ChatGPT, Claude, any other MCP host) connect here,
 # authenticated with a per-tenant API key (POST /api/v1/mcp/api-keys) rather
 # than a user JWT — see app/mcp/server.py and app/mcp/auth.py.
-app.mount("/mcp", mcp_asgi_app)
+app.mount("/mcp", McpAuthGate(mcp_asgi_app))

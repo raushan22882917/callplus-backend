@@ -46,6 +46,7 @@ from packages.database.models.knowledge import (
     KnowledgeDocumentSource,
 )
 from packages.database.models.mcp import McpApiKey
+from packages.database.models.mcp_oauth import McpOAuthClient, McpOAuthCode, McpOAuthToken
 from packages.database.models.payment import (
     Payment,
     PaymentLink,
@@ -121,6 +122,9 @@ __all__ = [
     "Invoice",
     "InvoiceStatus",
     "McpApiKey",
+    "McpOAuthClient",
+    "McpOAuthCode",
+    "McpOAuthToken",
     "MembershipStatus",
     "Message",
     "MessageDirection",

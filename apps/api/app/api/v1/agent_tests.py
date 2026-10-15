@@ -15,7 +15,13 @@ from app.integrations.credentials import get_sarvam_api_key
 from app.integrations.sarvam import SarvamAPIError, chat_completion
 from app.services import test_sessions
 from app.services.scenario_runner import CHECK_TYPES, run_batch
-from app.services.test_engine import TestVariables, actions_from_events, opening_line, run_test_turn, track_step
+from app.services.test_engine import (
+    TestVariables,
+    actions_from_events,
+    opening_line,
+    run_test_turn,
+    track_step,
+)
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select

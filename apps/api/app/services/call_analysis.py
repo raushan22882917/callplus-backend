@@ -80,6 +80,7 @@ async def _rescore_customer_leads(db: AsyncSession, call: Call) -> None:
         return
     try:
         from app.services.crm import rescore_lead
+
         from packages.database.models import CrmLead
 
         leads = (

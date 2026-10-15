@@ -23,6 +23,29 @@ Keys are tenant-scoped, rate-limited per key (`API_KEY_RATE_LIMIT_PER_MINUTE`),
 stored hashed, and revocable. Tenant rows are also protected by Postgres RLS.
 Write-scope tool calls are written to the audit log.
 
+## OAuth 2.1 (for hosts that require it)
+
+Hosts that only support OAuth connect with just the URL `{PUBLIC_BASE_URL}/mcp/`.
+An unauthenticated request gets `401` + `WWW-Authenticate: Bearer resource_metadata=...`
+(RFC 9728), and the host then discovers and uses:
+
+| Endpoint | Purpose |
+|---|---|
+| `/.well-known/oauth-protected-resource` | resource metadata (RFC 9728) |
+| `/.well-known/oauth-authorization-server` | server metadata (RFC 8414) |
+| `POST /oauth/register` | dynamic client registration (RFC 7591, public clients) |
+| `GET/POST /oauth/authorize` | sign-in + scope consent page |
+| `POST /oauth/token` | `authorization_code` (PKCE S256 only) and `refresh_token` |
+| `POST /oauth/revoke` | token revocation (RFC 7009) |
+
+Details: the approving user signs in with their normal credentials (and 2FA if
+enabled), needs the `mcp.manage` permission, and ticks which scopes to grant (only
+scopes their role allows are honoured). Access tokens last 1 hour; refresh tokens
+30 days and rotate on use, and replaying a rotated refresh token revokes the whole
+family. Codes are single-use (10 min). Tokens are stored hashed. Redirect URIs must
+be https, loopback http, or an app scheme. Set `PUBLIC_BASE_URL` to the real
+public **https** origin, since it is the OAuth issuer.
+
 ## Tools
 
 | Tool | Scope | Kind |
@@ -58,9 +81,9 @@ Generic JSON (hosts that take a remote-server entry):
 
 ## Known limits
 
-- Auth is bearer-key only. Hosts that *require* OAuth 2.1 discovery
-  (RFC 9728 / dynamic client registration) for remote servers, such as some
-  hosted "connector" UIs, can't connect yet; that is the main roadmap item.
+- Only public OAuth clients (no client secret) are supported.
+- OAuth was tested end to end against this server's own endpoints, not yet
+  against a live third-party host; try it with the MCP Inspector or your host.
 - Developer-key IP allowlists are not applied on the MCP path (no request object
   reaches the tool layer); the per-key rate limit and scopes are.
 - Transcripts are returned unmasked to any key with `calls:read`.

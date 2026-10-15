@@ -20,6 +20,7 @@ from app.integrations.twilio_client import (
     redirect_call,
     start_call_recording,
 )
+from app.integrations.twilio_workspace import build_callback_twiml, build_voicemail_twiml
 from app.schemas.internal import (
     CallConfigResponse,
     CallEndRequest,
@@ -32,9 +33,8 @@ from app.schemas.internal import (
 from app.services.agent_engine import run_turn
 from app.services.call_finalize import finalize_call
 from app.services.routing import route_call
-from app.services.workspace import is_human_controlled
-from app.integrations.twilio_workspace import build_callback_twiml, build_voicemail_twiml
 from app.services.webhooks import enqueue_webhook_event
+from app.services.workspace import is_human_controlled
 from app.workflows.dispatch import enqueue_workflow_trigger
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select

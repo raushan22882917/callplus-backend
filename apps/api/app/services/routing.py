@@ -20,11 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from packages.database.models import AIAgent, Call, CallStatus, Customer
 from packages.database.models.workspace import (
     AgentProfile,
-    HumanAgentStatus,
     BusinessHours,
     CallHandoff,
-    Holiday,
     HandlerState,
+    Holiday,
+    HumanAgentStatus,
 )
 
 MAX_TARGETS = 5

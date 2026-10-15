@@ -7,7 +7,6 @@ from app.core.deps import RequestContext, get_db, require_permission
 from app.core.exceptions import NotFoundError
 from app.core.permissions import Permissions
 from app.core.repository import TenantScopedRepository
-from app.schemas.oauth import CrmPushRequest, CrmPushResult
 from app.schemas.crm import (
     CompanyCreate,
     CompanyRead,
@@ -29,6 +28,7 @@ from app.schemas.crm import (
     TaskUpdate,
     TimelineItem,
 )
+from app.schemas.oauth import CrmPushRequest, CrmPushResult
 from app.services import crm as crm_service
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import or_, select

@@ -53,11 +53,11 @@ from packages.database.models import (
     CallStatus,
     Customer,
     MembershipStatus,
+    TenantUser,
     Ticket,
     TicketPriority,
     User,
 )
-from packages.database.models import TenantUser
 from packages.database.models.workspace import (
     AgentProfile,
     BusinessHours,

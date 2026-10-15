@@ -32,7 +32,7 @@ Legend: YES built, PARTIAL exists with limits, NO not built.
 | Platform | White-label branding / custom domains | NO |
 | MCP | Streamable-HTTP MCP server, tenant-scoped keys | YES |
 | MCP | Wide tool catalogue (22 tools), annotations, prompts, scopes, rate limit | YES (added) |
-| MCP | OAuth 2.1 / dynamic client registration for OAuth-only hosts | NO |
+| MCP | OAuth 2.1 + discovery + dynamic client registration for OAuth-only hosts | YES (tested locally, not yet against a live host) |
 | MCP | MCP resources (e.g. transcripts as resources) | NO |
 
 Sources: [Vapi vs Retell vs Bland vs Synthflow](https://www.morphllm.com/comparisons/vapi-vs-retell-vs-bland-vs-synthflow),
@@ -42,8 +42,7 @@ Vendor pages are marketing; the MCP auth source is a secondary blog, so check th
 official MCP spec before building OAuth.
 
 ## Suggested next builds (highest value first)
-1. OAuth 2.1 authorization server in front of `/mcp` (unlocks OAuth-only hosts).
-2. Answering-machine detection (Twilio `AsyncAmd` + hang up / leave voicemail).
-3. Streaming LLM -> TTS for latency.
-4. CSAT survey after calls/tickets (WhatsApp/SMS).
-5. pgvector semantic search + PDF ingestion.
+1. Answering-machine detection (Twilio `AsyncAmd` + hang up / leave voicemail).
+2. Streaming LLM -> TTS for latency.
+3. CSAT survey after calls/tickets (WhatsApp/SMS).
+4. pgvector semantic search + PDF ingestion.

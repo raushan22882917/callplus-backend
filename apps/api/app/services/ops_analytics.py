@@ -34,8 +34,8 @@ from packages.database.models import (
     Payment,
     PaymentLink,
     PaymentStatus,
+    User,
 )
-from packages.database.models import User
 from packages.database.models.insights import CallQAScore
 from packages.database.models.workspace import CallHandoff
 
