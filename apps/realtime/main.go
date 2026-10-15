@@ -29,6 +29,12 @@ func main() {
 		BackendBaseURL:  requireEnv("BACKEND_BASE_URL"),
 		InternalToken:   requireEnv("INTERNAL_SERVICE_TOKEN"),
 		DefaultLanguage: getEnv("DEFAULT_LANGUAGE", "en-IN"),
+		// Speak each sentence as the LLM writes it. Set STREAM_REPLIES=false to go
+		// back to waiting for the whole reply (falls back by itself on any error).
+		// Persistent Sarvam text-to-speech WebSocket per call: ~0.25s to first audio
+		// per sentence instead of ~1s for the REST call. TTS_WEBSOCKET=false forces REST.
+		TTSWebSocket:  getEnv("TTS_WEBSOCKET", "true") != "false",
+		StreamReplies: getEnv("STREAM_REPLIES", "true") != "false",
 	}
 	port := getEnv("PORT", "9000")
 

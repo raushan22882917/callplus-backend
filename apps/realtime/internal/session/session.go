@@ -29,6 +29,8 @@ type Config struct {
 	BackendBaseURL  string
 	InternalToken   string
 	DefaultLanguage string
+	StreamReplies   bool
+	TTSWebSocket    bool
 }
 
 type Session struct {
@@ -49,10 +51,14 @@ type Session struct {
 	language  string
 	voice     string
 
-	backendClient *backend.Client
-	callConfig    *backend.CallConfig
-	stt           *sarvam.STTStream
-	tts           *sarvam.TTSClient
+	backendClient    *backend.Client
+	callConfig       *backend.CallConfig
+	stt              *sarvam.STTStream
+	tts              *sarvam.TTSClient
+	ttsMu            sync.Mutex
+	ttsSockets       map[string]*sarvam.TTSSocket // persistent TTS connection per language
+	sarvamKey        string
+	ttsDisabledUntil time.Time
 
 	// Playback state. The agent counts as "speaking" until speakingUntil —
 	// the estimated end of everything already sent to Twilio — or until
@@ -208,6 +214,12 @@ func (s *Session) handleStart(start *twilio.StartPayload) {
 	s.language = language
 	s.voice = callConfig.Voice
 	s.tts = sarvam.NewTTSClient(sarvamAPIKey)
+	s.sarvamKey = sarvamAPIKey
+	if s.cfg.TTSWebSocket {
+		// Open the speech connection now, while the greeting is being prepared, so
+		// the first sentence of every reply skips the connect cost.
+		go s.warmTTS()
+	}
 
 	// Sarvam's own VAD default (500ms of silence = utterance finished) cuts
 	// callers off mid-sentence on a normal speaking pause. 900ms gives real
@@ -428,36 +440,34 @@ func (s *Session) speak(text string) (firstAudio time.Time) {
 	if len(chunks) == 0 || s.tts == nil {
 		return
 	}
-
-	s.speakMu.Lock()
-	defer s.speakMu.Unlock()
-	s.rememberAgentText(text)
-
-	gen := s.currentPlaybackGen()
-	results := make([]chan ttsResult, len(chunks))
-	for i, chunk := range chunks {
-		results[i] = make(chan ttsResult, 1)
-		go func(chunk string, out chan<- ttsResult) {
-			audio, err := s.tts.Synthesize(chunk, ttsLanguage(chunk, s.language), s.voice)
-			out <- ttsResult{audio: audio, err: err}
-		}(chunk, results[i])
+	sentences := make(chan string, len(chunks))
+	for _, chunk := range chunks {
+		sentences <- chunk
 	}
+	close(sentences)
+	return s.speakStream(sentences, func() bool { return false })
+}
 
-	for i, ch := range results {
-		result := <-ch
-		if s.currentPlaybackGen() != gen {
-			return // caller barged in; drop the rest of this reply
-		}
-		if result.err != nil {
-			log.Printf("[session %s] tts synthesis failed: %v", s.callID, result.err)
-			continue
-		}
-		if firstAudio.IsZero() {
-			firstAudio = time.Now()
-		}
-		s.sendAudio(result.audio, i == len(results)-1)
+// appendAgentText extends the remembered reply as streamed chunks are queued,
+// so echo detection sees the words the agent is saying right now.
+func (s *Session) appendAgentText(chunk string) {
+	s.speakingMu.Lock()
+	if s.lastAgentText != "" {
+		s.lastAgentText += " "
 	}
-	return firstAudio
+	s.lastAgentText += chunk
+	s.speakingMu.Unlock()
+}
+
+// sendMark ends a streamed reply: Twilio echoes the mark once every clip sent
+// before it has finished playing (see handleMark).
+func (s *Session) sendMark() {
+	s.speakingMu.Lock()
+	s.markSeq++
+	name := fmt.Sprintf("reply-%d", s.markSeq)
+	s.latestMark = name
+	s.speakingMu.Unlock()
+	s.writeJSON(twilio.NewOutboundMark(s.streamSID, name))
 }
 
 // sendAudio queues one clip with Twilio. Only the final clip of a reply gets
@@ -560,6 +570,7 @@ func (s *Session) cleanup() {
 	if s.stt != nil {
 		_ = s.stt.Close()
 	}
+	s.closeTTSSockets()
 	_ = s.conn.Close()
 }
 

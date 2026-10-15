@@ -16,12 +16,17 @@ import re
 import time
 import unicodedata
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from app.integrations.credentials import get_sarvam_api_key
-from app.integrations.sarvam import SARVAM_LANGUAGES, SarvamAPIError, chat_completion
+from app.integrations.sarvam import (
+    SARVAM_LANGUAGES,
+    SarvamAPIError,
+    chat_completion,
+    chat_completion_stream,
+)
 from app.services import guardrails
 from app.services.customer_context import (
     bookings_note,
@@ -30,6 +35,7 @@ from app.services.customer_context import (
     other_channel_note,
     today_note,
 )
+from app.services.speech_stream import SentenceStreamer, clean_for_speech
 from app.tools.context import ToolContext
 from app.tools.registry import TOOL_REGISTRY, execute_tool
 from sqlalchemy import select
@@ -110,6 +116,70 @@ VOICE_STYLE_RULES = (
     "do not repeat what the caller just said or re-introduce yourself; if the caller "
     "interrupts or says something short like 'okay' or 'yes', respond briefly and move on."
 )
+
+# What separates a person on the phone from a "voice assistant": register, reactions,
+# and the stock phrases customer-service bots keep repeating. Kept short and
+# concrete because the fast voice model follows examples far better than adjectives.
+HUMAN_VOICE_RULES = (
+    "\n\nSound like a real person on the phone, not a script or an assistant. "
+    "Talk like a warm, relaxed receptionist in India: everyday words, short sentences, one idea at a time. "
+    "Start by reacting to what they just said in a few words when it fits ('Sure, no problem.', 'Oh, okay.', "
+    "'Alright.'; only when the caller is speaking Hindi, the Hindi equivalents such as 'जी, बिल्कुल।' or 'अच्छा, ठीक है।'), "
+    "but never open two replies in a row the same way, and skip the reaction when the answer is already one short "
+    "sentence. "
+    "Use contractions in English (I'll, we're, that's). Mix languages only the way the caller does: if their message "
+    "mixes Hindi and English, you may too; if it is in one language, stay in it. Write each Hindi word in the script "
+    "the script rule below asks for: never put Roman-letter Hindi inside a Devanagari reply or the other way round. "
+    "In Hindi use 'आप' naturally; never add a stray 'aap' or 'ji' just to sound Indian. Never guess the caller's "
+    "gender: in Hindi use the respectful forms that suit anyone (चाहेंगे, आइए), not feminine or masculine ones. "
+    "Never say or write anything like: 'I understand your concern', 'certainly', 'absolutely', 'I apologize for the "
+    "inconvenience', 'kindly', 'assist', 'how may I assist you', 'feel free to', 'is there anything else I can "
+    "help you with today'. Say it the way a neighbour would: 'Anything else?'. "
+    "Do not repeat back what the caller just told you, do not summarise, and do not thank them in every reply. "
+    "If you don't know something, say so plainly and say who will find out ('I don't have that right now, I'll "
+    "check with the team and let you know'), instead of a long apology. "
+    "Say times, prices and dates the way people say them aloud ('six in the evening', 'tomorrow morning', 'five "
+    "hundred rupees'), never as digits and symbols. "
+    "A very short answer is often the most natural one: 'Ten to eight, every day.' "
+    "Be honest about what you are: you are the business's AI assistant. If the caller asks whether you are a robot, "
+    "an AI, a machine or a real person, say plainly and warmly that you are an AI assistant, and offer to connect "
+    "them to a person if they would prefer. Never claim to be human."
+)
+
+FEMALE_VOICES = frozenset(
+    "ritu priya neha pooja simran kavya ishita shreya roopa tanya shruti suhani kavitha rupali "
+    "anushka manisha vidya arya".split()
+)
+MALE_VOICES = frozenset(
+    "shubh aditya rahul rohan amit dev ratan varun manan sumit kabir aayan ashutosh advait anand tarun "
+    "gokul vijay mohit rehan soham abhilash karun hitesh".split()
+)
+
+
+def voice_gender(voice: str | None) -> str | None:
+    """"female"/"male" for a known Bulbul voice. Sarvam's default voice (no name
+    set) is Shubh. Persona ids such as simran_en_customer use the first part."""
+    name = (voice or "shubh").strip().lower().split("_")[0]
+    if name in FEMALE_VOICES:
+        return "female"
+    if name in MALE_VOICES:
+        return "male"
+    return None
+
+
+def gender_note(voice: str | None) -> str:
+    """Hindi and most Indian languages mark the speaker's gender on verbs
+    ("karti hoon" / "karta hoon"). A female voice saying the male form is one of
+    the quickest giveaways that a caller is talking to a machine."""
+    gender = voice_gender(voice)
+    if gender is None:
+        return ""
+    forms = "feminine (karti hoon, gayi, rahi)" if gender == "female" else "masculine (karta hoon, gaya, raha)"
+    return (
+        f"\n\nYour voice is {gender}. In Hindi and the other languages that mark gender on verbs, always "
+        f"refer to yourself with {forms} forms."
+    )
+
 
 # Behaviour seen on a live salon call that the rules above did not stop: the agent
 # switched to English for a Hindi caller, welcomed them a second time, asked for the
@@ -327,24 +397,6 @@ async def _actions_this_conversation(db: AsyncSession, conversation: Conversatio
     return [f"Created a ticket: {subject}" for subject in result.scalars().all()]
 
 
-_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-_MARKDOWN_CHARS = re.compile(r"[*_`#>~]+")
-_BULLET_PREFIX = re.compile(r"^\s*(?:[-•]|\d+[.)])\s+", re.MULTILINE)
-_URL = re.compile(r"https?://\S+")
-
-
-def clean_for_speech(text: str) -> str:
-    """Strip anything that must not be spoken: model reasoning blocks, markdown,
-    list markers and raw URLs. Whitespace is collapsed to single spaces."""
-    text = _THINK_BLOCK.sub("", text)
-    # An unterminated <think> (truncated output) is reasoning too — drop it.
-    text = re.sub(r"<think>.*", "", text, flags=re.DOTALL | re.IGNORECASE)
-    text = _URL.sub("", text)
-    text = _BULLET_PREFIX.sub("", text)
-    text = _MARKDOWN_CHARS.sub("", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
 ASSISTANT_SYSTEM_PROMPT = (
     "You are the internal AI assistant for this company's staff. You can look up "
     "customers, tickets, and notes using the tools available to you, and you can "
@@ -516,14 +568,25 @@ async def _run_tool_loop(
     return reply_text, transfer_requested, transfer_reason
 
 
-async def run_turn(
+@dataclass
+class _TurnPrep:
+    messages: list[dict]
+    llm_tools: list[dict]
+    tool_ctx: ToolContext
+    sarvam_api_key: str | None
+    guardrail_rules: list
+    is_voice: bool
+
+
+async def _prepare_turn(
     *,
     db: AsyncSession,
     tenant_id: uuid.UUID,
     agent: AIAgent,
     conversation: Conversation,
     customer_text: str,
-) -> TurnResult:
+) -> _TurnPrep:
+    """Saves the customer's message and builds everything the LLM call needs."""
     await _persist_message(
         db,
         tenant_id,
@@ -541,7 +604,7 @@ async def run_turn(
     system_prompt = (
         agent.system_prompt
         + TOOL_HONESTY_RULES
-        + ((VOICE_STYLE_RULES + CONVERSATION_RULES) if is_voice else "")
+        + ((VOICE_STYLE_RULES + HUMAN_VOICE_RULES + gender_note(agent.voice) + CONVERSATION_RULES) if is_voice else "")
         + (WHATSAPP_RULES if conversation.channel == ConversationChannel.WHATSAPP else "")
         + (caller_context(customer.phone, customer.name, voice=is_voice) if customer else "")
         + await _customer_history(db, conversation)
@@ -563,12 +626,24 @@ async def run_turn(
         conversation_id=conversation.id,
         customer_id=conversation.customer_id,
     )
+    return _TurnPrep(messages, llm_tools, tool_ctx, sarvam_api_key, guardrail_rules, is_voice)
 
+
+async def _finish_buffered(
+    *,
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    agent: AIAgent,
+    conversation: Conversation,
+    customer_text: str,
+    prep: _TurnPrep,
+) -> TurnResult:
+    messages, guardrail_rules, is_voice = prep.messages, prep.guardrail_rules, prep.is_voice
     reply_text, transfer_requested, transfer_reason = await _run_tool_loop(
         messages=messages,
-        llm_tools=llm_tools,
-        tool_ctx=tool_ctx,
-        sarvam_api_key=sarvam_api_key,
+        llm_tools=prep.llm_tools,
+        tool_ctx=prep.tool_ctx,
+        sarvam_api_key=prep.sarvam_api_key,
         reasoning_effort="low" if is_voice else None,
     )
     if is_voice:
@@ -610,6 +685,180 @@ async def run_turn(
         transfer_requested=transfer_requested,
         transfer_reason=transfer_reason,
         reply_message_id=reply_message.id,
+    )
+
+
+async def run_turn(
+    *,
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    agent: AIAgent,
+    conversation: Conversation,
+    customer_text: str,
+) -> TurnResult:
+    prep = await _prepare_turn(
+        db=db,
+        tenant_id=tenant_id,
+        agent=agent,
+        conversation=conversation,
+        customer_text=customer_text,
+    )
+    return await _finish_buffered(
+        db=db,
+        tenant_id=tenant_id,
+        agent=agent,
+        conversation=conversation,
+        customer_text=customer_text,
+        prep=prep,
+    )
+
+
+async def _run_tool_loop_stream(
+    *,
+    messages: list[dict],
+    llm_tools: list[dict],
+    tool_ctx: ToolContext,
+    sarvam_api_key: str | None,
+    reasoning_effort: str | None,
+) -> AsyncIterator[tuple]:
+    """Streaming twin of _run_tool_loop for live calls. Yields ("sentence", text)
+    the moment each sentence of the reply is complete, then one
+    ("done", reply_text, transfer_requested, transfer_reason).
+
+    reply_text is exactly what was streamed out (so the stored transcript is what
+    the caller heard), including any sentence the model said before calling a
+    tool. If the model fails after words were already spoken, the call carries
+    on with what was said rather than an apology on top of it."""
+    transfer_requested = False
+    transfer_reason: str | None = None
+    spoken: list[str] = []
+    fallback = "Sorry, I'm having trouble right now — let me get a human to help you."
+    reply_text: str | None = None
+
+    try:
+        for _ in range(MAX_TOOL_ITERATIONS):
+            streamer = SentenceStreamer()
+            final: dict = {}
+            async for event in chat_completion_stream(
+                messages=messages,
+                tools=llm_tools or None,
+                api_key=sarvam_api_key,
+                reasoning_effort=reasoning_effort,
+            ):
+                if event["type"] == "content":
+                    for sentence in streamer.feed(event["text"]):
+                        spoken.append(sentence)
+                        yield ("sentence", sentence)
+                else:
+                    final = event
+            for sentence in streamer.flush():
+                spoken.append(sentence)
+                yield ("sentence", sentence)
+
+            tool_calls = final.get("tool_calls") or []
+            if not tool_calls:
+                reply_text = " ".join(spoken)
+                break
+
+            messages.append(
+                {"role": "assistant", "content": final.get("content") or None, "tool_calls": tool_calls}
+            )
+            for call in tool_calls:
+                function = call["function"]
+                try:
+                    arguments = json.loads(function.get("arguments") or "{}")
+                except ValueError:
+                    arguments = {}
+                result = await execute_tool(function["name"], tool_ctx, arguments)
+                logger.info(
+                    "tool %s args=%s -> %s",
+                    function["name"],
+                    sorted(arguments),
+                    "error: " + str(result["error"]) if "error" in result else "ok",
+                )
+                if function["name"] == "transfer_call" and result.get("transfer_requested"):
+                    transfer_requested = True
+                    transfer_reason = result.get("reason")
+                messages.append(
+                    {"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result)}
+                )
+        else:
+            closing = "Let me connect you with a colleague who can take it from here."
+            spoken.append(closing)
+            yield ("sentence", closing)
+            reply_text = " ".join(spoken)
+            transfer_requested = True
+            transfer_reason = "tool-call loop exceeded max iterations"
+    except SarvamAPIError:
+        logger.warning("streaming turn failed", exc_info=True)
+        if not spoken:
+            spoken.append(fallback)
+            yield ("sentence", fallback)
+        reply_text = " ".join(spoken)
+
+    yield ("done", reply_text or fallback, transfer_requested, transfer_reason)
+
+
+async def run_turn_stream(
+    *,
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    agent: AIAgent,
+    conversation: Conversation,
+    customer_text: str,
+) -> AsyncIterator[tuple]:
+    """Voice-call turn that streams: yields ("sentence", text) as the reply is
+    spoken-ready, then ("result", TurnResult). Agents with guardrail rules are
+    not streamed: a rule can veto the finished reply, which can't be taken back
+    once it has been spoken, so they get the whole checked reply at the end."""
+    prep = await _prepare_turn(
+        db=db,
+        tenant_id=tenant_id,
+        agent=agent,
+        conversation=conversation,
+        customer_text=customer_text,
+    )
+    if prep.guardrail_rules or not prep.is_voice:
+        result = await _finish_buffered(
+            db=db,
+            tenant_id=tenant_id,
+            agent=agent,
+            conversation=conversation,
+            customer_text=customer_text,
+            prep=prep,
+        )
+        yield ("result", result)
+        return
+
+    reply_text, transfer_requested, transfer_reason = "", False, None
+    async for event in _run_tool_loop_stream(
+        messages=prep.messages,
+        llm_tools=prep.llm_tools,
+        tool_ctx=prep.tool_ctx,
+        sarvam_api_key=prep.sarvam_api_key,
+        reasoning_effort="low",
+    ):
+        if event[0] == "sentence":
+            yield event
+        else:
+            _, reply_text, transfer_requested, transfer_reason = event
+    reply_text = clean_for_speech(reply_text) or "Sorry, could you say that again?"
+    reply_message = await _persist_message(
+        db,
+        tenant_id,
+        conversation.id,
+        direction=MessageDirection.OUTBOUND,
+        sender=MessageSender.AI_AGENT,
+        text=reply_text,
+    )
+    yield (
+        "result",
+        TurnResult(
+            reply_text=reply_text,
+            transfer_requested=transfer_requested,
+            transfer_reason=transfer_reason,
+            reply_message_id=reply_message.id,
+        ),
     )
 
 

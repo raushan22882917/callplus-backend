@@ -4,6 +4,7 @@ always derived from the Call row looked up by call_id, never from the
 request body.
 """
 
+import json
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -30,13 +31,14 @@ from app.schemas.internal import (
     CallTurnRequest,
     CallTurnResponse,
 )
-from app.services.agent_engine import run_turn
+from app.services.agent_engine import run_turn, run_turn_stream
 from app.services.call_finalize import finalize_call
 from app.services.routing import route_call
 from app.services.webhooks import enqueue_webhook_event
 from app.services.workspace import is_human_controlled
 from app.workflows.dispatch import enqueue_workflow_trigger
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from twilio.base.exceptions import TwilioException
@@ -55,7 +57,7 @@ from packages.database.models import (
     TransferTarget,
     WorkflowTrigger,
 )
-from packages.database.session import set_tenant_context
+from packages.database.session import session_scope, set_tenant_context
 
 router = APIRouter(
     prefix="/internal",
@@ -165,10 +167,11 @@ async def call_config(call_id: uuid.UUID, db: AsyncSession = Depends(get_db)) ->
     )
 
 
-@router.post("/calls/{call_id}/turn", response_model=CallTurnResponse)
-async def call_turn(
-    call_id: uuid.UUID, payload: CallTurnRequest, db: AsyncSession = Depends(get_db)
-) -> CallTurnResponse:
+async def _prepare_call_turn(
+    db: AsyncSession, call_id: uuid.UUID, payload: CallTurnRequest
+) -> tuple[CallTurnResponse | None, Call | None, AIAgent | None, Conversation | None]:
+    """Everything before the LLM runs. Returns (early_response, call, agent,
+    conversation): a non-None early_response means no AI turn should happen."""
     call = await _get_call(db, call_id)
     if await is_human_controlled(db, call.id):
         # A human agent took this call over (see app/api/v1/workspace.py): the AI
@@ -184,7 +187,7 @@ async def call_turn(
             )
         )
         await db.commit()
-        return CallTurnResponse(reply_text="", action="none", reason="human_controlled")
+        return CallTurnResponse(reply_text="", action="none", reason="human_controlled"), None, None, None
     if call.ai_agent_id is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Call has no AI agent assigned")
 
@@ -196,20 +199,20 @@ async def call_turn(
     # its owner-configured time limit shouldn't get another turn at all.
     elapsed = (datetime.now(UTC) - call.started_at).total_seconds() if call.started_at else 0
     if elapsed >= agent.max_call_duration_seconds:
-        return CallTurnResponse(
+        early = CallTurnResponse(
             reply_text=agent.max_duration_message, action="hangup", reason="max_duration_exceeded"
         )
+        return early, None, None, None
 
     conversation = await _get_or_create_conversation(db, call)
-    result = await run_turn(
-        db=db,
-        tenant_id=call.tenant_id,
-        agent=agent,
-        conversation=conversation,
-        customer_text=payload.transcript,
-    )
-    await db.commit()
+    return None, call, agent, conversation
 
+
+def _finish_call_turn(
+    call: Call, conversation: Conversation, payload: CallTurnRequest, result
+) -> CallTurnResponse:
+    """After the reply is saved and committed: fire the triggers and webhooks and
+    shape the response."""
     enqueue_workflow_trigger(
         tenant_id=call.tenant_id,
         trigger=WorkflowTrigger.MESSAGE_RECEIVED,
@@ -243,6 +246,75 @@ async def call_turn(
     return CallTurnResponse(
         reply_text=result.reply_text, action="none", reply_message_id=result.reply_message_id
     )
+
+
+@router.post("/calls/{call_id}/turn", response_model=CallTurnResponse)
+async def call_turn(
+    call_id: uuid.UUID, payload: CallTurnRequest, db: AsyncSession = Depends(get_db)
+) -> CallTurnResponse:
+    early, call, agent, conversation = await _prepare_call_turn(db, call_id, payload)
+    if early is not None:
+        return early
+    result = await run_turn(
+        db=db,
+        tenant_id=call.tenant_id,
+        agent=agent,
+        conversation=conversation,
+        customer_text=payload.transcript,
+    )
+    await db.commit()
+    return _finish_call_turn(call, conversation, payload, result)
+
+
+@router.post("/calls/{call_id}/turn/stream")
+async def call_turn_stream(call_id: uuid.UUID, payload: CallTurnRequest) -> StreamingResponse:
+    """Same turn as POST /calls/{id}/turn, but the reply is streamed as it is
+    written so the gateway can start speaking after the first sentence instead
+    of after the whole reply. Newline-delimited JSON:
+
+      {"type": "sentence", "text": "..."}        one per speakable sentence
+      {"type": "done", ...CallTurnResponse}      always last; reply_text is the full reply
+      {"type": "error", "detail": "..."}         instead of "done" if the turn failed
+
+    With nothing streamed (human-controlled call, max duration reached, an agent
+    with guardrails) only the "done" line is sent and the gateway speaks its
+    reply_text, exactly like the non-streaming endpoint."""
+
+    async def events():
+        try:
+            async with session_scope() as db:
+                early, call, agent, conversation = await _prepare_call_turn(db, call_id, payload)
+                if early is not None:
+                    yield _line({"type": "done", **early.model_dump(mode="json")})
+                    return
+                result = None
+                async for kind, *rest in run_turn_stream(
+                    db=db,
+                    tenant_id=call.tenant_id,
+                    agent=agent,
+                    conversation=conversation,
+                    customer_text=payload.transcript,
+                ):
+                    if kind == "sentence":
+                        yield _line({"type": "sentence", "text": rest[0]})
+                    else:
+                        result = rest[0]
+                await db.commit()
+                response = _finish_call_turn(call, conversation, payload, result)
+                yield _line({"type": "done", **response.model_dump(mode="json")})
+        except HTTPException as exc:
+            yield _line({"type": "error", "status": exc.status_code, "detail": str(exc.detail)})
+        except Exception:
+            logger.exception("streaming turn failed for call %s", call_id)
+            yield _line({"type": "error", "status": 500, "detail": "turn failed"})
+
+    return StreamingResponse(
+        events(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"}
+    )
+
+
+def _line(event: dict) -> bytes:
+    return (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
 
 
 @router.delete("/calls/{call_id}/messages/{message_id}", status_code=status.HTTP_204_NO_CONTENT)

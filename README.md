@@ -409,14 +409,42 @@ and unanswered surveys expire after `expire_hours`. Results: `GET /api/v1/csat/s
 `GET /api/v1/csat/surveys`; the MCP tool `get_csat_summary` returns the same.
 Survey text is whatever you set in `question`, so write it in your customers' language.
 
+## Voice latency and natural speech
+
+How a reply reaches the caller, in order of what saves the most time (measured live
+against Sarvam on 2026-10-15):
+
+1. **Persistent text-to-speech WebSocket** (`TTS_WEBSOCKET`, default on). One
+   Bulbul v3 socket per language is opened when the call starts, so a sentence's
+   first audio arrives in ~0.23s instead of ~0.9-1.3s for a REST request (which
+   also pays a TLS handshake each time). Falls back to REST by itself.
+2. **Streamed replies** (`STREAM_REPLIES`, default on). The gateway calls
+   `POST /internal/calls/{id}/turn/stream`; the LLM's tokens are cut into sentences
+   (`app/services/speech_stream.py`) and each sentence goes to TTS as soon as it is
+   written. Agents with guardrail rules are not streamed, because a rule can veto a
+   finished reply. Browser test sessions and any error fall back to the normal turn.
+3. The conversation model (`sarvam-105b-conversations`) answers in ~0.4s;
+   streaming gets its first sentence out in ~0.2s.
+
+Rough effect on time to first word after the caller stops talking: ~1.4s before,
+~0.5s now (the backend's own DB work is not included). `bulbul:v4-flash` was
+measured too and is no faster than v3 over REST (~1.0-1.2s), so the voice model
+was left on v3; v4-flash uses different voice ids (`name_language_style`).
+
+To make replies sound like a person rather than an assistant, voice calls add
+`HUMAN_VOICE_RULES` to the prompt (natural reactions, no stock phrases such as
+"I understand your concern", spoken numbers, one language per reply, mixing only
+as the caller does), tell the agent its voice's gender so Hindi verbs agree
+(`karti`/`karta hoon`), rotate the "one moment" filler phrases, and require the
+agent to admit it is an AI when asked. `scripts/eval_voice_style.py` compares
+prompts against the live model.
+
 ## What's not here yet
 
 - **Semantic (vector) search** — the knowledge base (`/api/v1/knowledge`,
   `search_knowledge_base` agent tool) uses Postgres full-text search with
   any-term matching. Embeddings/pgvector re-ranking and PDF/DOCX ingestion
   (today: txt/md/csv upload or pasted text) are not built.
-- **Streaming LLM → TTS** — the gateway pipelines TTS per sentence, but waits
-  for the complete LLM reply before speaking.
 - **Business-hours / skill-based routing** for human handoff (today: ring all
   active targets).
 - **Platform billing** usage metering — see "Payments" for what exists.

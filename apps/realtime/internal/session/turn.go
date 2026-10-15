@@ -3,8 +3,12 @@ package session
 import (
 	"log"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
+
+	"callcenter/realtime/internal/backend"
 )
 
 // Turn-taking. The original loop did everything inline on the STT read
@@ -104,6 +108,11 @@ func (s *Session) runTurn(gen int) {
 	started := time.Now()
 	stopFiller := make(chan struct{})
 	fillerDone := make(chan struct{})
+	var stopOnce sync.Once
+	endFiller := func() {
+		stopOnce.Do(func() { close(stopFiller) })
+		<-fillerDone // a filler that already started finishes before the reply
+	}
 	go func() {
 		defer close(fillerDone)
 		select {
@@ -115,13 +124,29 @@ func (s *Session) runTurn(gen int) {
 		case <-stopFiller:
 		}
 	}()
-	result, err := s.backendClient.Turn(s.callID, text)
-	replyMs := time.Since(started).Milliseconds()
-	close(stopFiller)
-	<-fillerDone // a filler that already started finishes before the reply
+
+	var (
+		result     *backend.TurnResponse
+		err        error
+		firstAudio time.Time
+		streamed   int
+		replyMs    int64
+	)
+	if s.cfg.StreamReplies && s.tts != nil && s.backendClient.CanStream() {
+		result, streamed, firstAudio, err = s.streamingTurn(text, func() bool { return s.turnIsStale(gen) }, endFiller)
+		if err != nil && streamed == 0 {
+			log.Printf("[session %s] streaming turn failed before any speech, retrying normally: %v", s.callID, err)
+			result, err = s.backendClient.Turn(s.callID, text)
+		}
+	} else {
+		result, err = s.backendClient.Turn(s.callID, text)
+	}
+	replyMs = time.Since(started).Milliseconds()
+	endFiller()
+
 	if s.turnIsStale(gen) {
 		log.Printf("[session %s] caller spoke again; dropping stale reply", s.callID)
-		if err == nil {
+		if err == nil && result != nil {
 			s.sendTestEvent("cb_turn_dropped", map[string]any{"reply_message_id": result.ReplyMessageID})
 			if rerr := s.backendClient.RetractReply(s.callID, result.ReplyMessageID); rerr != nil {
 				log.Printf("[session %s] retract unspoken reply failed: %v", s.callID, rerr)
@@ -131,18 +156,25 @@ func (s *Session) runTurn(gen int) {
 	}
 	if err != nil {
 		log.Printf("[session %s] backend turn call failed: %v", s.callID, err)
-		s.speak("I'm sorry, I'm having trouble right now. Could you say that again?")
+		if streamed == 0 {
+			s.speak("I'm sorry, I'm having trouble right now. Could you say that again?")
+		}
 		return
 	}
-	log.Printf("[session %s] replying: %q (action=%s)", s.callID, result.ReplyText, result.Action)
+	log.Printf("[session %s] replying: %q (action=%s, streamed=%d)", s.callID, result.ReplyText, result.Action, streamed)
 	s.sendTestEvent("cb_turn", map[string]any{"heard": text, "result": result.Raw})
-	firstAudio := s.speak(result.ReplyText)
+	if streamed == 0 {
+		firstAudio = s.speak(result.ReplyText)
+	} else {
+		s.rememberAgentText(result.ReplyText)
+	}
 	if !firstAudio.IsZero() {
 		// Test-only timeline: from the end of the caller's turn to the reply text, then to its first audio.
 		s.sendTestEvent("cb_timing", map[string]any{
 			"wait_ms":        turnDebounce.Milliseconds(),
 			"reply_ms":       replyMs,
 			"first_audio_ms": firstAudio.Sub(started).Milliseconds(),
+			"streamed":       streamed,
 		})
 	}
 	s.actOn(result.Action, result.Reason)
@@ -207,23 +239,30 @@ func normalizeWords(s string) []string {
 }
 
 // fillerPhrases: what the agent says while a slow reply (a booking, a lookup) is
-// still being prepared. Short, so it never talks over the real answer for long.
-var fillerPhrases = map[string]string{
-	"hi-IN": "एक सेकंड।",
-	"mr-IN": "एक क्षण थांबा.",
-	"bn-IN": "এক মুহূর্ত।",
-	"gu-IN": "એક ક્ષણ.",
-	"pa-IN": "ਇੱਕ ਪਲ।",
-	"od-IN": "ଗୋଟିଏ ମୁହୂର୍ତ୍ତ।",
-	"ta-IN": "ஒரு நிமிடம்.",
-	"te-IN": "ఒక్క క్షణం.",
-	"kn-IN": "ಒಂದು ಕ್ಷಣ.",
-	"ml-IN": "ഒരു നിമിഷം.",
+// still being prepared. Short, so it never talks over the real answer for long,
+// and several per language, handed out in turn: hearing the identical "One
+// moment, please." every time is one of the first things that gives a bot away.
+// None of them marks the speaker's gender.
+var fillerPhrases = map[string][]string{
+	"en-IN": {"One sec.", "Let me check that.", "Sure, one moment.", "Hmm, let me see."},
+	"hi-IN": {"एक सेकंड।", "हाँ जी, एक मिनट।", "ठीक है, बस एक सेकंड।", "अच्छा, एक मिनट।"},
+	"mr-IN": {"एक क्षण थांबा.", "ठीक आहे, एक सेकंद."},
+	"bn-IN": {"এক মুহূর্ত।", "আচ্ছা, এক সেকেন্ড।"},
+	"gu-IN": {"એક ક્ષણ.", "સારું, એક સેકન્ડ."},
+	"pa-IN": {"ਇੱਕ ਪਲ।", "ਠੀਕ ਹੈ, ਇੱਕ ਸਕਿੰਟ।"},
+	"od-IN": {"ଗୋଟିଏ ମୁହୂର୍ତ୍ତ।", "ଠିକ୍ ଅଛି, ଏକ ସେକେଣ୍ଡ।"},
+	"ta-IN": {"ஒரு நிமிடம்.", "சரி, ஒரு நொடி."},
+	"te-IN": {"ఒక్క క్షణం.", "సరే, ఒక్క సెకను."},
+	"kn-IN": {"ಒಂದು ಕ್ಷಣ.", "ಸರಿ, ಒಂದು ಸೆಕೆಂಡ್."},
+	"ml-IN": {"ഒരു നിമിഷം.", "ശരി, ഒരു സെക്കൻഡ്."},
 }
 
+var fillerCounter atomic.Uint32
+
 func fillerPhrase(language string) string {
-	if p, ok := fillerPhrases[language]; ok {
-		return p
+	phrases, ok := fillerPhrases[language]
+	if !ok {
+		phrases = fillerPhrases["en-IN"]
 	}
-	return "One moment, please."
+	return phrases[int(fillerCounter.Add(1)-1)%len(phrases)]
 }

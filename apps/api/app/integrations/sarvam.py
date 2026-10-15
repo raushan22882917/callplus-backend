@@ -17,8 +17,14 @@ app/integrations/credentials.get_sarvam_api_key. Callers that know which
 tenant they're acting for should always pass it explicitly.
 """
 
+import json
+import logging
+from collections.abc import AsyncIterator
+
 import httpx
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 SARVAM_CHAT_URL = "https://api.sarvam.ai/v1/chat/completions"
 SARVAM_CHAT_MODEL = "sarvam-105b"
@@ -150,3 +156,129 @@ async def transcribe_audio(audio: bytes, mime_type: str, *, api_key: str | None 
     if response.status_code >= 400:
         raise SarvamAPIError(f"Sarvam speech-to-text failed ({response.status_code}): {response.text[:300]}")
     return str(response.json().get("transcript") or "").strip()
+
+
+async def chat_completion_stream(
+    *,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    temperature: float = 0.3,
+    api_key: str | None = None,
+    reasoning_effort: str | None = None,
+    timeout: float = 30.0,
+) -> AsyncIterator[dict]:
+    """Streaming counterpart of chat_completion for live calls: yields
+    {"type": "content", "text": ...} as tokens arrive, then one
+    {"type": "final", "content": full text, "tool_calls": [...], "usage": {...}}
+    shaped exactly like the non-streaming message so callers can reuse it.
+
+    Sarvam streams OpenAI-style server-sent events (verified live 2026-10-15):
+    `delta.content` tokens, `delta.tool_calls` fragments keyed by `index` (id and
+    name on the first fragment, `arguments` split across the rest) and a
+    `[DONE]` sentinel. If the stream can't be opened, or fails before a single
+    token, it falls back to one ordinary request, so a streaming problem never
+    costs the caller their reply. A failure after tokens were delivered is
+    raised as SarvamAPIError, since those words were already spoken."""
+    key = api_key if api_key is not None else get_settings().sarvam_api_key
+    if not key:
+        raise SarvamAPIError("No Sarvam API key configured for this tenant or the platform")
+
+    fast = reasoning_effort == "low"
+    payload: dict = {
+        "model": SARVAM_FAST_CHAT_MODEL if fast else SARVAM_CHAT_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": True,
+    }
+    if tools:
+        payload["tools"] = tools
+    wait = min(timeout, FAST_MODEL_TIMEOUT) if fast else timeout
+
+    delivered = False
+    content_parts: list[str] = []
+    tool_calls: dict[int, dict] = {}
+    usage: dict = {}
+    try:
+        async with _http().stream(
+            "POST",
+            SARVAM_CHAT_URL,
+            headers={"Authorization": f"Bearer {key}"},
+            json=payload,
+            timeout=httpx.Timeout(timeout, read=wait),
+        ) as response:
+            if response.status_code >= 400:
+                body = (await response.aread()).decode("utf-8", "replace")
+                if response.status_code in (401, 403):
+                    raise SarvamAPIError(f"Sarvam chat completion failed ({response.status_code}): {body}")
+                raise _StreamUnavailable(f"HTTP {response.status_code}: {body[:200]}")
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except ValueError:
+                    continue
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+                for choice in chunk.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    text = delta.get("content")
+                    if text:
+                        delivered = True
+                        content_parts.append(text)
+                        yield {"type": "content", "text": text}
+                    for fragment in delta.get("tool_calls") or []:
+                        delivered = True
+                        slot = tool_calls.setdefault(
+                            fragment.get("index", 0),
+                            {"id": None, "type": "function", "function": {"name": "", "arguments": ""}},
+                        )
+                        if fragment.get("id"):
+                            slot["id"] = fragment["id"]
+                        function = fragment.get("function") or {}
+                        if function.get("name"):
+                            slot["function"]["name"] += function["name"]
+                        if function.get("arguments"):
+                            slot["function"]["arguments"] += function["arguments"]
+    except SarvamAPIError:
+        raise
+    except (httpx.HTTPError, _StreamUnavailable) as exc:
+        if delivered:
+            raise SarvamAPIError(f"Sarvam stream interrupted: {exc}") from exc
+        logger.warning("Sarvam stream unavailable (%s); using a normal request", exc)
+        completion = await chat_completion(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            api_key=key,
+            reasoning_effort=reasoning_effort,
+            timeout=timeout,
+        )
+        message = completion["choices"][0]["message"]
+        text = message.get("content") or ""
+        if text:
+            yield {"type": "content", "text": text}
+        yield {
+            "type": "final",
+            "content": text,
+            "tool_calls": message.get("tool_calls") or [],
+            "usage": completion.get("usage") or {},
+        }
+        return
+
+    ordered = [tool_calls[i] for i in sorted(tool_calls)]
+    for i, call in enumerate(ordered):
+        call["id"] = call["id"] or f"call_{i}"
+    yield {
+        "type": "final",
+        "content": "".join(content_parts),
+        "tool_calls": ordered,
+        "usage": usage,
+    }
+
+
+class _StreamUnavailable(Exception):
+    pass

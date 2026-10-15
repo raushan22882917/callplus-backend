@@ -14,7 +14,7 @@ Legend: YES built, PARTIAL exists with limits, NO not built.
 | Voice | Human warm transfer, IVR, queues, ring groups, park, voicemail | YES |
 | Voice | SIP trunking | PARTIAL (schema/config present) |
 | Voice | Answering-machine detection on outbound (per-agent, hang up or leave voicemail) | YES (unit-tested; not yet run against live Twilio) |
-| Voice | Streaming LLM -> TTS (lower first-word latency) | NO (per-sentence TTS only) |
+| Voice | Streaming LLM -> TTS, persistent TTS WebSocket (first word ~0.5s vs ~1.4s) | YES (unit-tested and measured against Sarvam; not yet run on a live phone call) |
 | Voice | Voice cloning / custom voice upload | NO (provider voice selection only) |
 | Campaigns | Batch outbound voice + WhatsApp campaigns, throttling, retries | YES |
 | Campaigns | Calling windows / blocklist / spam protection | YES |
@@ -42,5 +42,4 @@ Vendor pages are marketing; the MCP auth source is a secondary blog, so check th
 official MCP spec before building OAuth.
 
 ## Suggested next builds (highest value first)
-1. Streaming LLM -> TTS for latency.
-2. pgvector semantic search + PDF ingestion.
+1. pgvector semantic search + PDF ingestion.

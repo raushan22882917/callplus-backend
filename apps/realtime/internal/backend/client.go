@@ -6,12 +6,15 @@
 package backend
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -94,6 +97,76 @@ func (c *Client) Turn(callID, transcript string) (*TurnResponse, error) {
 	}
 	return &result, err
 }
+
+// TurnStream is Turn, but the backend sends the reply sentence by sentence as the
+// LLM writes it (newline-delimited JSON, see call_turn_stream in internal.py).
+// onSentence is called, in order, for each speakable sentence; the returned
+// TurnResponse is the final "done" line, whose ReplyText is the full reply.
+// streamed counts the sentences delivered, so the caller knows whether anything
+// was already spoken when an error comes back.
+func (c *Client) TurnStream(callID, transcript string, onSentence func(string)) (result *TurnResponse, streamed int, err error) {
+	payload, err := json.Marshal(map[string]string{"transcript": transcript})
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshal request: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("%s/%s/%s/turn/stream", c.baseURL, c.callsPath, callID), bytes.NewReader(payload))
+	if err != nil {
+		return nil, 0, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", c.internalToken)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("call backend %s: %w", req.URL.Path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, 0, fmt.Errorf("backend %s failed (%d): %s", req.URL.Path, resp.StatusCode, string(body))
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 {
+			var event struct {
+				Type   string `json:"type"`
+				Text   string `json:"text"`
+				Detail string `json:"detail"`
+			}
+			if err := json.Unmarshal(trimmed, &event); err != nil {
+				return nil, streamed, fmt.Errorf("decode stream line: %w", err)
+			}
+			switch event.Type {
+			case "sentence":
+				if strings.TrimSpace(event.Text) != "" {
+					streamed++
+					onSentence(event.Text)
+				}
+			case "done":
+				var done TurnResponse
+				if err := json.Unmarshal(trimmed, &done); err != nil {
+					return nil, streamed, fmt.Errorf("decode done line: %w", err)
+				}
+				done.Raw = json.RawMessage(append([]byte(nil), trimmed...))
+				return &done, streamed, nil
+			case "error":
+				return nil, streamed, fmt.Errorf("backend turn failed: %s", event.Detail)
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil, streamed, errors.New("stream ended before the turn finished")
+			}
+			return nil, streamed, fmt.Errorf("read stream: %w", readErr)
+		}
+	}
+}
+
+// CanStream is false for browser test sessions: the backend's test engine
+// simulates tools and has no streaming variant.
+func (c *Client) CanStream() bool { return c.callsPath == "calls" }
 
 // RetractReply deletes an AI reply the caller never heard (they spoke over it),
 // keeping the transcript and the LLM's history truthful.
