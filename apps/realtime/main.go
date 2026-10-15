@@ -1,0 +1,87 @@
+// Command gateway is the realtime plane: a Go WebSocket server that Twilio
+// Media Streams connects to for each call. See internal/session for the
+// per-call orchestration and app/api/v1/internal.py (the Python side) for
+// the "AI Engine" this gateway calls into.
+package main
+
+import (
+	"log"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/gorilla/websocket"
+
+	"callcenter/realtime/internal/session"
+)
+
+var upgrader = websocket.Upgrader{
+	// Twilio doesn't send an Origin header matching this service's own
+	// origin (there isn't a browser involved), so the default same-origin
+	// check would reject every connection — allow all origins here and
+	// rely on the callId/tenantId the backend already validates per call.
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+func main() {
+	cfg := session.Config{
+		SarvamAPIKey:    requireEnv("SARVAM_API_KEY"),
+		BackendBaseURL:  requireEnv("BACKEND_BASE_URL"),
+		InternalToken:   requireEnv("INTERNAL_SERVICE_TOKEN"),
+		DefaultLanguage: getEnv("DEFAULT_LANGUAGE", "en-IN"),
+	}
+	port := getEnv("PORT", "9000")
+
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	http.HandleFunc("/ws/twilio", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("websocket upgrade failed: %v", err)
+			return
+		}
+		sess := session.New(conn, cfg)
+		go sess.Run()
+	})
+
+	// Flow Studio "Test Audio": a browser speaking the same Media Streams protocol
+	// as Twilio. The backend checks the session ticket when the call starts.
+	http.HandleFunc("/ws/browser-test", func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.URL.Query().Get("session")
+		token := r.URL.Query().Get("token")
+		if !strings.HasPrefix(sessionID, "test_") || token == "" {
+			http.Error(w, "missing test session", http.StatusBadRequest)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("websocket upgrade failed: %v", err)
+			return
+		}
+		sess := session.NewBrowserTest(conn, cfg, sessionID, token)
+		go sess.Run()
+	})
+
+	log.Printf("realtime gateway listening on :%s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Fatalf("server failed: %v", err)
+	}
+}
+
+func requireEnv(key string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		log.Fatalf("missing required environment variable: %s", key)
+	}
+	return value
+}
+
+func getEnv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}

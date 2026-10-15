@@ -1,0 +1,89 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: callcenter
+      POSTGRES_PASSWORD: callcenter
+      POSTGRES_DB: callcenter
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U callcenter"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://callcenter:callcenter@postgres:5432/callcenter
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+      - ./migrations:/app/migrations
+
+  worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    # Passing a command makes entrypoint.sh exec it directly instead of its
+    # default migrate+uvicorn — same image, no separate Dockerfile, and no
+    # race with the api service to run migrations. Default prefork pool is
+    # fine on Linux containers; local macOS dev uses `make worker`
+    # (--pool=solo) instead, since billiard's prefork pool crashes under
+    # macOS's spawn start method.
+    command: ["uv", "run", "--no-sync", "celery", "-A", "app.worker.celery_app", "worker", "--loglevel=info"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://callcenter:callcenter@postgres:5432/callcenter
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+
+  realtime:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/realtime.Dockerfile
+    env_file:
+      - .env
+    environment:
+      BACKEND_BASE_URL: http://api:8000/api/v1/internal
+      PORT: "9000"
+    ports:
+      - "9000:9000"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:

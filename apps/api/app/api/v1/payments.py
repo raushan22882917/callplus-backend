@@ -1,0 +1,211 @@
+from datetime import UTC, datetime
+
+from app.core.deps import RequestContext, get_db, require_permission
+from app.core.permissions import Permissions
+from app.core.repository import TenantScopedRepository
+from app.integrations.razorpay_client import (
+    RazorpayAPIError,
+    create_payment_link,
+    verify_webhook_signature,
+)
+from app.schemas.payment import PaymentLinkCreate, PaymentLinkRead
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from packages.database.models import (
+    Customer,
+    Invoice,
+    InvoiceStatus,
+    Payment,
+    PaymentLink,
+    PaymentLinkStatus,
+    PaymentStatus,
+    Subscription,
+    SubscriptionStatus,
+)
+
+router = APIRouter(tags=["payments"])
+
+
+class PaymentLinkRepository(TenantScopedRepository[PaymentLink]):
+    model = PaymentLink
+
+
+class PaymentRepository(TenantScopedRepository[Payment]):
+    model = Payment
+
+
+@router.get("/payment-links", response_model=list[PaymentLinkRead])
+async def list_payment_links(
+    ctx: RequestContext = Depends(require_permission(Permissions.PAYMENTS_READ)),
+    db: AsyncSession = Depends(get_db),
+) -> list[PaymentLink]:
+    return await PaymentLinkRepository(db, ctx.tenant_id).list()
+
+
+@router.post("/payment-links", response_model=PaymentLinkRead, status_code=status.HTTP_201_CREATED)
+async def create_payment_link_endpoint(
+    payload: PaymentLinkCreate,
+    ctx: RequestContext = Depends(require_permission(Permissions.PAYMENTS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> PaymentLink:
+    customer_name = customer_phone = None
+    if payload.customer_id is not None:
+        customer = await db.get(Customer, payload.customer_id)
+        if customer is None or customer.tenant_id != ctx.tenant_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Customer not found")
+        customer_name, customer_phone = customer.name, customer.phone
+
+    try:
+        response = await create_payment_link(
+            amount_paise=int(round(payload.amount * 100)),
+            currency=payload.currency,
+            description=payload.description,
+            customer_name=customer_name,
+            customer_contact=customer_phone,
+        )
+    except RazorpayAPIError as exc:
+        raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(exc)) from exc
+
+    link = await PaymentLinkRepository(db, ctx.tenant_id).create(
+        customer_id=payload.customer_id,
+        provider_payment_link_id=response["id"],
+        amount_paise=response["amount"],
+        currency=response.get("currency", "INR"),
+        description=payload.description,
+        short_url=response["short_url"],
+        status=PaymentLinkStatus(response.get("status", "created")),
+    )
+    await db.commit()
+    await db.refresh(link)
+    return link
+
+
+@router.post("/webhooks/payment/razorpay")
+async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db)) -> dict:
+    raw_body = await request.body()
+    signature = request.headers.get("X-Razorpay-Signature")
+    if not verify_webhook_signature(raw_body, signature):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid webhook signature")
+
+    body = await request.json()
+    event = body.get("event")
+    payload = body.get("payload", {})
+
+    # Only `payment_link.paid` is handled: it's the one event we can reliably
+    # attribute to a tenant, since `payload.payment_link.entity.id` matches
+    # what we stored as provider_payment_link_id. A bare `payment.captured`
+    # references its order_id, not the payment link id — attributing that
+    # back to a tenant wasn't confirmed against live Razorpay docs (see
+    # app/integrations/razorpay_client.py docstring), so it's deliberately
+    # not handled here rather than guessing at a field mapping.
+    if event == "payment_link.paid":
+        await _handle_payment_link_paid(
+            db,
+            link_entity=payload.get("payment_link", {}).get("entity", {}),
+            payment_entity=payload.get("payment", {}).get("entity", {}),
+        )
+    elif event in (
+        "subscription.activated",
+        "subscription.charged",
+        "subscription.cancelled",
+        "subscription.completed",
+        "subscription.halted",
+    ):
+        await _handle_subscription_event(
+            db,
+            event=event,
+            subscription_entity=payload.get("subscription", {}).get("entity", {}),
+            payment_entity=payload.get("payment", {}).get("entity", {}),
+        )
+
+    await db.commit()
+    return {"status": "ok"}
+
+
+async def _handle_payment_link_paid(
+    db: AsyncSession, *, link_entity: dict, payment_entity: dict
+) -> None:
+    provider_link_id = link_entity.get("id")
+    if not provider_link_id:
+        return
+    result = await db.execute(
+        select(PaymentLink).where(PaymentLink.provider_payment_link_id == provider_link_id)
+    )
+    link = result.scalar_one_or_none()
+    if link is None:
+        return
+    link.status = PaymentLinkStatus.PAID
+
+    payment_id = payment_entity.get("id")
+    if not payment_id:
+        return
+    existing = await db.execute(select(Payment).where(Payment.provider_payment_id == payment_id))
+    if existing.scalar_one_or_none() is not None:
+        return  # webhook retry — already recorded
+
+    db.add(
+        Payment(
+            tenant_id=link.tenant_id,
+            payment_link_id=link.id,
+            provider_payment_id=payment_id,
+            amount_paise=payment_entity.get("amount", link.amount_paise),
+            currency=payment_entity.get("currency", link.currency),
+            status=PaymentStatus.CAPTURED,
+            method=payment_entity.get("method"),
+        )
+    )
+
+
+_SUBSCRIPTION_EVENT_STATUS = {
+    "subscription.activated": SubscriptionStatus.ACTIVE,
+    "subscription.charged": SubscriptionStatus.ACTIVE,
+    "subscription.cancelled": SubscriptionStatus.CANCELLED,
+    "subscription.completed": SubscriptionStatus.COMPLETED,
+    "subscription.halted": SubscriptionStatus.PAST_DUE,
+}
+
+
+async def _handle_subscription_event(
+    db: AsyncSession, *, event: str, subscription_entity: dict, payment_entity: dict
+) -> None:
+    provider_subscription_id = subscription_entity.get("id")
+    if not provider_subscription_id:
+        return
+    result = await db.execute(
+        select(Subscription).where(
+            Subscription.provider_subscription_id == provider_subscription_id
+        )
+    )
+    subscription = result.scalar_one_or_none()
+    if subscription is None:
+        return
+
+    subscription.status = _SUBSCRIPTION_EVENT_STATUS[event]
+    current_end = subscription_entity.get("current_end")
+    if current_end:
+        subscription.current_period_end = datetime.fromtimestamp(current_end, tz=UTC)
+
+    if event == "subscription.charged":
+        payment_id = payment_entity.get("id")
+        if not payment_id:
+            return
+        existing = await db.execute(
+            select(Invoice).where(Invoice.provider_payment_id == payment_id)
+        )
+        if existing.scalar_one_or_none() is not None:
+            return  # webhook retry — already recorded
+
+        db.add(
+            Invoice(
+                tenant_id=subscription.tenant_id,
+                subscription_id=subscription.id,
+                provider_payment_id=payment_id,
+                amount_paise=payment_entity.get("amount", 0),
+                currency=payment_entity.get("currency", "INR"),
+                status=InvoiceStatus.PAID,
+                issued_at=datetime.now(UTC),
+                paid_at=datetime.now(UTC),
+            )
+        )

@@ -1,0 +1,79 @@
+from app.api.v1 import (
+    agent_tests,
+    agents,
+    analytics,
+    assistant,
+    audit,
+    auth,
+    auth_oauth,
+    billing,
+    blocklist,
+    calls,
+    campaigns,
+    channels,
+    crm,
+    customers,
+    developer,
+    guardrails,
+    insights,
+    integrations,
+    internal,
+    internal_flowtest,
+    knowledge,
+    mcp,
+    oauth,
+    operations,
+    payments,
+    platform,
+    roles,
+    telephony,
+    telephony_plus,
+    tenants,
+    tickets,
+    transfer_targets,
+    users,
+    whatsapp,
+    whatsapp_templates,
+    workflows,
+    workspace,
+)
+from fastapi import APIRouter
+
+api_router = APIRouter(prefix="/api/v1")
+api_router.include_router(auth.router)
+api_router.include_router(auth_oauth.router)
+api_router.include_router(users.router)
+api_router.include_router(roles.router)
+api_router.include_router(tenants.router)
+api_router.include_router(customers.router)
+api_router.include_router(tickets.router)
+api_router.include_router(calls.router)
+api_router.include_router(agents.router)
+api_router.include_router(blocklist.router)
+api_router.include_router(telephony.router)
+api_router.include_router(whatsapp.router)
+api_router.include_router(whatsapp_templates.router)
+api_router.include_router(payments.router)
+api_router.include_router(workflows.router)
+api_router.include_router(campaigns.router)
+api_router.include_router(integrations.router)
+api_router.include_router(internal.router)
+api_router.include_router(internal_flowtest.router)
+api_router.include_router(agent_tests.router)
+api_router.include_router(mcp.router)
+api_router.include_router(developer.router)
+api_router.include_router(billing.router)
+api_router.include_router(analytics.router)
+api_router.include_router(audit.router)
+api_router.include_router(knowledge.router)
+api_router.include_router(transfer_targets.router)
+api_router.include_router(assistant.router)
+api_router.include_router(channels.router)
+api_router.include_router(crm.router)
+api_router.include_router(guardrails.router)
+api_router.include_router(insights.router)
+api_router.include_router(operations.router)
+api_router.include_router(telephony_plus.router)
+api_router.include_router(workspace.router)
+api_router.include_router(platform.router)
+api_router.include_router(oauth.router)

@@ -1,0 +1,11 @@
+{
+  "name": "autonxt",
+  "version": "0.1.0",
+  "description": "JavaScript client for the AutoNXT call-center platform API",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": { ".": "./src/index.js" },
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node --test test/" },
+  "license": "MIT"
+}

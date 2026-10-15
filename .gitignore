@@ -1,0 +1,49 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment / secrets (only .env.example is committed)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+id_rsa*
+
+# Local state that can hold data or tokens
+*.db
+*.sqlite
+*.sqlite3
+celerybeat-schedule*
+dump.rdb
+*.rdb
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Test / lint
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Local Redis snapshot
+dump.rdb
+
+# Go
+apps/realtime/gateway
+apps/realtime/*.exe
+
