@@ -73,6 +73,7 @@ def _call_row(call: Call) -> dict:
         "sentiment": call.sentiment,
         "intent": call.intent,
         "outcome": call.outcome,
+        "answered_by": call.answered_by,
     }
 
 

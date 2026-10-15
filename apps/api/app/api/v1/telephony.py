@@ -18,6 +18,7 @@ from app.services.channels_voice import (
     voicemail_twiml_for_unassigned_number,
 )
 from app.services.customer_lookup import find_or_create_customer_by_phone
+from app.services.voicemail_detection import handle_answered_by
 from app.services.telephony_plus import resolve_inbound_route, twiml_for_route
 from app.workflows.dispatch import enqueue_workflow_trigger
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -269,6 +270,25 @@ async def status_callback(request: Request, db: AsyncSession = Depends(get_db)) 
             call.status = new_status
             await db.commit()
 
+    return PlainTextResponse("")
+
+
+@router.post("/amd")
+async def answering_machine_callback(
+    request: Request, db: AsyncSession = Depends(get_db)
+) -> Response:
+    """Twilio's asynchronous AMD verdict for an outbound AI call (see
+    app/services/voicemail_detection.py)."""
+    form = dict((await request.form()).items())
+    call = (
+        await db.execute(select(Call).where(Call.provider_call_sid == form.get("CallSid")))
+    ).scalar_one_or_none()
+    await _validate_request(
+        request, form, auth_token=await _resolve_auth_token(db, call.tenant_id if call else None)
+    )
+    if call is None or call.status in TERMINAL_CALL_STATUSES:
+        return PlainTextResponse("")
+    await handle_answered_by(db, call, form.get("AnsweredBy", "unknown"))
     return PlainTextResponse("")
 
 

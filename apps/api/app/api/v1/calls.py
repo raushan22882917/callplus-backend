@@ -15,6 +15,7 @@ from app.schemas.conversation import MessageRead
 from app.services.call_analysis import analyze_call
 from app.services.call_finalize import emit_call_webhooks
 from app.services.customer_lookup import find_or_create_customer_by_phone
+from app.services.voicemail_detection import amd_callback_for_agent
 from app.services.platform_masking import masked_calls, masked_messages
 from app.services.webhooks import enqueue_webhook_event
 from app.workflows.dispatch import enqueue_workflow_trigger
@@ -179,6 +180,7 @@ async def create_call(
                 voice_webhook_url=voice_webhook_url,
                 status_callback_url=status_callback_url,
                 credentials=credentials,
+                amd_callback_url=await amd_callback_for_agent(db, call.ai_agent_id),
             )
         except (TwilioClientError, TwilioException) as exc:
             await db.rollback()

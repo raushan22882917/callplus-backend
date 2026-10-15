@@ -4,6 +4,7 @@ import uuid
 from sqlalchemy import Boolean, Enum, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql import expression
 
 from packages.database.base import Base
 from packages.database.mixins import TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -61,6 +62,14 @@ class AIAgent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         ),
         nullable=False,
     )
+
+    # Outbound answering-machine detection (Twilio async AMD). When on, a call
+    # that a machine answers is ended, or, if voicemail_message is set, that
+    # message is spoken after the beep and then the call hangs up.
+    detect_voicemail: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=expression.false(), nullable=False
+    )
+    voicemail_message: Mapped[str | None] = mapped_column(String(500))
 
     __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_ai_agent_tenant_name"),)
 

@@ -101,8 +101,13 @@ def place_outbound_call(
     voice_webhook_url: str,
     status_callback_url: str | None = None,
     credentials: TwilioCredentials | None = None,
+    amd_callback_url: str | None = None,
 ) -> str:
     """Returns the Twilio CallSid.
+
+    amd_callback_url turns on asynchronous answering-machine detection: the
+    call connects to the AI immediately and Twilio POSTs the verdict
+    (AnsweredBy) to that URL a few seconds later, so humans hear no delay.
 
     status_callback_url is what tells us a call ended without ever being
     answered (no-answer/busy/failed) — those never reach voice_webhook_url
@@ -116,6 +121,11 @@ def place_outbound_call(
     if status_callback_url:
         kwargs["status_callback"] = status_callback_url
         kwargs["status_callback_method"] = "POST"
+    if amd_callback_url:
+        kwargs["machine_detection"] = "DetectMessageEnd"
+        kwargs["async_amd"] = "true"
+        kwargs["async_amd_status_callback"] = amd_callback_url
+        kwargs["async_amd_status_callback_method"] = "POST"
     call = _client(credentials).calls.create(
         to=to, from_=from_, url=voice_webhook_url, method="POST", **kwargs
     )

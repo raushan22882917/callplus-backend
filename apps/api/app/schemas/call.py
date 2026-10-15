@@ -36,6 +36,7 @@ class CallRead(BaseModel):
     ended_at: datetime | None
     duration_seconds: int | None
     recording_url: str | None
+    answered_by: str | None = None
     summary: str | None = None
     sentiment: str | None = None
     intent: str | None = None

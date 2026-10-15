@@ -27,6 +27,8 @@ class AIAgentCreate(BaseModel):
     no_response_end_message: str = (
         "I'm still not hearing anything, so I'll end the call here. Feel free to call back."
     )
+    detect_voicemail: bool = False
+    voicemail_message: str | None = Field(default=None, max_length=500)
 
     @field_validator("language")
     @classmethod
@@ -50,6 +52,8 @@ class AIAgentUpdate(BaseModel):
     no_response_prompt: str | None = None
     max_duration_message: str | None = None
     no_response_end_message: str | None = None
+    detect_voicemail: bool | None = None
+    voicemail_message: str | None = Field(default=None, max_length=500)
 
     @field_validator("language")
     @classmethod
@@ -76,6 +80,8 @@ class AIAgentRead(BaseModel):
     no_response_prompt: str
     max_duration_message: str
     no_response_end_message: str
+    detect_voicemail: bool
+    voicemail_message: str | None
     created_at: datetime
     updated_at: datetime
 

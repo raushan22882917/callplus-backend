@@ -58,6 +58,9 @@ class Call(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duration_seconds: Mapped[int | None] = mapped_column(Integer)
+    # Twilio answering-machine verdict for outbound calls: human, machine_start,
+    # machine_end_beep, machine_end_silence, machine_end_other, fax, unknown.
+    answered_by: Mapped[str | None] = mapped_column(String(32))
     recording_url: Mapped[str | None] = mapped_column(String(512))
     # Filled by app/services/call_analysis.py once the call ends.
     summary: Mapped[str | None] = mapped_column(Text)

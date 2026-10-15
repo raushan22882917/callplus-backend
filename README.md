@@ -382,6 +382,16 @@ call, an actual WhatsApp message send, an actual Razorpay payment link.
   a superuser — create a dedicated app role). Run the suite under RLS with
   `TEST_RLS=1 pytest`.
 
+## Answering-machine detection
+
+Per AI agent: set `detect_voicemail: true` (and optionally `voicemail_message`)
+via `POST/PATCH /api/v1/ai-agents`. Outbound calls placed for that agent (REST,
+campaigns, MCP `trigger_call`) use Twilio's asynchronous AMD, so humans hear no
+delay. When Twilio reports a machine (`/webhooks/telephony/twilio/amd`), the call
+is hung up, or, if the greeting has finished and a `voicemail_message` is set, that
+message is spoken (Twilio's default voice) and the call ends. The verdict is stored
+as `calls.answered_by`; machine-answered calls get `outcome = "voicemail"`.
+
 ## What's not here yet
 
 - **Semantic (vector) search** — the knowledge base (`/api/v1/knowledge`,

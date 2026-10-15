@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 from app.core.config import get_settings
 from app.integrations.twilio_client import TwilioClientError, place_outbound_call
+from app.services.voicemail_detection import amd_callback_for_agent
 from app.integrations.whatsapp import WhatsAppAPIError, send_template_message
 from app.services import dialer, telephony_plus
 from app.services.webhooks import enqueue_webhook_event
@@ -160,6 +161,7 @@ async def _place_campaign_call(db, campaign: Campaign, phone_number, customer: C
             from_=phone_number.e164_number,
             voice_webhook_url=voice_webhook_url,
             status_callback_url=status_callback_url,
+            amd_callback_url=await amd_callback_for_agent(db, campaign.ai_agent_id),
         )
     except (TwilioClientError, TwilioException):
         # Don't leave a phantom QUEUED row behind; a retry makes a fresh one.

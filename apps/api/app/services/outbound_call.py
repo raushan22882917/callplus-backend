@@ -13,6 +13,7 @@ from app.integrations.credentials import get_twilio_credentials
 from app.integrations.twilio_client import TwilioClientError, place_outbound_call
 from app.services.customer_lookup import find_or_create_customer_by_phone
 from app.services.telephony_plus import check_outbound_allowed
+from app.services.voicemail_detection import amd_callback_for_agent
 from app.workflows.dispatch import enqueue_workflow_trigger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -139,6 +140,7 @@ async def place_ai_outbound_call(
             voice_webhook_url=voice_webhook_url,
             status_callback_url=status_callback_url,
             credentials=credentials,
+            amd_callback_url=await amd_callback_for_agent(db, resolved_agent_id),
         )
     except (TwilioClientError, TwilioException) as exc:
         raise OutboundCallError(str(exc)) from exc
