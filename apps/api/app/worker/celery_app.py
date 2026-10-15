@@ -25,6 +25,10 @@ celery_app.conf.beat_schedule = {
         "task": "operations.send_appointment_reminders",
         "schedule": 5 * 60.0,
     },
+    "csat-send-due-surveys": {
+        "task": "csat.send_due_surveys",
+        "schedule": 60.0,
+    },
     "operations-no-show-followups": {
         "task": "operations.no_show_followups",
         "schedule": 10 * 60.0,

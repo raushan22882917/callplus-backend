@@ -24,7 +24,7 @@ Legend: YES built, PARTIAL exists with limits, NO not built.
 | Agent | Semantic/vector search, PDF/DOCX ingestion | NO |
 | Ops | Tickets, SLA, appointments, follow-ups, promises-to-pay, CRM sync | YES |
 | Ops | QA scoring, analytics, forecasting | YES |
-| Ops | CSAT / post-call survey collection | NO |
+| Ops | CSAT surveys after calls and resolved tickets (WhatsApp/SMS, 1-5 reply, low-score ticket, reporting) | YES (unit/integration-tested; not yet sent through live WhatsApp/Twilio) |
 | Ops | Live supervisor monitor / whisper | PARTIAL (permissions only; not verified end to end) |
 | Platform | Multi-tenant, RBAC + custom roles, SSO (OIDC), TOTP 2FA, audit log | YES |
 | Platform | PII masking, retention policy, API keys with scopes, rate limits, IP allowlist | YES |
@@ -43,5 +43,4 @@ official MCP spec before building OAuth.
 
 ## Suggested next builds (highest value first)
 1. Streaming LLM -> TTS for latency.
-2. CSAT survey after calls/tickets (WhatsApp/SMS).
-3. pgvector semantic search + PDF ingestion.
+2. pgvector semantic search + PDF ingestion.

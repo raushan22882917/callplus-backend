@@ -9,9 +9,9 @@ from datetime import UTC, datetime
 
 from app.core.config import get_settings
 from app.integrations.twilio_client import TwilioClientError, place_outbound_call
-from app.services.voicemail_detection import amd_callback_for_agent
 from app.integrations.whatsapp import WhatsAppAPIError, send_template_message
 from app.services import dialer, telephony_plus
+from app.services.voicemail_detection import amd_callback_for_agent
 from app.services.webhooks import enqueue_webhook_event
 from app.worker.celery_app import celery_app
 from app.worker.tasks import ensure_engine

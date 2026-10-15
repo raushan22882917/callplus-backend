@@ -50,7 +50,7 @@ public **https** origin, since it is the OAuth issuer.
 
 | Tool | Scope | Kind |
 |---|---|---|
-| `list_calls`, `get_call`, `get_call_transcript`, `get_call_stats` | `calls:read` | read |
+| `list_calls`, `get_call`, `get_call_transcript`, `get_call_stats`, `get_csat_summary` | `calls:read` | read |
 | `trigger_call` | `calls:write` | places a real call |
 | `get_customer`, `search_customers`, `list_recent_tickets`, `list_tickets`, `check_availability` | `customers:read` | read |
 | `create_customer`, `create_ticket`, `update_ticket_status`, `add_customer_note`, `schedule_callback`, `book_appointment` | `customers:write` | write |

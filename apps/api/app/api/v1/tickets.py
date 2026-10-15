@@ -10,6 +10,7 @@ from app.schemas.ticket import (
     TicketRead,
     TicketUpdate,
 )
+from app.services import csat as csat_service
 from app.services.operations import apply_sla_safely, reapply_sla_for_priority
 from app.services.webhooks import enqueue_webhook_event
 from app.workflows.dispatch import enqueue_workflow_trigger
@@ -17,7 +18,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import Ticket, TicketComment, WorkflowTrigger
+from packages.database.models import Ticket, TicketComment, TicketStatus, WorkflowTrigger
 
 router = APIRouter(prefix="/tickets", tags=["tickets"])
 
@@ -99,6 +100,8 @@ async def update_ticket(
         await reapply_sla_for_priority(db, ctx.tenant_id, ticket)
     await db.commit()
     await db.refresh(ticket)
+    if payload.status in (TicketStatus.RESOLVED, TicketStatus.CLOSED):
+        await csat_service.schedule_after_ticket(db, ticket)
     return ticket
 
 

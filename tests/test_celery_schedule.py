@@ -11,6 +11,7 @@ def test_every_scheduled_task_is_registered():
         "operations.send_appointment_reminders",
         "operations.no_show_followups",
         "platform.retention_purge",
+        "csat.send_due_surveys",
     } <= scheduled
     missing = scheduled - set(celery_app.tasks)
     assert not missing, f"scheduled but not registered: {sorted(missing)}"

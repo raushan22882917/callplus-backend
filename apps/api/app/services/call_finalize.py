@@ -10,6 +10,7 @@ fire exactly once no matter which path wins the race.
 import logging
 from datetime import UTC, datetime
 
+from app.services import csat
 from app.services.webhooks import enqueue_webhook_event
 from app.workflows.dispatch import enqueue_workflow_trigger
 from sqlalchemy import select
@@ -79,6 +80,8 @@ async def finalize_call(
     await emit_call_webhooks(db, call, status)
     _enqueue_analysis(call)
     _enqueue_qa_scoring(call)
+    if status == CallStatus.COMPLETED:
+        await csat.schedule_after_call(db, call)
     return True
 
 

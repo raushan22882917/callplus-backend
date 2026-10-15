@@ -25,6 +25,7 @@ from app.integrations.channel_senders import (
     send_sms_message,
 )
 from app.integrations.whatsapp import WhatsAppAPIError, send_text_message
+from app.services import csat
 from app.services.agent_engine import run_turn
 from app.services.webhooks import enqueue_webhook_event
 from app.workflows.dispatch import enqueue_workflow_trigger
@@ -389,6 +390,36 @@ async def process_inbound_text(
     ticket: Ticket | None = None
     reply_text: str | None = None
     reply_message_id: uuid.UUID | None = None
+
+    # A "4" in answer to our CSAT survey is feedback, not a question for the AI.
+    thanks = await csat.capture_reply(
+        db,
+        tenant_id=tenant_id,
+        customer_id=conversation.customer_id,
+        channel=channel,
+        text=text,
+    )
+    if thanks is not None:
+        await record_message(
+            db,
+            tenant_id,
+            conversation.id,
+            direction=MessageDirection.INBOUND,
+            sender=MessageSender.CUSTOMER,
+            text=text,
+            provider_message_id=provider_message_id,
+            media_url=media_url,
+        )
+        reply = await record_message(
+            db,
+            tenant_id,
+            conversation.id,
+            direction=MessageDirection.OUTBOUND,
+            sender=MessageSender.AI_AGENT,
+            text=thanks,
+        )
+        await db.commit()
+        return InboundOutcome(conversation, thanks, reply.id)
 
     if agent is not None and ai_paused(conversation):
         agent = None  # staff have taken over this conversation

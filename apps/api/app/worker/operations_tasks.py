@@ -67,3 +67,16 @@ def no_show_followups_task() -> int:
 @celery_app.task(name="operations.run_due_follow_ups")
 def run_due_follow_ups_task() -> dict:
     return asyncio.run(_follow_ups())
+
+
+async def _csat() -> dict:
+    ensure_engine()
+    from app.services import csat
+
+    async with session_scope() as db:
+        return await csat.send_due_surveys(db)
+
+
+@celery_app.task(name="csat.send_due_surveys")
+def send_due_csat_surveys() -> dict:
+    return asyncio.run(_csat())

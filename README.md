@@ -392,6 +392,23 @@ is hung up, or, if the greeting has finished and a `voicemail_message` is set, t
 message is spoken (Twilio's default voice) and the call ends. The verdict is stored
 as `calls.answered_by`; machine-answered calls get `outcome = "voicemail"`.
 
+## CSAT surveys
+
+Off by default; configure with `PATCH /api/v1/csat/settings` (`settings.manage`).
+When enabled, a finished call (at least `min_call_seconds` long) or a ticket moved
+to resolved/closed schedules one survey for that customer, sent `delay_minutes`
+later by the `csat.send_due_surveys` Celery beat job (every minute). `channel` is
+`auto` (WhatsApp while its 24-hour window is open, otherwise SMS), `whatsapp` or
+`sms`; SMS needs the SMS channel enabled so replies reach us. The customer replies
+with `1`-`5` plus an optional comment: it is captured before the AI sees the
+message, answered with `thank_you`, stored on the survey, and fires a
+`csat.received` webhook. Ratings at or below `low_score_ticket_threshold` open a
+high-priority ticket. A customer is surveyed at most once per `cooldown_hours`,
+and unanswered surveys expire after `expire_hours`. Results: `GET /api/v1/csat/summary`
+(average, CSAT % = share of 4-5, distribution, response rate, call vs ticket) and
+`GET /api/v1/csat/surveys`; the MCP tool `get_csat_summary` returns the same.
+Survey text is whatever you set in `question`, so write it in your customers' language.
+
 ## What's not here yet
 
 - **Semantic (vector) search** — the knowledge base (`/api/v1/knowledge`,

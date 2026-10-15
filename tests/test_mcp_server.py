@@ -121,3 +121,12 @@ async def test_input_validation():
         await extended.list_calls(_ctx(key), status="bogus")
     stats = await extended.get_call_stats(_ctx(key), days=999)
     assert stats["total_calls"] == 0
+
+
+async def test_csat_summary_tool_is_scoped_and_tenant_bound():
+    t = await _tenant("zeta")
+    reader = await _dev_key(t, ["calls:read"])
+    assert (await extended.get_csat_summary(_ctx(reader)))["responses"] == 0
+    no_scope = await _dev_key(t, ["agents:read"])
+    with pytest.raises(ToolError, match="calls:read"):
+        await extended.get_csat_summary(_ctx(no_scope))

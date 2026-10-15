@@ -11,6 +11,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from app.mcp.server import _READ, _WRITE, _tenant_session, _tool_ctx, mcp
+from app.services import csat
 from app.tools import handlers, operations_tools
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
@@ -266,7 +267,19 @@ async def update_ticket_status(ctx: Context, ticket_id: str, status: str) -> dic
         if ticket is None or ticket.tenant_id != tenant_id:
             raise ToolError("Ticket not found")
         ticket.status = new_status
+        await db.flush()
+        if new_status in (TicketStatus.RESOLVED, TicketStatus.CLOSED):
+            await csat.schedule_after_ticket(db, ticket)
         return {"ticket_id": ticket_id, "status": new_status.value}
+
+
+@mcp.tool(annotations=_READ)
+async def get_csat_summary(ctx: Context, days: int = 30) -> dict:
+    """Customer-satisfaction results for the last N days (1-365): surveys sent,
+    response rate, average rating (1-5), CSAT % (share of 4-5 ratings), the
+    rating distribution and a split by call vs ticket."""
+    async with _tenant_session(ctx, "calls:read") as (db, tenant_id):
+        return await csat.summary(db, tenant_id, days=days)
 
 
 @mcp.tool(annotations=_READ)
