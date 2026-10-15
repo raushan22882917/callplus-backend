@@ -57,7 +57,7 @@ def _sign(body: bytes) -> str:
     # META_WHATSAPP_APP_SECRET is forced to "" for the whole test run (see
     # tests/conftest.py), so the webhook signature is HMAC-SHA256 with an
     # empty key.
-    digest = hmac.new(b"", body, hashlib.sha256).hexdigest()
+    digest = hmac.new(b"test-meta-app-secret", body, hashlib.sha256).hexdigest()
     return f"sha256={digest}"
 
 

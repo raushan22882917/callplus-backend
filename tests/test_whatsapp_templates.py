@@ -140,7 +140,7 @@ async def test_create_from_library_submit_get_approved_and_send_from_inbox(
         "event": "APPROVED", "message_template_id": "tmpl-1", "message_template_name": "booking_reminder", "reason": "NONE"}}]}]}).encode()
     hook = await client.post(
         "/api/v1/webhooks/whatsapp/meta", content=body,
-        headers={"X-Hub-Signature-256": "sha256=" + hmac.new(b"", body, hashlib.sha256).hexdigest(), "Content-Type": "application/json"},
+        headers={"X-Hub-Signature-256": "sha256=" + hmac.new(b"test-meta-app-secret", body, hashlib.sha256).hexdigest(), "Content-Type": "application/json"},
     )
     assert hook.status_code == 200
     approved = (await client.get("/api/v1/whatsapp-templates", headers=auth)).json()[0]
@@ -170,7 +170,7 @@ async def test_create_from_library_submit_get_approved_and_send_from_inbox(
         "messages": [{"id": "in-1", "from": "919811122233", "type": "text", "text": {"body": "hi"}}]}}]}]}).encode()
     await client.post(
         "/api/v1/webhooks/whatsapp/meta", content=inbound,
-        headers={"X-Hub-Signature-256": "sha256=" + hmac.new(b"", inbound, hashlib.sha256).hexdigest(), "Content-Type": "application/json"},
+        headers={"X-Hub-Signature-256": "sha256=" + hmac.new(b"test-meta-app-secret", inbound, hashlib.sha256).hexdigest(), "Content-Type": "application/json"},
     )
     conversation_id = (await client.get("/api/v1/channels/inbox", headers=auth)).json()[0]["id"]
     thread = (await client.get(f"/api/v1/channels/conversations/{conversation_id}", headers=auth)).json()

@@ -14,14 +14,16 @@ for _key in (
     "TWILIO_ACCOUNT_SID",
     "TWILIO_AUTH_TOKEN",
     "SARVAM_API_KEY",
-    "META_WHATSAPP_APP_SECRET",
     "RAZORPAY_KEY_ID",
     "RAZORPAY_KEY_SECRET",
-    "RAZORPAY_WEBHOOK_SECRET",
     "SMTP_HOST",
 ):
     os.environ[_key] = ""
 
+# Webhook signature checks fail closed when their secret is unset, so the
+# tests sign with fixed non-empty secrets instead of "unset".
+os.environ["META_WHATSAPP_APP_SECRET"] = "test-meta-app-secret"
+os.environ["RAZORPAY_WEBHOOK_SECRET"] = "test-razorpay-webhook-secret"
 os.environ["AUTH_RATE_LIMIT_ENABLED"] = "false"
 os.environ["CAMPAIGN_VOICE_INTERVAL_SECONDS"] = "0"
 os.environ["CAMPAIGN_WHATSAPP_INTERVAL_SECONDS"] = "0"

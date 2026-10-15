@@ -156,7 +156,7 @@ async def test_whatsapp_question_about_a_booking_is_answered_from_the_calendar(
     }}]}]}).encode()
     resp = await client.post(
         "/api/v1/webhooks/whatsapp/meta", content=body,
-        headers={"X-Hub-Signature-256": "sha256=" + hmac.new(b"", body, hashlib.sha256).hexdigest(), "Content-Type": "application/json"},
+        headers={"X-Hub-Signature-256": "sha256=" + hmac.new(b"test-meta-app-secret", body, hashlib.sha256).hexdigest(), "Content-Type": "application/json"},
     )
     assert resp.status_code == 200
     system_prompt, tools = prompts[0]

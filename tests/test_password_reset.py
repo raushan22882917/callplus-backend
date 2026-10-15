@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from app.core.security import create_purpose_token
+from app.core.security import create_purpose_token, password_fingerprint
 from httpx import AsyncClient
 from sqlalchemy import select
 
@@ -51,7 +51,10 @@ async def test_forgot_password_reset_password_then_login(client: AsyncClient) ->
     # build a token the same way forgot-password does, to exercise reset.
     user = await _load_user_by_email("owner@reset-co.com")
     token = create_purpose_token(
-        user_id=user.id, purpose="password_reset", expires_delta=timedelta(minutes=30)
+        user_id=user.id,
+        purpose="password_reset",
+        expires_delta=timedelta(minutes=30),
+        fingerprint=password_fingerprint(user.hashed_password),
     )
 
     bad_reset = await client.post(
@@ -64,6 +67,11 @@ async def test_forgot_password_reset_password_then_login(client: AsyncClient) ->
         "/api/v1/auth/reset-password", json={"token": token, "new_password": "newpass123"}
     )
     assert reset_resp.status_code == 200, reset_resp.text
+    # The link is single-use: the password hash changed, so it no longer matches.
+    reused = await client.post(
+        "/api/v1/auth/reset-password", json={"token": token, "new_password": "another-pass1"}
+    )
+    assert reused.status_code == 400
 
     old_login = await client.post(
         "/api/v1/auth/login", json={"email": "owner@reset-co.com", "password": "supersecret1"}

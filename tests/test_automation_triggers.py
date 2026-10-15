@@ -217,7 +217,7 @@ def _final_completion(content: str) -> dict:
 
 
 def _sign(body: bytes) -> str:
-    digest = hmac.new(b"", body, hashlib.sha256).hexdigest()
+    digest = hmac.new(b"test-meta-app-secret", body, hashlib.sha256).hexdigest()
     return f"sha256={digest}"
 
 

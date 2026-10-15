@@ -17,25 +17,31 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
+from app.core.audit import log_audit_event
 from app.core.config import get_settings
-from app.mcp.auth import McpAuthError, resolve_tenant
+from app.mcp.auth import McpAuthError, McpPrincipal, resolve_principal
 from app.services.outbound_call import OutboundCallError, place_ai_outbound_call
 from app.tools import handlers
 from app.tools.context import ToolContext
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.session import session_scope
+from packages.database.session import session_scope, set_tenant_context
 
 mcp = MCPServer(
     "AutoNxt Call Center",
     instructions=(
-        "Tools for a multi-tenant AI call-center platform: look up "
-        "customers, manage support tickets, send WhatsApp messages, create "
-        "payment links, and place outbound AI phone calls. Every call acts "
-        "on behalf of whichever tenant issued the connected API key."
+        "Tools for a multi-tenant AI call-center platform: look up and search "
+        "customers, manage tickets, review calls and transcripts, inspect AI "
+        "agents, phone numbers and campaigns, check availability and book "
+        "appointments, search the knowledge base, send WhatsApp messages, "
+        "create payment links, and place outbound AI phone calls. Every call "
+        "acts on behalf of whichever tenant issued the connected API key. "
+        "Read-only tools are marked as such; confirm with the user before "
+        "calling tools that place calls, send messages, or create payment links."
     ),
 )
 
@@ -71,14 +77,41 @@ mcp_asgi_app = mcp.streamable_http_app(
 
 
 @asynccontextmanager
-async def _tenant_session(ctx: Context) -> AsyncIterator[tuple[AsyncSession, uuid.UUID]]:
+async def _tenant_session(
+    ctx: Context, scope: str | None = None
+) -> AsyncIterator[tuple[AsyncSession, uuid.UUID]]:
     async with session_scope() as db:
-        try:
-            tenant_id = await resolve_tenant(ctx.headers, db)
-        except McpAuthError as exc:
-            raise ToolError(str(exc)) from exc
-        yield db, tenant_id
+        principal = await _principal(ctx, db, scope)
+        yield db, principal.tenant_id
+        if scope is not None and scope.endswith(":write"):
+            await log_audit_event(
+                db,
+                tenant_id=principal.tenant_id,
+                actor_user_id=principal.user_id,
+                action="mcp.write_tool_call",
+                resource_type="mcp_api_key",
+                resource_id=principal.key_id,
+                extra={"scope": scope},
+            )
         await db.commit()
+
+
+async def _principal(ctx: Context, db: AsyncSession, scope: str | None) -> McpPrincipal:
+    try:
+        principal = await resolve_principal(ctx.headers, db)
+    except McpAuthError as exc:
+        raise ToolError(str(exc)) from exc
+    if scope is not None and not principal.allows(scope):
+        raise ToolError(f"This API key does not have the '{scope}' scope")
+    # Same Postgres row-level-security backstop REST requests get.
+    await set_tenant_context(db, principal.tenant_id)
+    return principal
+
+
+_READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
+_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
+# Reaches a real person outside the platform (call, WhatsApp, payment link).
+_OUTBOUND = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True)
 
 
 def _tool_ctx(db: AsyncSession, tenant_id: uuid.UUID) -> ToolContext:
@@ -92,50 +125,50 @@ def _tool_ctx(db: AsyncSession, tenant_id: uuid.UUID) -> ToolContext:
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 async def get_customer(ctx: Context, phone: str | None = None) -> dict:
     """Look up a customer by phone number, in E.164 format (e.g. +14155551234)."""
-    async with _tenant_session(ctx) as (db, tenant_id):
+    async with _tenant_session(ctx, "customers:read") as (db, tenant_id):
         return await handlers.get_customer(_tool_ctx(db, tenant_id), phone=phone)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 async def list_recent_tickets(ctx: Context, customer_id: str, limit: int = 5) -> dict:
     """List a customer's most recent support tickets."""
-    async with _tenant_session(ctx) as (db, tenant_id):
+    async with _tenant_session(ctx, "customers:read") as (db, tenant_id):
         return await handlers.list_recent_tickets(
             _tool_ctx(db, tenant_id), customer_id=customer_id, limit=limit
         )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def create_ticket(
     ctx: Context, subject: str, customer_id: str, priority: str = "medium"
 ) -> dict:
     """Open a new support ticket for a customer. priority is one of
     low, medium, high, urgent."""
-    async with _tenant_session(ctx) as (db, tenant_id):
+    async with _tenant_session(ctx, "customers:write") as (db, tenant_id):
         return await handlers.create_ticket(
             _tool_ctx(db, tenant_id), subject=subject, priority=priority, customer_id=customer_id
         )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def add_customer_note(ctx: Context, note: str, customer_id: str) -> dict:
     """Record a free-text note on a customer's timeline."""
-    async with _tenant_session(ctx) as (db, tenant_id):
+    async with _tenant_session(ctx, "customers:write") as (db, tenant_id):
         return await handlers.add_customer_note(
             _tool_ctx(db, tenant_id), note=note, customer_id=customer_id
         )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def schedule_callback(
     ctx: Context, requested_time: str, customer_id: str, note: str = ""
 ) -> dict:
     """Record a request for a human agent to call the customer back. Does
     not book a calendar slot — it flags the request for staff to action."""
-    async with _tenant_session(ctx) as (db, tenant_id):
+    async with _tenant_session(ctx, "customers:write") as (db, tenant_id):
         return await handlers.schedule_callback(
             _tool_ctx(db, tenant_id),
             requested_time=requested_time,
@@ -144,16 +177,16 @@ async def schedule_callback(
         )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_OUTBOUND)
 async def send_whatsapp_message(ctx: Context, phone: str, message: str) -> dict:
     """Send a WhatsApp text message from the tenant's connected WhatsApp number."""
-    async with _tenant_session(ctx) as (db, tenant_id):
+    async with _tenant_session(ctx, "messages:write") as (db, tenant_id):
         return await handlers.send_whatsapp_message(
             _tool_ctx(db, tenant_id), phone=phone, message=message
         )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_OUTBOUND)
 async def create_customer_payment_link(
     ctx: Context,
     amount: float,
@@ -163,7 +196,7 @@ async def create_customer_payment_link(
 ) -> dict:
     """Create a Razorpay payment link (INR or USD) for a customer. Returns a
     short URL to send to the customer."""
-    async with _tenant_session(ctx) as (db, tenant_id):
+    async with _tenant_session(ctx, "messages:write") as (db, tenant_id):
         return await handlers.create_customer_payment_link(
             _tool_ctx(db, tenant_id),
             amount=amount,
@@ -173,7 +206,7 @@ async def create_customer_payment_link(
         )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_OUTBOUND)
 async def trigger_call(
     ctx: Context,
     to_number: str,
@@ -185,7 +218,7 @@ async def trigger_call(
     the tenant has exactly one AI agent and phone number configured;
     otherwise specify which agent should handle the call and which of the
     tenant's numbers it should call from."""
-    async with _tenant_session(ctx) as (db, tenant_id):
+    async with _tenant_session(ctx, "calls:write") as (db, tenant_id):
         try:
             call = await place_ai_outbound_call(
                 db,
@@ -197,3 +230,7 @@ async def trigger_call(
         except OutboundCallError as exc:
             raise ToolError(str(exc)) from exc
         return {"call_id": str(call.id), "status": call.status.value, "to_number": call.to_number}
+
+
+# Registered on import: the wider tool/prompt catalogue lives in its own module.
+from app.mcp import extended as _extended  # noqa: E402,F401

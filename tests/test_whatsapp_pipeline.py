@@ -35,7 +35,7 @@ def _auth(tokens: dict) -> dict:
 
 
 def _sign(body: bytes) -> str:
-    return "sha256=" + hmac.new(b"", body, hashlib.sha256).hexdigest()
+    return "sha256=" + hmac.new(b"test-meta-app-secret", body, hashlib.sha256).hexdigest()
 
 
 def _payload(phone_number_id: str, *messages: dict, statuses: list | None = None) -> bytes:

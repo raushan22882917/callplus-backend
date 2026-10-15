@@ -12,13 +12,36 @@ authorization server here, just one opaque token per tenant.
 
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from app.core.api_keys import hash_api_key
+from app.core.api_keys import API_KEY_PREFIXES, hash_api_key
+from app.core.rate_limit import enforce_rate_limit
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import McpApiKey
+from packages.database.models import ApiKey, McpApiKey, Tenant, TenantStatus
+
+
+@dataclass(frozen=True)
+class McpPrincipal:
+    """Who an MCP request acts as. `scopes` is None for a dedicated MCP key
+    (full tool access, the original behaviour) and the key's scope list for a
+    developer API key (ak_live_/ak_test_), which a tool call is checked
+    against — so one key format works for both the REST API and MCP."""
+
+    tenant_id: uuid.UUID
+    key_id: uuid.UUID
+    user_id: uuid.UUID | None
+    scopes: frozenset[str] | None
+
+    def allows(self, scope: str) -> bool:
+        if self.scopes is None:
+            return True
+        family = scope.split(":")[0]
+        # A write scope implies read of the same family.
+        return scope in self.scopes or (scope.endswith(":read") and f"{family}:write" in self.scopes)
 
 
 class McpAuthError(Exception):
@@ -38,6 +61,10 @@ def _bearer_token(headers: Mapping[str, str] | None) -> str | None:
 
 
 async def resolve_tenant(headers: Mapping[str, str] | None, db: AsyncSession) -> uuid.UUID:
+    return (await resolve_principal(headers, db)).tenant_id
+
+
+async def resolve_principal(headers: Mapping[str, str] | None, db: AsyncSession) -> McpPrincipal:
     token = _bearer_token(headers)
     if token is None:
         raise McpAuthError(
@@ -46,11 +73,37 @@ async def resolve_tenant(headers: Mapping[str, str] | None, db: AsyncSession) ->
             "POST /api/v1/mcp/api-keys."
         )
 
-    result = await db.execute(select(McpApiKey).where(McpApiKey.hashed_key == hash_api_key(token)))
-    key = result.scalar_one_or_none()
-    if key is None or key.revoked_at is not None:
-        raise McpAuthError("Invalid or revoked API key")
+    hashed = hash_api_key(token)
+    now = datetime.now(UTC)
+    if token.startswith(API_KEY_PREFIXES):
+        dev_key = (
+            await db.execute(select(ApiKey).where(ApiKey.hashed_key == hashed))
+        ).scalar_one_or_none()
+        if (
+            dev_key is None
+            or dev_key.revoked_at is not None
+            or (dev_key.expires_at is not None and dev_key.expires_at <= now)
+        ):
+            raise McpAuthError("Invalid, expired or revoked API key")
+        key_id, tenant_id = dev_key.id, dev_key.tenant_id
+        user_id, scopes = dev_key.created_by_user_id, frozenset(dev_key.scopes or [])
+        dev_key.last_used_at = now
+    else:
+        key = (
+            await db.execute(select(McpApiKey).where(McpApiKey.hashed_key == hashed))
+        ).scalar_one_or_none()
+        if key is None or key.revoked_at is not None:
+            raise McpAuthError("Invalid or revoked API key")
+        key_id, tenant_id = key.id, key.tenant_id
+        user_id, scopes = key.created_by_user_id, None
+        key.last_used_at = now
 
-    key.last_used_at = datetime.now(UTC)
+    tenant = await db.get(Tenant, tenant_id)
+    if tenant is None or tenant.status not in (TenantStatus.ACTIVE, TenantStatus.TRIAL):
+        raise McpAuthError("Account is not active")
+    try:
+        await enforce_rate_limit(key_id)
+    except HTTPException as exc:
+        raise McpAuthError(str(exc.detail)) from exc
     await db.flush()
-    return key.tenant_id
+    return McpPrincipal(tenant_id=tenant_id, key_id=key_id, user_id=user_id, scopes=scopes)
