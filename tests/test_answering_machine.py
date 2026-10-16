@@ -158,3 +158,27 @@ async def test_agent_api_exposes_the_settings(client: AsyncClient):
     assert patched.status_code == 200 and patched.json()["detect_voicemail"] is False
     too_long = await client.post("/api/v1/ai-agents", headers=headers, json={"name": "X", "voicemail_message": "a" * 501})
     assert too_long.status_code == 422
+
+
+def test_redirect_live_maps_twilio_not_in_progress_to_call_not_live() -> None:
+    from unittest.mock import MagicMock
+
+    from app.integrations.twilio_client import CallNotLiveError, TwilioClientError, redirect_live
+    from twilio.base.exceptions import TwilioRestException
+
+    def client_raising(code: int) -> MagicMock:
+        client = MagicMock()
+        client.calls.return_value.update.side_effect = TwilioRestException(
+            400, "/Calls/CA1", "Unable to update record: Call is not in-progress. Cannot redirect.", code
+        )
+        return client
+
+    with pytest.raises(CallNotLiveError):
+        redirect_live(client=client_raising(21220), call_sid="CA1", twiml="<Response/>")
+    with pytest.raises(CallNotLiveError):
+        redirect_live(client=client_raising(20404), call_sid="CA1", twiml="<Response/>")
+    # still a TwilioClientError, so existing handlers keep working
+    assert issubclass(CallNotLiveError, TwilioClientError)
+    # any other Twilio failure is not swallowed or relabelled
+    with pytest.raises(TwilioRestException):
+        redirect_live(client=client_raising(21211), call_sid="CA1", twiml="<Response/>")

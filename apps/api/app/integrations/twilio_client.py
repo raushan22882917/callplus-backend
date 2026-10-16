@@ -14,6 +14,7 @@ it's for.
 
 from app.core.config import get_settings
 from app.integrations.credentials import TwilioCredentials
+from twilio.base.exceptions import TwilioRestException
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
 from twilio.twiml.voice_response import Connect, Dial, VoiceResponse
@@ -21,6 +22,25 @@ from twilio.twiml.voice_response import Connect, Dial, VoiceResponse
 
 class TwilioClientError(Exception):
     pass
+
+
+class CallNotLiveError(TwilioClientError):
+    """The call already ended (the caller hung up, or it was never answered),
+    so Twilio can no longer redirect or modify it."""
+
+
+# 21220: "Call is not in-progress. Cannot redirect."  20404: the Call SID is gone.
+_CALL_NOT_LIVE_CODES = {21220, 20404}
+
+
+def redirect_live(*, client: Client, call_sid: str, twiml: str) -> None:
+    """Replace a running call's TwiML, raising CallNotLiveError if it already ended."""
+    try:
+        client.calls(call_sid).update(twiml=twiml)
+    except TwilioRestException as exc:
+        if exc.code in _CALL_NOT_LIVE_CODES:
+            raise CallNotLiveError(f"Call {call_sid} is no longer in progress") from exc
+        raise
 
 
 def _resolve(credentials: TwilioCredentials | None) -> TwilioCredentials:
@@ -136,7 +156,7 @@ def redirect_call(
     *, call_sid: str, twiml: str, credentials: TwilioCredentials | None = None
 ) -> None:
     """Used for a live human-transfer: replaces the running call's TwiML."""
-    _client(credentials).calls(call_sid).update(twiml=twiml)
+    redirect_live(client=_client(credentials), call_sid=call_sid, twiml=twiml)
 
 
 def start_call_recording(

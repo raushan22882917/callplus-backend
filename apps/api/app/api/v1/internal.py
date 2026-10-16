@@ -15,6 +15,7 @@ from app.core.internal_auth import require_internal_service
 from app.integrations.credentials import get_sarvam_api_key, get_twilio_credentials
 from app.integrations.twilio_client import (
     MAX_RING_TARGETS,
+    CallNotLiveError,
     TwilioClientError,
     build_hangup_twiml,
     build_transfer_twiml,
@@ -416,6 +417,8 @@ async def _redirect_or_log(db: AsyncSession, call: Call, twiml: str) -> None:
     try:
         credentials = await get_twilio_credentials(db, call.tenant_id)
         redirect_call(call_sid=call.provider_call_sid, twiml=twiml, credentials=credentials)
+    except CallNotLiveError:
+        logger.info("call %s already ended on Twilio; nothing to redirect", call.id)
     except (TwilioClientError, TwilioException):
         logger.warning("Failed to redirect call %s", call.id, exc_info=True)
 

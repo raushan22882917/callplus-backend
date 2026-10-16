@@ -13,7 +13,12 @@ from xml.sax.saxutils import escape
 
 from app.core.config import get_settings
 from app.integrations.credentials import get_twilio_credentials
-from app.integrations.twilio_client import TwilioClientError, build_hangup_twiml, redirect_call
+from app.integrations.twilio_client import (
+    CallNotLiveError,
+    TwilioClientError,
+    build_hangup_twiml,
+    redirect_call,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from twilio.base.exceptions import TwilioException
 
@@ -72,6 +77,8 @@ async def handle_answered_by(db: AsyncSession, call: Call, answered_by: str) -> 
         try:
             credentials = await get_twilio_credentials(db, call.tenant_id)
             redirect_call(call_sid=call.provider_call_sid, twiml=twiml, credentials=credentials)
+        except CallNotLiveError:
+            logger.info("call %s hung up before the AMD verdict could be acted on", call.id)
         except (TwilioClientError, TwilioException):
             logger.warning("failed to act on AMD verdict for call %s", call.id, exc_info=True)
     return action

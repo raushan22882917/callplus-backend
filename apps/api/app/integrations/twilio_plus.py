@@ -6,7 +6,7 @@ missing account raises TwilioClientError with a clear message."""
 from dataclasses import dataclass
 
 from app.integrations.credentials import TwilioCredentials
-from app.integrations.twilio_client import TwilioClientError, _client
+from app.integrations.twilio_client import TwilioClientError, _client, redirect_live
 
 
 @dataclass(frozen=True)
@@ -81,4 +81,4 @@ def delete_elastic_sip_trunk(*, trunk_sid: str, credentials: TwilioCredentials |
 def redirect_live_call(
     *, call_sid: str, twiml: str, credentials: TwilioCredentials | None = None
 ) -> None:
-    _client(credentials).calls(call_sid).update(twiml=twiml)
+    redirect_live(client=_client(credentials), call_sid=call_sid, twiml=twiml)

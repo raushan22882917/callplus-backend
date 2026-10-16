@@ -23,7 +23,7 @@ from app.core.permissions import Permissions
 from app.core.repository import TenantScopedRepository
 from app.integrations import twilio_plus
 from app.integrations.credentials import get_twilio_credentials
-from app.integrations.twilio_client import TwilioClientError, place_outbound_call
+from app.integrations.twilio_client import CallNotLiveError, TwilioClientError, place_outbound_call
 from app.schemas import telephony_plus as schemas
 from app.services import dialer, ivr
 from app.services import telephony_plus as svc
@@ -645,6 +645,10 @@ async def park_call(
             ),
             credentials=credentials,
         )
+    except CallNotLiveError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "The caller has already hung up, so the call can't be parked"
+        ) from exc
     except (TwilioClientError, TwilioException) as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Twilio could not park the call: {exc}") from exc
     db.add(parked)
