@@ -583,3 +583,33 @@ async def test_settings_list_hides_secrets_and_validates_keys(client: AsyncClien
     bad = await client.put("/api/v1/channels/settings/sms", headers=auth, json={"ai_agent_id": str(uuid.uuid4())})
     assert bad.status_code == 422
     assert (await client.put("/api/v1/channels/settings/fax", headers=auth, json={})).status_code == 404
+
+
+async def test_widget_design_options_are_validated_and_served(client: AsyncClient) -> None:
+    auth = await _signup(client, slug="design-co")
+    design = {
+        "template": "bold",
+        "color": "#e11d48",
+        "position": "left",
+        "subtitle": "We reply in minutes",
+        "launcher_label": "Chat with us",
+        "lead_form": True,
+        "show_email": False,
+    }
+    cfg = await _enable(client, auth, "web_chat", config=design)
+    config = (await client.get(f"/api/v1/channels/webchat/{cfg['public_key']}/config")).json()
+    assert config["template"] == "bold" and config["color"] == "#e11d48"
+    assert config["position"] == "left" and config["launcher_label"] == "Chat with us"
+    assert config["show_email"] is False and config["show_message"] is True
+
+    for bad in (
+        {"template": "neon"},
+        {"position": "top"},
+        {"color": "red"},
+        {"subtitle": "x" * 81},
+        {"show_email": "no"},
+    ):
+        resp = await client.put(
+            "/api/v1/channels/settings/web_chat", headers=auth, json={"config": bad}
+        )
+        assert resp.status_code == 422, bad

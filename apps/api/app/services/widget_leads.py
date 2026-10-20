@@ -15,7 +15,16 @@ from app.services.outbound_call import OutboundCallError, place_ai_outbound_call
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import Call, CallStatus, ChannelSettings, Customer, Tenant
+from packages.database.models import (
+    AgentStatus,
+    AIAgent,
+    Call,
+    CallStatus,
+    ChannelSettings,
+    Customer,
+    PhoneNumber,
+    Tenant,
+)
 from packages.database.models.crm import CrmLead, CrmNote, CrmStage, CrmTask, CrmTaskType
 from packages.database.models.widget_lead import WidgetLead
 
@@ -96,13 +105,31 @@ def consent_text_for(config: dict, business: str) -> str:
     return template.replace("{business}", business)[:600]
 
 
+WIDGET_TEMPLATES = ("modern", "minimal", "bold", "soft")
+
+
 def widget_options(config: dict, business: str) -> dict:
     """What the widget needs to know, safe to show any visitor."""
+    template = config.get("template")
     return {
         "lead_form": bool(config.get("lead_form")),
         "require_phone": bool(config.get("require_phone")),
         "call_me": bool(config.get("call_me")),
         "consent_text": consent_text_for(config, business),
+        "template": template if template in WIDGET_TEMPLATES else "modern",
+        "subtitle": str(config.get("subtitle") or "")[:80],
+        "position": "left" if config.get("position") == "left" else "right",
+        "launcher_label": str(config.get("launcher_label") or "")[:30],
+        "lead_heading": str(config.get("lead_heading") or "")[:80],
+        "lead_intro": str(config.get("lead_intro") or "")[:200],
+        "button_label": str(config.get("button_label") or "")[:30],
+        "show_email": config.get("show_email") is not False,
+        "show_message": config.get("show_message") is not False,
+        "quick_replies": [
+            q.strip()[:60]
+            for q in (config.get("quick_replies") or [])
+            if isinstance(q, str) and q.strip()
+        ][:4],
     }
 
 
@@ -176,23 +203,34 @@ async def capture_lead(
     utm: dict | None,
     user_agent: str | None,
     ip: str | None,
+    answers: list[dict] | None = None,
+    require_contact: bool = True,
 ) -> tuple[WidgetLead, Customer | None]:
     """Stores the visitor as a customer, a CRM lead and a widget lead (the
-    consent and attribution record). Needs at least a phone or an email."""
-    if not phone and not email:
+    consent and attribution record). Needs at least a phone or an email, unless
+    the business's own form has no way to ask for either (`require_contact` False)."""
+    if not phone and not email and require_contact:
         raise LeadError("Please give us a phone number or an email address.")
     if phone:
         customer, _ = await find_or_create_customer_by_phone(db, row.tenant_id, phone)
         if email and not customer.email:
             customer.email = email
-    else:
+    elif email:
         customer, _ = await find_or_create_customer_by_email(db, row.tenant_id, email, name)
+    else:
+        # No contact detail to match on: this visit is its own customer.
+        customer = Customer(tenant_id=row.tenant_id, name=(name or "Website visitor")[:255])
+        db.add(customer)
+        await db.flush()
     if name and (customer.name in (customer.phone, customer.email)):
         customer.name = name[:255]
 
     crm_lead = await _upsert_crm_lead(
         db, row.tenant_id, customer, name=name, phone=phone, email=email, interest=interest, page_url=page_url
     )
+    if answers:
+        # Visible on the CRM lead too, under their own labels.
+        crm_lead.custom_fields = {**(crm_lead.custom_fields or {}), "chat_form": {a["label"]: a["value"] for a in answers}}
     lead = WidgetLead(
         tenant_id=row.tenant_id,
         conversation_id=conversation_id,
@@ -202,6 +240,7 @@ async def capture_lead(
         phone=phone,
         email=email,
         interest=(interest or None) and interest[:2000],
+        answers=list(answers or []),
         page_url=(page_url or None) and page_url[:2048],
         referrer=(referrer or None) and referrer[:2048],
         utm={k: str(v)[:200] for k, v in (utm or {}).items() if v},
@@ -314,13 +353,18 @@ async def request_call(
     # Read now: after a rollback these objects are expired and cannot be read.
     lead_id, tenant_id, ai_agent_id = lead.id, row.tenant_id, row.ai_agent_id
     crm_lead_id = lead.crm_lead_id
+    config = dict(row.config or {})
 
     try:
+        agent_id, from_number = await choose_call_setup(
+            db, tenant_id, channel_agent_id=ai_agent_id, config=config, to_number=number
+        )
         call = await place_ai_outbound_call(
             db,
             tenant_id,
             to_number=number,
-            ai_agent_id=str(ai_agent_id) if ai_agent_id else None,
+            ai_agent_id=str(agent_id),
+            from_number=from_number,
         )
     except OutboundCallError as exc:
         # Drops whatever the failed attempt half-created; the consent and the
@@ -393,7 +437,71 @@ async def on_call_finished(db: AsyncSession, call: Call) -> None:
     await db.commit()
 
 
-async def call_lead(db: AsyncSession, lead: WidgetLead, ai_agent_id: uuid.UUID | None) -> Call:
+def calling_code(e164: str) -> str | None:
+    """The country calling code at the start of an E.164 number ("+919876543210" -> "91")."""
+    digits = (e164 or "").lstrip("+")
+    known = set(DIAL_CODES.values())
+    return next((digits[:n] for n in (3, 2, 1) if digits[:n] in known), None)
+
+
+async def choose_call_setup(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    channel_agent_id: uuid.UUID | None,
+    config: dict,
+    to_number: str,
+) -> tuple[uuid.UUID, str]:
+    """Which AI agent makes the call, and from which of the business's numbers.
+
+    The platform's own rule is "exactly one number" which fails for any business with
+    two, or whose chat has no agent chosen. Here the business never has to think about it:
+      * agent: the chat's agent if it is active; else an active agent that owns a number;
+        else the oldest active agent.
+      * number: the one the business picked in the chat settings (`call_from_number`);
+        else one assigned to that agent, else any of its numbers. Among several, a number
+        from the visitor's own country comes first (it looks local and is trusted more),
+        then the oldest.
+    Raises OutboundCallError saying what is missing when there is nothing to call with."""
+    numbers = list(
+        (await db.execute(select(PhoneNumber).where(PhoneNumber.tenant_id == tenant_id).order_by(PhoneNumber.created_at)))
+        .scalars()
+        .all()
+    )
+    if not numbers:
+        raise OutboundCallError("This business has no phone number to call from. Add one under Phone numbers.")
+    agents = list(
+        (
+            await db.execute(
+                select(AIAgent)
+                .where(AIAgent.tenant_id == tenant_id, AIAgent.status == AgentStatus.ACTIVE)
+                .order_by(AIAgent.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # The agent the owner attached to the chat is used as chosen, whatever its status.
+    chosen_agent = await db.get(AIAgent, channel_agent_id) if channel_agent_id else None
+    if chosen_agent is not None and chosen_agent.tenant_id != tenant_id:
+        chosen_agent = None
+    if chosen_agent is None and not agents:
+        raise OutboundCallError("This business has no active AI agent to make the call.")
+    owners = {n.ai_agent_id for n in numbers}
+    agent = chosen_agent or next((a for a in agents if a.id in owners), agents[0])
+
+    chosen = str(config.get("call_from_number") or "").strip()
+    pool = [n for n in numbers if n.e164_number == chosen] if chosen else []
+    if not pool:
+        pool = [n for n in numbers if n.ai_agent_id == agent.id] or numbers
+    visitor_code = calling_code(to_number)
+    best = sorted(pool, key=lambda n: (calling_code(n.e164_number) != visitor_code, n.created_at))[0]
+    return agent.id, best.e164_number
+
+
+async def call_lead(
+    db: AsyncSession, lead: WidgetLead, ai_agent_id: uuid.UUID | None, config: dict | None = None
+) -> Call:
     """A team member asks the AI agent to call (or retry) a lead. Only leads who
     agreed to a call can be dialled."""
     if not lead.consent_call:
@@ -413,8 +521,11 @@ async def call_lead(db: AsyncSession, lead: WidgetLead, ai_agent_id: uuid.UUID |
     await db.commit()
     lead_id, tenant_id, phone = lead.id, lead.tenant_id, lead.phone  # readable after a rollback
     try:
+        agent_id, from_number = await choose_call_setup(
+            db, tenant_id, channel_agent_id=ai_agent_id, config=config or {}, to_number=phone
+        )
         call = await place_ai_outbound_call(
-            db, tenant_id, to_number=phone, ai_agent_id=str(ai_agent_id) if ai_agent_id else None
+            db, tenant_id, to_number=phone, ai_agent_id=str(agent_id), from_number=from_number
         )
     except OutboundCallError as exc:
         await db.rollback()

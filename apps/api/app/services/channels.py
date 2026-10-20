@@ -25,8 +25,9 @@ from app.integrations.channel_senders import (
     send_sms_message,
 )
 from app.integrations.whatsapp import WhatsAppAPIError, send_text_message
-from app.services import csat
+from app.services import csat, plans
 from app.services.agent_engine import run_turn
+from app.services.knowledge import search as knowledge_search
 from app.services.webhooks import enqueue_webhook_event
 from app.workflows.dispatch import enqueue_workflow_trigger
 from redis.exceptions import RedisError
@@ -382,6 +383,7 @@ async def process_inbound_text(
     customer_created: bool = False,
     source: str,
     media_url: str | None = None,
+    chat_options: dict | None = None,
 ) -> InboundOutcome:
     """Stores the customer's message, lets the AI agent answer (when one is
     attached) and commits. Sending the reply is the caller's job so each
@@ -424,6 +426,34 @@ async def process_inbound_text(
     if agent is not None and ai_paused(conversation):
         agent = None  # staff have taken over this conversation
 
+    extra_system = ""
+    if agent is not None and source == "web_chat" and (chat_options or {}).get("use_knowledge") is not False:
+        extra_system, canned_reply = await _knowledge_for_chat(db, tenant_id, text, chat_options or {})
+        if canned_reply is not None:
+            await record_message(
+                db,
+                tenant_id,
+                conversation.id,
+                direction=MessageDirection.INBOUND,
+                sender=MessageSender.CUSTOMER,
+                text=text,
+                provider_message_id=provider_message_id,
+                media_url=media_url,
+            )
+            reply = await record_message(
+                db,
+                tenant_id,
+                conversation.id,
+                direction=MessageDirection.OUTBOUND,
+                sender=MessageSender.AI_AGENT,
+                text=canned_reply,
+            )
+            await db.commit()
+            return InboundOutcome(conversation, canned_reply, reply.id)
+
+    if agent is not None and source == "web_chat":
+        extra_system += str((chat_options or {}).get("_visitor_context") or "")
+
     if agent is not None:
         result = await run_turn(
             db=db,
@@ -431,6 +461,7 @@ async def process_inbound_text(
             agent=agent,
             conversation=conversation,
             customer_text=text,
+            extra_system=extra_system,
         )
         reply_text, reply_message_id = result.reply_text, result.reply_message_id
         if result.transfer_requested:
@@ -530,7 +561,11 @@ async def deliver_reply(
         if not to:
             raise ChannelSendError("The customer has no phone number")
         try:
-            result = await send_text_message(account, to=to, body=text)
+            await plans.ensure_whatsapp_available(db, tenant_id)
+            # The caller saves this reply as a Message, which is what gets counted.
+            result = await send_text_message(account, to=to, body=text, metered=False)
+        except plans.PlanLimitError as exc:
+            raise ChannelSendError(exc.message) from exc
         except WhatsAppAPIError as exc:
             raise ChannelSendError(str(exc)) from exc
         messages = result.get("messages") or [{}]
@@ -572,6 +607,41 @@ async def deliver_reply(
         )
 
     raise ChannelSendError(f"Replies are not supported on the {channel.value} channel")
+
+
+DEFAULT_KB_FALLBACK = "I don't have that information yet. Please leave your details and a team member will get back to you."
+
+
+async def knowledge_hits_for_visitors(db: AsyncSession, tenant_id: uuid.UUID, text: str, limit: int = 4) -> list[dict]:
+    """Knowledge-base matches a website visitor may be answered from (internal-only documents are left out)."""
+    hits = await knowledge_search(db, tenant_id=tenant_id, query=text, limit=limit)
+    return [h for h in hits if not h["internal_only"]]
+
+
+async def _knowledge_for_chat(
+    db: AsyncSession, tenant_id: uuid.UUID, text: str, options: dict
+) -> tuple[str, str | None]:
+    """Looks the visitor's question up in the business's knowledge base.
+
+    Returns (extra instructions for the AI, a ready-made reply to send instead of asking the AI).
+    The reply is only set in "answer only from my knowledge base" mode when nothing matched."""
+    hits = await knowledge_hits_for_visitors(db, tenant_id, text)
+    strict = bool(options.get("kb_only"))
+    if not hits:
+        if strict:
+            return "", (str(options.get("fallback_message") or "").strip()[:300] or DEFAULT_KB_FALLBACK)
+        return "", None
+    excerpts = "\n---\n".join(f"[{h['title']}] {h['content'][:900]}" for h in hits)
+    note = (
+        "\n\nKnowledge base excerpts that match the customer's latest message. Answer from them; "
+        "quote prices, hours and policies only as written here.\n" + excerpts
+    )
+    if strict:
+        note += (
+            "\nAnswer ONLY from these excerpts. If they do not cover the question, say you do not know "
+            "and offer to connect a team member."
+        )
+    return note, None
 
 
 async def send_ai_reply(db: AsyncSession, outcome: InboundOutcome) -> dict:

@@ -15,7 +15,16 @@ from app.services.outbound_call import OutboundCallError
 from httpx import AsyncClient
 from sqlalchemy import select
 
-from packages.database.models import Call, CallDirection, CallStatus, Customer
+from packages.database.models import (
+    AgentStatus,
+    AIAgent,
+    Call,
+    CallDirection,
+    CallStatus,
+    Customer,
+    PhoneNumber,
+    Tenant,
+)
 from packages.database.models.crm import CrmLead, CrmNote, CrmStage, CrmTask
 from packages.database.models.widget_lead import WidgetLead
 from packages.database.session import session_scope
@@ -29,6 +38,10 @@ async def _signup(client: AsyncClient, slug: str) -> dict:
         json={"company_name": f"{slug} salon", "tenant_slug": slug, "full_name": "Owner", "email": f"o@{slug}.com", "password": "supersecret1"},
     )
     assert resp.status_code == 201, resp.text
+    async with session_scope() as db:  # a working business has a number to call from
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == slug))).scalar_one()
+        db.add(PhoneNumber(tenant_id=tenant.id, e164_number=f"+1555{uuid.uuid4().int % 10**7:07d}"))
+        await db.commit()
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
 
 
@@ -81,7 +94,7 @@ def dialled(monkeypatch):
         call = Call(tenant_id=tenant_id, direction=CallDirection.OUTBOUND, status=CallStatus.RINGING, to_number=to_number, from_number="+13613095598")
         db.add(call)
         await db.commit()
-        calls.append({"to": to_number, "agent": ai_agent_id, "call_id": call.id})
+        calls.append({"to": to_number, "agent": ai_agent_id, "call_id": call.id, "from": from_number})
         return call
 
     monkeypatch.setattr(wl, "place_ai_outbound_call", fake)
@@ -500,3 +513,149 @@ async def test_other_businesses_and_anonymous_users_see_nothing(client: AsyncCli
     assert (await client.get("/api/v1/widget-leads")).status_code == 401
     assert (await client.get("/api/v1/widget-leads/export")).status_code == 401
     assert uuid.UUID(lead_id)
+
+
+# --- which agent and which number make the call -------------------------------------------------------
+
+
+def test_the_country_of_a_number_is_read_from_its_calling_code():
+    assert wl.calling_code("+919876543210") == "91"
+    assert wl.calling_code("+14155550100") == "1"
+    assert wl.calling_code("+971501234567") == "971"
+    assert wl.calling_code("+442079460958") == "44"
+    assert wl.calling_code("+999123") is None and wl.calling_code("") is None
+
+
+async def _business(slug="num-biz", agents=(("Receptionist", "active"),), numbers=()):
+    """A business with the given agents and numbers (number, assigned agent name or None), oldest first."""
+    from packages.database.models import Tenant as T
+
+    async with session_scope() as db:
+        tenant = T(name=slug, slug=slug)
+        db.add(tenant)
+        await db.flush()
+        by_name = {}
+        for name, status in agents:
+            agent = AIAgent(tenant_id=tenant.id, name=name, status=AgentStatus(status))
+            db.add(agent)
+            await db.flush()
+            by_name[name] = agent.id
+        for number, owner in numbers:
+            db.add(PhoneNumber(tenant_id=tenant.id, e164_number=number, ai_agent_id=by_name.get(owner)))
+            await db.flush()
+        await db.commit()
+        return tenant.id, by_name
+
+
+async def _choose(tenant_id, channel_agent=None, config=None, to="+919876543210"):
+    async with session_scope() as db:
+        return await wl.choose_call_setup(db, tenant_id, channel_agent_id=channel_agent, config=config or {}, to_number=to)
+
+
+async def test_the_chats_agent_and_its_only_number_are_used():
+    tenant, ag = await _business("one-num", numbers=[("+14155550101", "Receptionist")])
+    assert await _choose(tenant, ag["Receptionist"]) == (ag["Receptionist"], "+14155550101")
+
+
+async def test_a_business_with_two_numbers_and_no_agent_on_the_chat_still_gets_a_call():
+    # What happened in production: the chat had no agent and the business owns two numbers.
+    tenant, ag = await _business("two-num", numbers=[("+13613095598", "Receptionist"), ("+12602541794", "Receptionist")])
+    agent_id, number = await _choose(tenant, None, to="+919699234605")
+    assert agent_id == ag["Receptionist"] and number == "+13613095598"  # the oldest, no number is from India
+
+
+async def test_a_number_from_the_visitors_own_country_is_preferred():
+    tenant, ag = await _business("local-num", numbers=[("+13613095598", "Receptionist"), ("+912240001234", "Receptionist"), ("+919800000000", "Receptionist")])
+    assert (await _choose(tenant, ag["Receptionist"], to="+919699234605"))[1] == "+912240001234"  # oldest Indian one
+    assert (await _choose(tenant, ag["Receptionist"], to="+14155550100"))[1] == "+13613095598"
+    assert (await _choose(tenant, ag["Receptionist"], to="+442079460958"))[1] == "+13613095598"  # no match: oldest
+
+
+async def test_the_number_the_owner_picked_wins_but_only_if_it_is_theirs():
+    tenant, ag = await _business("pick-num", numbers=[("+13613095598", "Receptionist"), ("+912240001234", "Receptionist")])
+    assert (await _choose(tenant, ag["Receptionist"], {"call_from_number": "+13613095598"}, to="+919699234605"))[1] == "+13613095598"
+    # a number that isn't theirs is ignored, never dialled from
+    assert (await _choose(tenant, ag["Receptionist"], {"call_from_number": "+19999999999"}, to="+919699234605"))[1] == "+912240001234"
+
+
+async def test_numbers_not_assigned_to_the_agent_are_used_when_it_has_none():
+    tenant, ag = await _business("unassigned", agents=(("A", "active"), ("B", "active")), numbers=[("+14155550102", None), ("+14155550103", "B")])
+    assert await _choose(tenant, ag["A"]) == (ag["A"], "+14155550102")  # A has none: any number, oldest first
+    assert await _choose(tenant, ag["B"]) == (ag["B"], "+14155550103")  # B's own number first
+
+
+async def test_with_no_agent_chosen_the_one_that_owns_a_number_is_used():
+    tenant, ag = await _business("owner-agent", agents=(("First", "active"), ("Second", "active")), numbers=[("+14155550104", "Second")])
+    assert (await _choose(tenant, None))[0] == ag["Second"]
+
+
+async def test_with_nothing_else_the_oldest_active_agent_is_used_and_drafts_are_skipped():
+    tenant, ag = await _business("oldest", agents=(("Draft", "draft"), ("Live", "active")), numbers=[("+14155550105", None)])
+    assert (await _choose(tenant, None))[0] == ag["Live"]
+
+
+async def test_an_agent_the_owner_attached_is_used_even_if_still_a_draft():
+    tenant, ag = await _business("draft-ok", agents=(("Draft", "draft"), ("Live", "active")), numbers=[("+14155550106", None)])
+    assert (await _choose(tenant, ag["Draft"]))[0] == ag["Draft"]
+
+
+async def test_another_businesss_agent_is_never_used():
+    mine, mine_ag = await _business("mine", numbers=[("+14155550107", None)])
+    _, theirs_ag = await _business("theirs", agents=(("Other", "active"),))
+    assert (await _choose(mine, theirs_ag["Other"]))[0] == mine_ag["Receptionist"]
+
+
+async def test_clear_reasons_when_there_is_nothing_to_call_with():
+    no_numbers, _ = await _business("no-numbers")
+    with pytest.raises(OutboundCallError, match="no phone number"):
+        await _choose(no_numbers)
+    no_agents, _ = await _business("no-agents", agents=(("Draft", "draft"),), numbers=[("+14155550108", None)])
+    with pytest.raises(OutboundCallError, match="no active AI agent"):
+        await _choose(no_agents)
+
+
+async def test_the_visitor_gets_the_call_from_the_right_number_even_when_the_chat_has_no_agent(client: AsyncClient, dialled):
+    auth = await _signup(client, "prod-case")
+    async with session_scope() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "prod-case"))).scalar_one()
+        db.add(PhoneNumber(tenant_id=tenant.id, e164_number="+912240009999"))  # a second number: the production situation
+        db.add(AIAgent(tenant_id=tenant.id, name="Receptionist", status=AgentStatus.ACTIVE))
+        await db.commit()
+    resp = await client.put("/api/v1/channels/settings/web_chat", headers=auth, json={"enabled": True, "config": {"lead_form": True, "call_me": True}})
+    key = resp.json()["public_key"]
+    assert resp.json()["ai_agent_id"] is None
+    token = (await _post(client, key, "session", {**VISITOR, "phone": "+919699234605"})).json()["session_token"]
+    ok = await _post(client, key, "call-request", {"session_token": token, "consent": True})
+    assert ok.status_code == 200 and ok.json()["status"] == "calling", ok.text
+    assert dialled[0]["from"] == "+912240009999" and dialled[0]["agent"]  # an Indian number for an Indian visitor
+
+
+async def test_a_business_with_no_number_hands_the_visitor_to_staff_with_a_clear_reason(client: AsyncClient, dialled):
+    auth = await _signup(client, "nonum-case")
+    async with session_scope() as db:
+        for number in (await db.execute(select(PhoneNumber))).scalars():
+            await db.delete(number)
+        await db.commit()
+    key = await _channel(client, auth)
+    token = await _session(client, key)
+    resp = await _post(client, key, "call-request", {"session_token": token, "consent": True})
+    assert resp.status_code == 200 and resp.json()["status"] == "queued" and "phone number" not in resp.text
+    assert dialled == []
+    async with session_scope() as db:
+        lead = (await db.execute(select(WidgetLead))).scalar_one()
+        assert lead.call_status == "failed" and "no phone number" in lead.last_call_error
+        assert (await db.execute(select(CrmTask))).scalar_one().title.startswith("Call back")
+
+
+async def test_staff_calling_again_uses_the_same_choice(client: AsyncClient, dialled):
+    auth = await _signup(client, "staff-num")
+    key = await _channel(client, auth)
+    await _post(client, key, "call-request", {"session_token": await _session(client, key), "consent": True})
+    async with session_scope() as db:
+        for lead in (await db.execute(select(WidgetLead))).scalars():
+            lead.call_requested_at = datetime.now(UTC) - timedelta(hours=1)
+            lead.call_status = "no_answer"
+        await db.commit()
+    lead_id = (await client.get("/api/v1/widget-leads", headers=auth)).json()[0]["id"]
+    again = await client.post(f"/api/v1/widget-leads/{lead_id}/call", headers=auth)
+    assert again.status_code == 200 and len(dialled) == 2 and dialled[1]["from"] == dialled[0]["from"]

@@ -12,6 +12,8 @@ class WidgetLeadRead(BaseModel):
     phone: str | None
     email: str | None
     interest: str | None
+    # What the visitor typed into the business's own form fields: [{key, label, type, value}].
+    answers: list[dict] = []
     page_url: str | None
     consent_call: bool
     call_status: str

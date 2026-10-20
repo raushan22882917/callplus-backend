@@ -36,6 +36,9 @@ class WidgetLead(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     phone: Mapped[str | None] = mapped_column(String(32))
     email: Mapped[str | None] = mapped_column(String(255))
     interest: Mapped[str | None] = mapped_column(Text)
+    # Everything the visitor filled in on the business's own form, as the business defined it:
+    # [{"key", "label", "type", "value"}]. The labels are kept as they were when the visitor answered.
+    answers: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]", nullable=False)
 
     # Where the visitor came from.
     page_url: Mapped[str | None] = mapped_column(String(2048))

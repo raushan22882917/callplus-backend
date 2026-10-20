@@ -585,6 +585,7 @@ async def _prepare_turn(
     agent: AIAgent,
     conversation: Conversation,
     customer_text: str,
+    extra_system: str = "",
 ) -> _TurnPrep:
     """Saves the customer's message and builds everything the LLM call needs."""
     await _persist_message(
@@ -614,6 +615,7 @@ async def _prepare_turn(
     )
     guardrail_rules = await guardrails.load_rules(db, tenant_id, agent.id)
     system_prompt += guardrails.build_guardrail_prompt(guardrail_rules)
+    system_prompt += extra_system
     messages: list[dict] = [{"role": "system", "content": system_prompt}, *history]
     if is_voice:
         messages = with_language_hint(messages, agent.language)
@@ -695,6 +697,7 @@ async def run_turn(
     agent: AIAgent,
     conversation: Conversation,
     customer_text: str,
+    extra_system: str = "",
 ) -> TurnResult:
     prep = await _prepare_turn(
         db=db,
@@ -702,6 +705,7 @@ async def run_turn(
         agent=agent,
         conversation=conversation,
         customer_text=customer_text,
+        extra_system=extra_system,
     )
     return await _finish_buffered(
         db=db,

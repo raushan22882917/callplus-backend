@@ -56,15 +56,16 @@ from app.schemas.channels import (
 )
 from app.services import channels as svc
 from app.services import channels_voice as voice
+from app.services import chat_form, plans, widget_install, widget_leads
 from app.services import whatsapp_templates as tpl
-from app.services import widget_leads
 from app.services.customer_lookup import find_or_create_customer_by_phone
 from app.services.outbound_call import OutboundCallError, place_ai_outbound_call
 from app.services.webhooks import enqueue_webhook_event
 from app.workflows.dispatch import enqueue_workflow_trigger
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse, PlainTextResponse
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.database.models import (
@@ -72,6 +73,7 @@ from packages.database.models import (
     Conversation,
     ConversationChannel,
     Customer,
+    KnowledgeDocument,
     Message,
     MessageDirection,
     MessageSender,
@@ -159,13 +161,48 @@ def _cors_json(request: Request, row: ChannelSettings | None, data: dict, code: 
 def _origin_forbidden(request: Request, row: ChannelSettings) -> bool:
     origin = request.headers.get("origin")
     allowed = (row.config or {}).get("allowed_origins") or []
+    if origin and origin == _own_origin():
+        return False  # the test page served by this API
     return bool(allowed and origin and origin not in allowed)
 
 
+def _own_origin() -> str:
+    parsed = urlparse(get_settings().public_base_url)
+    return f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else ""
+
+
+_WIDGET_TEXT_LIMITS = {
+    "subtitle": 80,
+    "launcher_label": 30,
+    "lead_heading": 80,
+    "lead_intro": 200,
+    "button_label": 30,
+    "fallback_message": 300,
+}
+
+
 def _validate_widget_config(config: dict) -> None:
-    for key in ("lead_form", "require_phone", "call_me"):
+    for key in ("lead_form", "require_phone", "call_me", "show_email", "show_message", "use_knowledge", "kb_only"):
         if key in config and not isinstance(config[key], bool):
             raise HTTPException(422, f"{key} must be true or false")
+    if config.get("template") not in (None, "", *widget_leads.WIDGET_TEMPLATES):
+        raise HTTPException(422, f"template must be one of: {', '.join(widget_leads.WIDGET_TEMPLATES)}")
+    if config.get("position") not in (None, "", "left", "right"):
+        raise HTTPException(422, "position must be left or right")
+    color = config.get("color")
+    if color not in (None, "") and not (isinstance(color, str) and re.fullmatch(r"#[0-9a-fA-F]{3,8}", color)):
+        raise HTTPException(422, "color must be a hex colour like #2563eb")
+    replies = config.get("quick_replies")
+    if replies is not None and (
+        not isinstance(replies, list)
+        or len(replies) > 4
+        or not all(isinstance(q, str) and len(q) <= 60 for q in replies)
+    ):
+        raise HTTPException(422, "quick_replies must be up to 4 suggestions of at most 60 characters")
+    for key, limit in _WIDGET_TEXT_LIMITS.items():
+        value = config.get(key)
+        if value not in (None, "") and not (isinstance(value, str) and len(value) <= limit):
+            raise HTTPException(422, f"{key} must be text of at most {limit} characters")
     countries = config.get("allowed_countries")
     if countries is not None and (
         not isinstance(countries, list)
@@ -181,6 +218,14 @@ def _validate_widget_config(config: dict) -> None:
         raise HTTPException(422, "consent_text must be text of at most 600 characters")
     if config.get("require_phone") and not config.get("lead_form"):
         raise HTTPException(422, "require_phone needs lead_form to be on")
+    number = config.get("call_from_number")
+    if number is not None and not (isinstance(number, str) and re.fullmatch(r"(\+\d{7,15})?", number.strip())):
+        raise HTTPException(422, "call_from_number must be a phone number like +14155550100")
+    if "form_fields" in config:
+        try:
+            config["form_fields"] = chat_form.clean_fields(config["form_fields"])
+        except chat_form.FieldConfigError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
 
 def _msg(m: Message) -> dict:
@@ -542,7 +587,94 @@ async def meta_webhook(request: Request, db: AsyncSession = Depends(get_db)) -> 
     return {"status": "ok", "handled": handled}
 
 
+class KnowledgeCheckPayload(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
+
+
+@router.post("/web-chat/knowledge-check")
+async def webchat_knowledge_check(
+    payload: KnowledgeCheckPayload,
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """What the website chat's AI would be given from the knowledge base for this question.
+    Lets a business test its documents without spending a model call."""
+    hits = await svc.knowledge_hits_for_visitors(db, ctx.tenant_id, payload.question, limit=4)
+    total = (
+        await db.execute(
+            select(func.count()).select_from(KnowledgeDocument).where(KnowledgeDocument.tenant_id == ctx.tenant_id)
+        )
+    ).scalar_one()
+    return {
+        "documents": int(total),
+        "matches": [{"title": h["title"], "excerpt": h["content"][:400], "score": round(h["score"], 3)} for h in hits],
+    }
+
+
+@router.get("/web-chat/status")
+async def webchat_install_status(
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Which websites have loaded the widget lately; lets the setup wizard confirm an install."""
+    row = (await _all_settings(db, ctx.tenant_id)).get("web_chat")
+    if row is None or not row.public_key:
+        return {"connected": False, "sites": [], "test_url": None}
+    sites = await widget_install.seen_sites(row.public_key)
+    base = get_settings().public_base_url.rstrip("/")
+    return {"connected": bool(sites), "sites": sites[:5], "test_url": f"{base}/api/v1/channels/webchat/try/{row.public_key}"}
+
+
 # ------------------------------------------------------------------ website live chat (public)
+
+
+_PREVIEW_HTML = (
+    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>'
+    '<body style="margin:0;background:#eceff4"><div style="padding:28px 32px;font-family:system-ui,sans-serif">'
+    '<div style="height:12px;width:90px;border-radius:6px;background:#d9dee6;margin-bottom:26px"></div>'
+    '<div style="height:26px;width:62%;border-radius:8px;background:#cbd2dc;margin-bottom:12px"></div>'
+    '<div style="height:12px;width:80%;border-radius:6px;background:#d9dee6;margin-bottom:8px"></div>'
+    '<div style="height:12px;width:68%;border-radius:6px;background:#d9dee6;margin-bottom:26px"></div>'
+    '<div style="display:flex;gap:14px"><div style="flex:1;height:96px;border-radius:12px;background:#dde2ea"></div>'
+    '<div style="flex:1;height:96px;border-radius:12px;background:#dde2ea"></div></div></div>'
+    '<script src="/api/v1/channels/webchat/widget.js" data-key="preview" data-preview></script></body></html>'
+)
+
+
+_TRY_HTML = (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+    "<title>Try your chat widget</title></head>"
+    '<body style="margin:0;font-family:system-ui,sans-serif;background:#f6f7f9;color:#0f172a">'
+    '<div style="max-width:560px;margin:72px auto;padding:0 24px"><h1 style="font-size:22px;margin:0 0 8px">Your chat widget</h1>'
+    '<p style="color:#475569;line-height:1.5;margin:0 0 6px">This is a private test page. The chat bubble in the corner is your real widget, '
+    "so anything you submit here appears in your Chat leads.</p></div>"
+    '<script src="/api/v1/channels/webchat/widget.js" data-key="__KEY__"></script></body></html>'
+)
+
+
+@router.get("/webchat/try/{public_key}", include_in_schema=False)
+async def webchat_try_page(public_key: str, db: AsyncSession = Depends(get_db)) -> Response:
+    """A plain page with the real widget on it, for trying the chat before installing it on a site."""
+    row = await svc.get_settings_by_public_key(db, public_key, "web_chat")
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat is not available")
+    return Response(
+        _TRY_HTML.replace("__KEY__", public_key),
+        media_type="text/html",
+        headers={"Content-Security-Policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; frame-ancestors 'none'", "X-Robots-Tag": "noindex"},
+    )
+
+
+@router.get("/webchat/preview", include_in_schema=False)
+async def webchat_preview() -> Response:
+    """A page that shows the chat widget with demo data. The Chat widget designer frames it,
+    so only the app's own origins may do so; it never talks to the database."""
+    ancestors = " ".join(get_settings().cors_allow_origins) or "'none'"
+    return Response(
+        _PREVIEW_HTML,
+        media_type="text/html",
+        headers={"Content-Security-Policy": f"default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; frame-ancestors {ancestors}"},
+    )
 
 
 @router.get("/webchat/widget.js")
@@ -584,6 +716,11 @@ async def webchat_config(public_key: str, request: Request, db: AsyncSession = D
         return _cors_json(request, None, {"detail": "Chat is not available"}, 404)
     config = row.config or {}
     tenant = await db.get(Tenant, row.tenant_id)
+    await widget_install.note_seen(
+        public_key,
+        widget_install.site_of(request.headers.get("origin"), request.headers.get("referer")),
+        own_origin=_own_origin(),
+    )
     return _cors_json(
         request,
         row,
@@ -591,6 +728,7 @@ async def webchat_config(public_key: str, request: Request, db: AsyncSession = D
             "title": config.get("title") or "Chat with us",
             "color": config.get("color") or "#2563eb",
             **widget_leads.widget_options(config, tenant.name if tenant else "us"),
+            "fields": chat_form.effective_fields(config),
         },
     )
 
@@ -613,8 +751,21 @@ async def webchat_session(public_key: str, request: Request, db: AsyncSession = 
     email = str(payload.get("email") or "").strip()[:254]
     name = str(payload.get("name") or "").strip()[:120] or None
     capture = bool(config.get("lead_form"))
+    custom_fields = chat_form.configured_fields(config) if capture else []
+    collected = None
     phone = None
-    if capture:
+    if custom_fields:
+        if payload.get("website"):  # the bot trap, as below
+            return _cors_json(request, row, {"session_token": secrets.token_urlsafe(32), "messages": []})
+        tenant = await db.get(Tenant, row.tenant_id)
+        try:
+            collected = chat_form.collect_answers(
+                custom_fields, payload.get("answers"), tenant.country if tenant else None
+            )
+        except widget_leads.LeadError as exc:
+            return _cors_json(request, row, {"detail": exc.message}, exc.http_status)
+        name, phone, email = collected.name, collected.phone, collected.email or ""
+    elif capture:
         # A honeypot field that real visitors never see; bots fill it.
         if payload.get("website"):
             return _cors_json(request, row, {"session_token": secrets.token_urlsafe(32), "messages": []})
@@ -657,7 +808,9 @@ async def webchat_session(public_key: str, request: Request, db: AsyncSession = 
             name=name,
             phone=phone,
             email=email or None,
-            interest=str(payload.get("interest") or "").strip()[:2000] or None,
+            interest=(collected.interest if collected else str(payload.get("interest") or "").strip()[:2000]) or None,
+            answers=collected.answers if collected else None,
+            require_contact=collected is None,
             page_url=str(payload.get("page_url") or "")[:2048] or None,
             referrer=str(payload.get("referrer") or "")[:2048] or None,
             utm={k: v for k, v in utm.items() if k.startswith("utm_")},
@@ -676,6 +829,7 @@ async def webchat_session(public_key: str, request: Request, db: AsyncSession = 
                 "phone": lead.phone,
                 "email": lead.email,
                 "page_url": lead.page_url,
+                "answers": lead.answers,
             },
         )
     messages = []
@@ -726,6 +880,11 @@ async def webchat_message(public_key: str, request: Request, db: AsyncSession = 
     conversation, _ = found
     started = datetime.now(UTC)
     agent = await svc.resolve_agent(db, row.tenant_id, row.ai_agent_id)
+    chat_options = dict(row.config or {})
+    visitor = (
+        await db.execute(select(WidgetLead.answers).where(WidgetLead.conversation_id == conversation.id))
+    ).scalar_one_or_none()
+    chat_options["_visitor_context"] = chat_form.visitor_context(visitor)
     await svc.process_inbound_text(
         db,
         tenant_id=row.tenant_id,
@@ -734,6 +893,7 @@ async def webchat_message(public_key: str, request: Request, db: AsyncSession = 
         text=text,
         provider_message_id=None,
         source="web_chat",
+        chat_options=chat_options,
     )
     new_messages = (
         await db.execute(
@@ -1410,7 +1570,11 @@ async def send_template_to_conversation(
     accounts = (await db.execute(select(WhatsAppAccount).where(WhatsAppAccount.tenant_id == ctx.tenant_id))).scalars().all()
     account = next((a for a in accounts if thread and a.phone_number_id == thread.via_address), None)
     try:
-        provider_id = await tpl.send_template(db, ctx.tenant_id, to=to, template=template, values=values, account=account)
+        await plans.ensure_whatsapp_available(db, ctx.tenant_id)
+        # Saved below as a Message, which is what gets counted.
+        provider_id = await tpl.send_template(
+            db, ctx.tenant_id, to=to, template=template, values=values, account=account, metered=False
+        )
     except (tpl.TemplateError, WhatsAppAPIError) as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     message = await svc.record_message(

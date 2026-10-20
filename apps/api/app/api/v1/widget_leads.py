@@ -111,17 +111,27 @@ async def export_widget_leads(
         text = "" if value is None else str(value)
         return f"'{text}" if text.startswith(_FORMULA_PREFIXES) else text
 
+    # One column per question the business ever asked, in the order they first appear.
+    questions: list[str] = []
+    for lead in leads:
+        for answer in lead.answers or []:
+            if answer.get("label") not in questions:
+                questions.append(answer.get("label"))
+
     out = io.StringIO()
     writer = csv.writer(out)
     writer.writerow(
-        ["created_utc", "name", "phone", "email", "interest", "page_url", "referrer", "utm", "call_consent",
-         "consent_at_utc", "consent_text", "call_status", "call_attempts", "last_call_error"]
+        ["created_utc", "name", "phone", "email", "interest", *[f"answer: {q}" for q in questions], "page_url",
+         "referrer", "utm", "call_consent", "consent_at_utc", "consent_text", "call_status", "call_attempts",
+         "last_call_error"]
     )
     for lead in leads:
+        by_label = {a.get("label"): a.get("value") for a in lead.answers or []}
+        shown = ["" if by_label.get(q) is None else ("Yes" if by_label[q] is True else "No" if by_label[q] is False else by_label[q]) for q in questions]
         writer.writerow(
             [cell(v) for v in (
-                lead.created_at.isoformat(), lead.name, lead.phone, lead.email, lead.interest, lead.page_url,
-                lead.referrer, lead.utm or "", "yes" if lead.consent_call else "no",
+                lead.created_at.isoformat(), lead.name, lead.phone, lead.email, lead.interest, *shown,
+                lead.page_url, lead.referrer, lead.utm or "", "yes" if lead.consent_call else "no",
                 lead.consent_at.isoformat() if lead.consent_at else "", lead.consent_text, lead.call_status,
                 lead.call_attempts, lead.last_call_error,
             )]
@@ -161,7 +171,7 @@ async def call_widget_lead(
     lead = await _get(db, ctx, lead_id)
     row = await channel_svc.get_channel_settings(db, ctx.tenant_id, "web_chat")
     try:
-        await svc.call_lead(db, lead, row.ai_agent_id if row else None)
+        await svc.call_lead(db, lead, row.ai_agent_id if row else None, dict(row.config or {}) if row else None)
     except svc.LeadError as exc:
         raise HTTPException(exc.http_status, exc.message) from exc
     await log_audit_event(
