@@ -199,7 +199,11 @@ async def budget_exhausted(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
 async def guard_outbound(db: AsyncSession, tenant_id: uuid.UUID, *, calls: int = 1) -> None:
     """Raises SpendGuardError if placing `calls` more outbound calls would break
     the tenant's budget or caps. Free (one cheap query) for a tenant that never
-    configured controls."""
+    configured controls. The plan's own limits (minutes, concurrency, daily cap) are
+    checked first; PlanLimitError is a SpendGuardError, so every caller handles it."""
+    from app.services import plans  # local import: plans imports this module
+
+    await plans.ensure_outbound_allowed(db, tenant_id, calls)
     controls = await _controls_or_none(db, tenant_id)
     if controls is None:
         return

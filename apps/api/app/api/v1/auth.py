@@ -37,6 +37,7 @@ from app.schemas.auth import (
     TokenPair,
     VerifyEmailRequest,
 )
+from app.services import plans
 from app.services.platform_totp import get_enabled_totp, verify_second_factor
 from app.services.user_sessions import (
     alert_new_sign_in,
@@ -164,7 +165,12 @@ async def signup(
             "System roles are not seeded — run migrations before accepting signups",
         )
 
-    tenant = Tenant(name=payload.company_name, slug=payload.tenant_slug)
+    tier = get_settings().signup_plan_tier
+    tenant = Tenant(
+        name=payload.company_name,
+        slug=payload.tenant_slug,
+        plan_tier=tier if tier in plans.TIERS else "free",
+    )
     user = User(
         email=payload.email.lower(),
         hashed_password=hash_password(payload.password),

@@ -191,8 +191,13 @@ async def _send_whatsapp(db: AsyncSession, tenant_id: uuid.UUID, customer: Custo
     ).scalars().first()
     if account is None:
         raise SurveySendError("No WhatsApp number is connected")
+    from app.services import plans
+
     try:
+        await plans.ensure_whatsapp_available(db, tenant_id)
         await send_text_message(account, to=customer.phone.lstrip("+"), body=body)
+    except plans.PlanLimitError as exc:
+        raise SurveySendError(exc.message) from exc
     except WhatsAppAPIError as exc:
         raise SurveySendError(f"WhatsApp: {exc}") from exc
 

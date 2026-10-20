@@ -7,16 +7,48 @@ Bearer auth with the tenant's own token.
 
 import hashlib
 import hmac
+import logging
+import uuid
+from datetime import UTC, datetime
 
 import httpx
 from app.core.config import get_settings
 from app.core.crypto import decrypt_secret
 
 from packages.database.models import WhatsAppAccount
+from packages.database.models.platform import UsageEvent
+from packages.database.session import session_scope
+
+logger = logging.getLogger(__name__)
 
 
 class WhatsAppAPIError(Exception):
     pass
+
+
+async def record_usage(tenant_id: uuid.UUID) -> None:
+    """Meters one outbound WhatsApp message.
+
+    Usage is derived from saved `Message` rows, but the AI tool, reminders,
+    campaigns and CSAT send without saving one, so those sends were never counted
+    and any cap or bill built on the count was too low. This writes a usage event
+    in its own session, so it never disturbs the caller's transaction. Callers that
+    save a Message themselves pass `metered=False` to avoid counting twice.
+    """
+    try:
+        async with session_scope() as db:
+            db.add(
+                UsageEvent(
+                    tenant_id=tenant_id,
+                    metric="whatsapp_messages",
+                    quantity=1,
+                    occurred_at=datetime.now(UTC),
+                    extra={"source": "send"},
+                )
+            )
+            await db.commit()
+    except Exception:  # a metering hiccup must never fail a message that was delivered
+        logger.warning("failed to meter WhatsApp message for tenant %s", tenant_id, exc_info=True)
 
 
 def verify_webhook_signature(raw_body: bytes, signature_header: str | None) -> bool:
@@ -33,7 +65,12 @@ def verify_webhook_signature(raw_body: bytes, signature_header: str | None) -> b
 
 
 async def send_template_message(
-    account: WhatsAppAccount, *, to: str, template_name: str, language_code: str = "en_US"
+    account: WhatsAppAccount,
+    *,
+    to: str,
+    template_name: str,
+    language_code: str = "en_US",
+    metered: bool = True,
 ) -> dict:
     """Sends an approved template with no variable substitution — enough for
     a simple campaign broadcast. Templates with parameters would need a
@@ -57,10 +94,14 @@ async def send_template_message(
         )
     if response.status_code >= 400:
         raise WhatsAppAPIError(_error_from_response(response))
+    if metered:
+        await record_usage(account.tenant_id)
     return response.json()
 
 
-async def send_text_message(account: WhatsAppAccount, *, to: str, body: str) -> dict:
+async def send_text_message(
+    account: WhatsAppAccount, *, to: str, body: str, metered: bool = True
+) -> dict:
     settings = get_settings()
     access_token = decrypt_secret(account.encrypted_access_token)
     url = (
@@ -80,6 +121,8 @@ async def send_text_message(account: WhatsAppAccount, *, to: str, body: str) -> 
         )
     if response.status_code >= 400:
         raise WhatsAppAPIError(_error_from_response(response))
+    if metered:
+        await record_usage(account.tenant_id)
     return response.json()
 
 

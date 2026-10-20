@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from app.core.config import get_settings
 from app.core.crypto import decrypt_secret
-from app.integrations.whatsapp import WhatsAppAPIError, friendly_error
+from app.integrations.whatsapp import WhatsAppAPIError, friendly_error, record_usage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -408,8 +408,10 @@ async def send_template(
     template: WhatsAppTemplate,
     values: dict[str, str],
     account: WhatsAppAccount | None = None,
+    metered: bool = True,
 ) -> str | None:
-    """Sends an approved template with its blanks filled. Returns Meta's message id."""
+    """Sends an approved template with its blanks filled. Returns Meta's message id.
+    `metered=False` when the caller saves the Message itself (it is counted from that)."""
     if template.status != "APPROVED":
         raise TemplateError(f"The template '{template.name}' isn't approved by Meta yet.")
     account = account or await account_for(db, template)
@@ -428,6 +430,8 @@ async def send_template(
         response = await http.post(_graph(f"{account.phone_number_id}/messages"), headers=_headers(account), json=payload)
     if response.status_code >= 400:
         raise WhatsAppAPIError(_meta_error(response))
+    if metered:
+        await record_usage(tenant_id)
     return ((response.json().get("messages") or [{}])[0]).get("id")
 
 

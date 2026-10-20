@@ -10,6 +10,7 @@ from app.schemas.campaign import (
     CampaignCreate,
     CampaignRead,
 )
+from app.services import plans
 from app.worker.campaign_tasks import run_campaign_task
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -42,6 +43,7 @@ async def create_campaign(
     ctx: RequestContext = Depends(require_permission(Permissions.CAMPAIGNS_MANAGE)),
     db: AsyncSession = Depends(get_db),
 ) -> Campaign:
+    await plans.ensure_feature(db, ctx.tenant_id, "campaigns")
     campaign = await CampaignRepository(db, ctx.tenant_id).create(**payload.model_dump())
     await db.commit()
     await db.refresh(campaign)
@@ -98,6 +100,7 @@ async def launch_campaign(
     ctx: RequestContext = Depends(require_permission(Permissions.CAMPAIGNS_MANAGE)),
     db: AsyncSession = Depends(get_db),
 ) -> Campaign:
+    await plans.ensure_feature(db, ctx.tenant_id, "campaigns")
     repo = CampaignRepository(db, ctx.tenant_id)
     campaign = await repo.get(campaign_id)
     if campaign.status != CampaignStatus.DRAFT:

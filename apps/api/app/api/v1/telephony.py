@@ -5,6 +5,7 @@ That lookup, plus Twilio's request-signature validation below, is the whole
 trust boundary here — treat both as load-bearing.
 """
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -12,6 +13,7 @@ from app.core.config import get_settings
 from app.core.deps import get_db
 from app.integrations.credentials import get_twilio_credentials
 from app.integrations.twilio_client import build_stream_twiml, validate_twilio_signature
+from app.services import plans
 from app.services.call_finalize import TERMINAL_CALL_STATUSES, finalize_call
 from app.services.channels_voice import (
     record_missed_call,
@@ -37,6 +39,7 @@ from packages.database.models import (
     WorkflowTrigger,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks/telephony/twilio", tags=["telephony-webhooks"])
 
 _TWILIO_STATUS_MAP = {
@@ -51,6 +54,14 @@ _TWILIO_STATUS_MAP = {
 }
 
 _REJECT_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>'
+
+# Said to a caller when the business's plan allowance is used up. Neutral wording:
+# the caller is the business's customer and should not hear about billing.
+_UNAVAILABLE_TWIML = (
+    '<?xml version="1.0" encoding="UTF-8"?><Response>'
+    "<Say>Sorry, we can't take your call right now. Please try again later.</Say>"
+    "<Hangup/></Response>"
+)
 
 
 def _reject_response() -> Response:
@@ -197,6 +208,15 @@ async def voice(request: Request, db: AsyncSession = Depends(get_db)) -> Respons
         tenant = await db.get(Tenant, phone_number.tenant_id)
         if await _check_and_apply_spam_protection(db, tenant, from_number):
             return _reject_response()
+
+        if phone_number.ai_agent_id is not None:
+            # An AI-answered call costs money to carry: once the plan's allowance
+            # is spent, the caller hears a short message instead of the agent.
+            try:
+                await plans.ensure_inbound_allowed(db, phone_number.tenant_id)
+            except plans.PlanLimitError as exc:
+                logger.warning("inbound call refused for tenant %s: %s", tenant.id, exc.code)
+                return PlainTextResponse(content=_UNAVAILABLE_TWIML, media_type="application/xml")
 
         customer, customer_created = await find_or_create_customer_by_phone(
             db, phone_number.tenant_id, from_number

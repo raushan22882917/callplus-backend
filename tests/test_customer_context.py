@@ -136,7 +136,7 @@ async def test_whatsapp_question_about_a_booking_is_answered_from_the_calendar(
         prompts.append((messages[0]["content"], {t["function"]["name"] for t in tools or []}))
         return {"choices": [{"message": {"role": "assistant", "content": "Yes, tomorrow with Priya."}}]}
 
-    async def fake_send(account, *, to, body):
+    async def fake_send(account, *, to, body, metered=True):
         return {"messages": [{"id": "out"}]}
 
     async def noop(*args, **kwargs):

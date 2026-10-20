@@ -321,8 +321,12 @@ async def _send_campaign_whatsapp(db, campaign: Campaign, whatsapp_account, cust
         raise ValueError("no WhatsApp account connected for this tenant")
     if not campaign.whatsapp_template_name:
         raise ValueError("campaign has no whatsapp_template_name")
+    from app.services import plans
     from app.services import whatsapp_templates as tpl
 
+    # Raises PlanLimitError (a SpendGuardError), which pauses the campaign with its
+    # remaining contacts still pending, instead of failing each one.
+    await plans.ensure_whatsapp_available(db, campaign.tenant_id)
     template = await tpl.find_approved(db, campaign.tenant_id, name=campaign.whatsapp_template_name)
     if template is not None:  # the business's own template: fill {{name}} etc. per customer
         values = await tpl.context_values(db, campaign.tenant_id, customer)

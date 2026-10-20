@@ -30,6 +30,7 @@ from app.schemas.developer import (
     WebhookEndpointRead,
     WebhookEndpointUpdate,
 )
+from app.services import plans
 from app.services.security_alerts import notify_owners
 from app.services.webhooks import (
     TEST_EVENT,
@@ -124,6 +125,7 @@ async def create_api_key(
     if payload.expires_at is not None and payload.expires_at <= datetime.now(UTC):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "expires_at must be in the future")
 
+    await plans.ensure_can_create(db, ctx.tenant_id, "api_keys")
     secret, prefix, hashed = generate_developer_key(payload.mode)
     key = await ApiKeyRepository(db, ctx.tenant_id).create(
         name=payload.name,

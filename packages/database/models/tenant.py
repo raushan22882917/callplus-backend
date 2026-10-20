@@ -2,6 +2,7 @@ import enum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, Enum, Integer, String
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from packages.database.base import Base
@@ -48,6 +49,19 @@ class Tenant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # the agent greeting).
     call_recording_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False
+    )
+
+    # Platform-owned entitlements (app/services/plans.py). Deliberately NOT the
+    # tenant-editable pricing_plans table: a tenant must not be able to raise its
+    # own limits. 'legacy' = tenants that existed before plans and stay unlimited;
+    # new sign-ups start on `signup_plan_tier` ('free').
+    plan_tier: Mapped[str] = mapped_column(
+        String(20), default="legacy", server_default="legacy", nullable=False
+    )
+    # Platform-admin grants on top of the tier, e.g. {"bonus_minutes": 30,
+    # "ai_minutes": 500, "allow_overage": true}.
+    plan_overrides: Mapped[dict] = mapped_column(
+        JSONB, default=dict, server_default="{}", nullable=False
     )
 
     memberships: Mapped[list["TenantUser"]] = relationship(

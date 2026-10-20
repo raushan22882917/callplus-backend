@@ -18,11 +18,12 @@ from app.schemas.billing import (
     PlanUpdate,
     SubscriptionRead,
 )
+from app.services import plans as plans_service
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import Invoice, Plan, Subscription, SubscriptionStatus
+from packages.database.models import Invoice, Plan, Subscription, SubscriptionStatus, Tenant
 
 router = APIRouter(prefix="/billing", tags=["billing"])
 
@@ -33,6 +34,25 @@ class SubscriptionRepository(TenantScopedRepository[Subscription]):
 
 class InvoiceRepository(TenantScopedRepository[Invoice]):
     model = Invoice
+
+
+@router.get("/entitlements")
+async def get_entitlements(
+    ctx: RequestContext = Depends(require_permission(Permissions.BILLING_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """The workspace's plan and how much of each allowance is used. Minutes are
+    billable minutes, rounded up per call the way the carrier bills."""
+    tenant = await db.get(Tenant, ctx.tenant_id)
+    return await plans_service.entitlements(db, tenant)
+
+
+@router.get("/catalogue")
+async def get_catalogue(
+    ctx: RequestContext = Depends(require_permission(Permissions.BILLING_MANAGE)),
+) -> list[dict]:
+    """Every plan with its price and allowances, for the upgrade screen."""
+    return plans_service.public_catalogue()
 
 
 @router.get("/plans", response_model=list[PlanRead])

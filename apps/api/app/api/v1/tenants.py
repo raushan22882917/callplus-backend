@@ -1,6 +1,7 @@
 from app.core.deps import RequestContext, get_current_context, get_db, require_permission
 from app.core.permissions import Permissions
 from app.schemas.tenant import TenantRead, TenantUpdate
+from app.services import plans
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,7 +25,10 @@ async def update_my_tenant(
     db: AsyncSession = Depends(get_db),
 ) -> Tenant:
     tenant = await db.get(Tenant, ctx.tenant_id)
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    if changes.get("call_recording_enabled"):
+        await plans.ensure_feature(db, ctx.tenant_id, "recording")
+    for field, value in changes.items():
         setattr(tenant, field, value)
     await db.commit()
     await db.refresh(tenant)

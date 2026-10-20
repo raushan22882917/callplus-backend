@@ -219,6 +219,7 @@ class AdminTenantRow(BaseModel):
     name: str
     slug: str
     status: str
+    plan_tier: str = "legacy"
     created_at: datetime
     users: int
     phone_numbers: int
@@ -242,6 +243,16 @@ class AdminHealth(BaseModel):
 
 
 class AdminStatusChange(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class AdminPlanChange(BaseModel):
+    """Sets a workspace's plan tier and any extra grants on top of it, e.g.
+    {"tier": "free", "overrides": {"bonus_minutes": 20}}. `overrides` replaces the
+    previous overrides entirely; send {} to clear them."""
+
+    tier: str = Field(min_length=1, max_length=20)
+    overrides: dict[str, Any] | None = None
     reason: str | None = Field(default=None, max_length=500)
 
 

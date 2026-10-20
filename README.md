@@ -439,6 +439,24 @@ as the caller does), tell the agent its voice's gender so Hindi verbs agree
 agent to admit it is an AI when asked. `scripts/eval_voice_style.py` compares
 prompts against the live model.
 
+## Plans, free tier and limits
+
+Every workspace has a plan tier (`tenants.plan_tier`): **Free**, **Starter**, **Growth**,
+**Scale**, **Enterprise**, or **legacy** (unlimited; what workspaces that predate plans get).
+The free plan is **10 AI call minutes in total** (one-time), at most 5 minutes per call, 50 WhatsApp
+messages, 1 agent, 1 phone number, 2 seats, 5 knowledge documents, 1 API key, no campaigns and no
+recording. Limits are enforced where the money is spent: the call-time cap the voice gateway reads,
+outbound and inbound call admission, record creation, WhatsApp sends. A reached limit is an HTTP 402
+with `{detail, code, tier, upgrade_path}`.
+
+* The tiers, prices and every limit live in [`apps/api/app/services/plans.py`](apps/api/app/services/plans.py).
+* Why those numbers (provider costs, margins, free-tier worst case, what was wrong before):
+  [`docs/BILLING.md`](docs/BILLING.md). Re-run `python scripts/cost_model.py` when a price changes.
+* New sign-ups start on `SIGNUP_PLAN_TIER` (default `free`). A subscription moves a workspace up
+  (Razorpay webhook); a platform admin can grant extras with
+  `PUT /api/v1/platform/admin/tenants/{id}/plan`. `GET /api/v1/billing/entitlements` feeds the Billing page.
+* Allowances are hard caps; per-minute overage billing is not built (see the doc).
+
 ## What's not here yet
 
 - **Semantic (vector) search** — the knowledge base (`/api/v1/knowledge`,
@@ -447,6 +465,6 @@ prompts against the live model.
   (today: txt/md/csv upload or pasted text) are not built.
 - **Business-hours / skill-based routing** for human handoff (today: ring all
   active targets).
-- **Platform billing** usage metering — see "Payments" for what exists.
+- **Overage invoicing** — plan allowances are hard caps; charging per extra minute needs usage invoicing (see `docs/BILLING.md`).
 - **Kafka, ClickHouse, Temporal** — later-phase scale infrastructure; Celery
   + Postgres is the right size for this stage.

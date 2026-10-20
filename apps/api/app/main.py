@@ -6,6 +6,7 @@ from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.mcp.gate import McpAuthGate
 from app.mcp.server import mcp, mcp_asgi_app
+from app.services.plans import PlanLimitError
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -55,6 +56,8 @@ _SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
 }
 _DOCS_PATHS = ("/docs", "/redoc")
+# The chat widget designer frames this one page from the app; the route sets its own headers.
+_FRAMEABLE_PATH = "/api/v1/channels/webchat/preview"
 
 
 @app.middleware("http")
@@ -63,6 +66,8 @@ async def security_headers(request: Request, call_next):
     for name, value in _SECURITY_HEADERS.items():
         # Swagger/ReDoc need inline scripts and a CDN, so skip the strict CSP there.
         if name == "Content-Security-Policy" and request.url.path.startswith(_DOCS_PATHS):
+            continue
+        if name in ("Content-Security-Policy", "X-Frame-Options") and request.url.path == _FRAMEABLE_PATH:
             continue
         response.headers.setdefault(name, value)
     if not settings.is_local:
@@ -77,6 +82,21 @@ async def security_headers(request: Request, call_next):
 @app.exception_handler(AppError)
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+@app.exception_handler(PlanLimitError)
+async def plan_limit_handler(request: Request, exc: PlanLimitError) -> JSONResponse:
+    """A plan allowance was reached (services/plans.py): tell the client which one
+    and where to go to lift it. 402 for quotas, 429 for rate-style limits."""
+    return JSONResponse(
+        status_code=exc.http_status,
+        content={
+            "detail": exc.message,
+            "code": exc.code,
+            "tier": exc.tier,
+            "upgrade_path": "/billing",
+        },
+    )
 
 
 @app.get("/healthz", tags=["meta"])

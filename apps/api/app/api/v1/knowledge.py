@@ -12,6 +12,7 @@ from app.schemas.knowledge import (
     KnowledgeSearchRequest,
 )
 from app.services import knowledge as knowledge_service
+from app.services import plans
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +36,7 @@ async def _create_document(
     content: str,
     source: KnowledgeDocumentSource,
 ) -> KnowledgeDocument:
+    await plans.ensure_can_create(db, ctx.tenant_id, "knowledge_documents")
     document = await KnowledgeDocumentRepository(db, ctx.tenant_id).create(
         title=title, content=content, source=source
     )

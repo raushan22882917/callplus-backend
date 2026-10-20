@@ -27,6 +27,7 @@ from app.schemas.agent import (
     TestChatRequest,
     TestChatResponse,
 )
+from app.services import plans
 from app.services.flow_compiler import compile_flow_to_system_prompt
 from app.tools.registry import TOOL_REGISTRY
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -89,6 +90,7 @@ async def create_agent(
     ctx: RequestContext = Depends(require_permission(Permissions.AGENTS_MANAGE)),
     db: AsyncSession = Depends(get_db),
 ) -> AIAgent:
+    await plans.ensure_can_create(db, ctx.tenant_id, "agents")
     agent = await AIAgentRepository(db, ctx.tenant_id).create(**payload.model_dump())
     await db.commit()
     await db.refresh(agent)
@@ -289,6 +291,7 @@ async def assign_phone_number(
     through their own BYO Twilio account, or ported from elsewhere) without
     buying a new one. To get a brand-new number instead, use
     GET /phone-numbers/available + POST /phone-numbers/provision below."""
+    await plans.ensure_can_create(db, ctx.tenant_id, "phone_numbers")
     await _require_own_agent(db, ctx.tenant_id, payload.ai_agent_id)
     return await _save_number(db, ctx.tenant_id, **payload.model_dump())
 
@@ -353,6 +356,7 @@ async def provision_phone_number(
     """Buys the number (a real, recurring cost on whichever Twilio account
     resolves for this tenant — see search_phone_numbers above) and wires its
     voice webhook to this platform, then assigns it to this tenant."""
+    await plans.ensure_can_create(db, ctx.tenant_id, "phone_numbers")  # before spending money
     await _require_own_agent(db, ctx.tenant_id, payload.ai_agent_id)  # before spending money
     settings = get_settings()
     voice_webhook_url = f"{settings.public_base_url}/api/v1/webhooks/telephony/twilio/voice"

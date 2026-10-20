@@ -65,7 +65,7 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> dict:
         state["prompts"].append(messages)
         return {"choices": [{"message": {"role": "assistant", "content": f"Reply {state['llm']}"}}]}
 
-    async def fake_send(account, *, to, body):
+    async def fake_send(account, *, to, body, metered=True):
         state["sent"].append({"from": account.phone_number_id, "to": to, "body": body})
         return {"messages": [{"id": f"wamid.out{len(state['sent'])}"}]}
 

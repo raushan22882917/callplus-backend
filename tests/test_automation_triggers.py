@@ -253,7 +253,7 @@ async def test_whatsapp_inbound_message_fires_customer_created_and_message_recei
     async def fake_chat_completion(*, messages, tools=None, api_key=None, **kwargs):
         return _final_completion("Sure, how can I help?")
 
-    async def fake_send_text_message(account, *, to, body):
+    async def fake_send_text_message(account, *, to, body, metered=True):
         return {"messages": [{"id": "wamid.fake"}]}
 
     monkeypatch.setattr("app.services.agent_engine.chat_completion", fake_chat_completion)

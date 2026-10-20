@@ -13,10 +13,12 @@ from app.core.exceptions import NotFoundError, PermissionDeniedError
 from app.core.rate_limit import _redis
 from app.schemas.platform import (
     AdminHealth,
+    AdminPlanChange,
     AdminStatusChange,
     AdminTenantDetail,
     AdminTenantRow,
 )
+from app.services import plans
 from app.services.platform_usage import usage_summary
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select, text
@@ -92,6 +94,7 @@ async def _row(db: AsyncSession, tenant: Tenant) -> AdminTenantRow:
         name=tenant.name,
         slug=tenant.slug,
         status=tenant.status.value,
+        plan_tier=tenant.plan_tier,
         created_at=tenant.created_at,
         users=users,
         phone_numbers=numbers,
@@ -219,6 +222,43 @@ async def activate_tenant(
     return await _set_status(
         db, ctx, tenant_id, TenantStatus.ACTIVE, payload.reason if payload else None
     )
+
+
+@router.put("/tenants/{tenant_id}/plan", response_model=AdminTenantRow)
+async def set_tenant_plan(
+    tenant_id: uuid.UUID,
+    payload: AdminPlanChange,
+    ctx: RequestContext = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AdminTenantRow:
+    """Moves a workspace to a plan and/or grants extras (more minutes, overage).
+    Platform-admin only: tenants can never change their own entitlements."""
+    if payload.tier not in plans.TIERS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown plan '{payload.tier}'")
+    try:
+        overrides = plans.sanitize_overrides(payload.overrides)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    tenant = await _tenant(db, tenant_id)
+    previous = {"tier": tenant.plan_tier, "overrides": tenant.plan_overrides}
+    tenant.plan_tier = payload.tier
+    tenant.plan_overrides = overrides
+    await log_audit_event(
+        db,
+        tenant_id=tenant_id,
+        actor_user_id=ctx.user_id,
+        action="plan.set_by_admin",
+        resource_type="tenant",
+        resource_id=tenant_id,
+        extra={
+            "from": previous,
+            "to": {"tier": payload.tier, "overrides": overrides},
+            "reason": payload.reason,
+            "by_platform_admin": True,
+        },
+    )
+    await db.commit()
+    return await _row(db, tenant)
 
 
 async def _ping_db(db: AsyncSession) -> dict[str, Any]:

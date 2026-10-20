@@ -108,7 +108,7 @@ async def test_whatsapp_transfer_request_raises_urgent_ticket_for_human_agent(
             )
         return _final_completion("I'm connecting you with a teammate now.")
 
-    async def fake_send_text_message(account, *, to, body):
+    async def fake_send_text_message(account, *, to, body, metered=True):
         return {"messages": [{"id": "wamid.fake"}]}
 
     monkeypatch.setattr("app.services.agent_engine.chat_completion", fake_chat_completion)

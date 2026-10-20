@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from app.integrations.razorpay_client import RazorpayAPIError, create_payment_link
 from app.integrations.whatsapp import WhatsAppAPIError, send_text_message
 from app.services import knowledge as knowledge_service
+from app.services import plans
 from app.services.operations import apply_sla_safely
 from app.services.webhooks import enqueue_webhook_event
 from app.tools.context import ToolContext
@@ -282,7 +283,10 @@ async def send_whatsapp_message(ctx: ToolContext, *, phone: str, message: str) -
         return {"error": "no WhatsApp number connected for this business"}
 
     try:
+        await plans.ensure_whatsapp_available(ctx.db, ctx.tenant_id)
         response = await send_text_message(account, to=phone, body=message)
+    except plans.PlanLimitError as exc:
+        return {"error": exc.message}
     except WhatsAppAPIError as exc:
         return {"error": str(exc)}
     return {"sent": True, "message_id": response.get("messages", [{}])[0].get("id")}

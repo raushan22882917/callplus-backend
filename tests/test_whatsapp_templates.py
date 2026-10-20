@@ -158,7 +158,7 @@ async def test_create_from_library_submit_get_approved_and_send_from_inbox(
     async def fake_llm(**kwargs):
         return {"choices": [{"message": {"role": "assistant", "content": "Hi!"}}]}
 
-    async def fake_send(account, *, to, body):
+    async def fake_send(account, *, to, body, metered=True):
         return {"messages": [{"id": "x"}]}
 
     monkeypatch.setattr("app.services.whatsapp_inbound.mark_read", noop)

@@ -66,6 +66,10 @@ class Settings(BaseSettings):
 
     sarvam_api_key: str = ""
 
+    # Plan a brand-new workspace starts on (see app/services/plans.py). 'free' is
+    # the 10-minute trial; 'legacy' means unlimited (what existing tenants have).
+    signup_plan_tier: str = "free"
+
     # Public API (API-key authenticated) guard rails.
     api_key_rate_limit_per_minute: int = 120
     max_concurrent_calls_per_tenant: int = 10

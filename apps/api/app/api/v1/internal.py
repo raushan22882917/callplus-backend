@@ -32,6 +32,7 @@ from app.schemas.internal import (
     CallTurnRequest,
     CallTurnResponse,
 )
+from app.services import plans
 from app.services.agent_engine import run_turn, run_turn_stream
 from app.services.call_closing import caller_wants_to_end, conversation_is_over
 from app.services.call_finalize import finalize_call
@@ -85,6 +86,8 @@ async def _start_recording_if_enabled(db: AsyncSession, call: Call) -> None:
         return
     tenant = await db.get(Tenant, call.tenant_id)
     if tenant is None or not tenant.call_recording_enabled:
+        return
+    if not plans.effective(tenant).recording:  # e.g. downgraded after enabling it
         return
     try:
         credentials = await get_twilio_credentials(db, call.tenant_id)
@@ -145,7 +148,9 @@ async def call_config(call_id: uuid.UUID, db: AsyncSession = Depends(get_db)) ->
             language="en-IN",
             voice="priya",
             greeting="",
-            max_call_duration_seconds=300,
+            max_call_duration_seconds=await plans.effective_max_call_seconds(
+                db, call.tenant_id, 300
+            ),
             max_duration_message=(
                 "I'm sorry, but I need to end our call now. Thank you for calling."
             ),
@@ -160,7 +165,11 @@ async def call_config(call_id: uuid.UUID, db: AsyncSession = Depends(get_db)) ->
         language=agent.language,
         voice=agent.voice or "priya",
         greeting=agent.greeting or "",
-        max_call_duration_seconds=agent.max_call_duration_seconds,
+        # The agent's own cap, the plan's per-call cap and the minutes left in the
+        # plan's allowance, whichever is smallest (see services/plans.py).
+        max_call_duration_seconds=await plans.effective_max_call_seconds(
+            db, call.tenant_id, agent.max_call_duration_seconds
+        ),
         max_duration_message=agent.max_duration_message,
         no_response_timeout_seconds=agent.no_response_timeout_seconds,
         max_no_response_retries=agent.max_no_response_retries,
@@ -200,7 +209,10 @@ async def _prepare_call_turn(
     # Checked before spending an LLM call: an agent that's already run past
     # its owner-configured time limit shouldn't get another turn at all.
     elapsed = (datetime.now(UTC) - call.started_at).total_seconds() if call.started_at else 0
-    if elapsed >= agent.max_call_duration_seconds:
+    max_seconds = await plans.effective_max_call_seconds(
+        db, call.tenant_id, agent.max_call_duration_seconds
+    )
+    if elapsed >= max_seconds:
         early = CallTurnResponse(
             reply_text=agent.max_duration_message, action="hangup", reason="max_duration_exceeded"
         )

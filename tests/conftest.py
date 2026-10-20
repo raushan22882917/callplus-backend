@@ -25,6 +25,9 @@ for _key in (
 os.environ["META_WHATSAPP_APP_SECRET"] = "test-meta-app-secret"
 os.environ["RAZORPAY_WEBHOOK_SECRET"] = "test-razorpay-webhook-secret"
 os.environ["AUTH_RATE_LIMIT_ENABLED"] = "false"
+# New workspaces are unlimited in the existing suite; plan limits are tested explicitly
+# (tests/test_plan_limits.py) by putting a tenant on a tier.
+os.environ["SIGNUP_PLAN_TIER"] = "legacy"
 os.environ["CAMPAIGN_VOICE_INTERVAL_SECONDS"] = "0"
 os.environ["CAMPAIGN_WHATSAPP_INTERVAL_SECONDS"] = "0"
 

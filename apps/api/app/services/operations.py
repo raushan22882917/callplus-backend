@@ -16,7 +16,7 @@ from app.core.config import get_settings
 from app.integrations.credentials import get_twilio_credentials
 from app.integrations.email_client import send_email
 from app.integrations.whatsapp import WhatsAppAPIError, send_text_message
-from app.services import calendar_sync
+from app.services import calendar_sync, plans
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -656,6 +656,7 @@ async def send_due_reminders(
             if customer is None or not customer.phone:
                 raise AppointmentError("customer has no phone number")
             account = await _whatsapp_account(db, appointment.tenant_id)
+            await plans.ensure_whatsapp_available(db, appointment.tenant_id)
             # An approved reminder template reaches customers who haven't written in
             # 24h (plain text only works inside WhatsApp's 24-hour window).
             from app.services import whatsapp_templates as tpl
@@ -675,7 +676,7 @@ async def send_due_reminders(
             appointment.reminder_sent_at = now
             appointment.reminder_error = None
             result.sent += 1
-        except (AppointmentError, WhatsAppAPIError) as exc:
+        except (AppointmentError, WhatsAppAPIError, plans.PlanLimitError) as exc:
             appointment.reminder_error = str(exc)[:500]
             logger.warning("appointment %s reminder failed: %s", appointment.id, exc)
             result.failed += 1
@@ -815,6 +816,7 @@ async def _dispatch_follow_up(db: AsyncSession, follow_up: FollowUp, customer: C
         except AppointmentError as exc:
             raise FollowUpError(str(exc), permanent=True) from exc
         try:
+            await plans.ensure_whatsapp_available(db, follow_up.tenant_id)
             if payload.get("template_name"):
                 from app.integrations.whatsapp import send_template_message
                 from app.services import whatsapp_templates as tpl
@@ -838,6 +840,8 @@ async def _dispatch_follow_up(db: AsyncSession, follow_up: FollowUp, customer: C
                 await send_text_message(account, to=_digits(customer.phone), body=message)
             else:
                 raise FollowUpError("payload needs a message or template_name", permanent=True)
+        except plans.PlanLimitError as exc:
+            raise FollowUpError(exc.message) from exc
         except WhatsAppAPIError as exc:
             raise FollowUpError(str(exc)) from exc
     elif channel == "sms":

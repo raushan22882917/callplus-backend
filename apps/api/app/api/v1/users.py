@@ -26,6 +26,7 @@ from app.schemas.user import (
     TeamMemberRead,
     UpdateTeamMemberRequest,
 )
+from app.services import plans
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -89,6 +90,7 @@ async def invite_user(
     ctx: RequestContext = Depends(require_permission(Permissions.USERS_MANAGE)),
     db: AsyncSession = Depends(get_db),
 ) -> InviteUserResponse:
+    await plans.ensure_can_create(db, ctx.tenant_id, "team_members")
     role = (
         await db.execute(
             select(Role).where(

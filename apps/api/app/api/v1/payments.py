@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 
+from app.core.audit import log_audit_event
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
 from app.core.repository import TenantScopedRepository
@@ -9,6 +10,7 @@ from app.integrations.razorpay_client import (
     verify_webhook_signature,
 )
 from app.schemas.payment import PaymentLinkCreate, PaymentLinkRead
+from app.services import plans
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,8 +23,10 @@ from packages.database.models import (
     PaymentLink,
     PaymentLinkStatus,
     PaymentStatus,
+    Plan,
     Subscription,
     SubscriptionStatus,
+    Tenant,
 )
 
 router = APIRouter(tags=["payments"])
@@ -167,6 +171,43 @@ _SUBSCRIPTION_EVENT_STATUS = {
 }
 
 
+async def _sync_tenant_tier(db: AsyncSession, subscription: Subscription, event: str) -> None:
+    """Moves the workspace between plan tiers as its subscription changes.
+
+    Paid (activated/charged): the tier of the subscribed plan. Ended (cancelled/
+    completed): back to Free, but only if the tenant is still on that plan's tier,
+    so a hand-granted tier (an Enterprise deal) is never downgraded by a stale
+    subscription. Past due (halted) keeps the tier while Razorpay retries."""
+    plan = await db.get(Plan, subscription.plan_id)
+    subscribed_tier = plans.tier_for_plan_code(plan.code) if plan else None
+    tenant = await db.get(Tenant, subscription.tenant_id)
+    if subscribed_tier is None or tenant is None:
+        return
+
+    if event in ("subscription.activated", "subscription.charged"):
+        new_tier = subscribed_tier
+    elif event in ("subscription.cancelled", "subscription.completed"):
+        if tenant.plan_tier != subscribed_tier:
+            return
+        new_tier = "free"
+    else:
+        return
+
+    if tenant.plan_tier == new_tier:
+        return
+    previous = tenant.plan_tier
+    tenant.plan_tier = new_tier
+    await log_audit_event(
+        db,
+        tenant_id=tenant.id,
+        actor_user_id=None,
+        action="plan.changed",
+        resource_type="tenant",
+        resource_id=tenant.id,
+        extra={"from": previous, "to": new_tier, "event": event, "plan_code": plan.code},
+    )
+
+
 async def _handle_subscription_event(
     db: AsyncSession, *, event: str, subscription_entity: dict, payment_entity: dict
 ) -> None:
@@ -186,6 +227,7 @@ async def _handle_subscription_event(
     current_end = subscription_entity.get("current_end")
     if current_end:
         subscription.current_period_end = datetime.fromtimestamp(current_end, tz=UTC)
+    await _sync_tenant_tier(db, subscription, event)
 
     if event == "subscription.charged":
         payment_id = payment_entity.get("id")
