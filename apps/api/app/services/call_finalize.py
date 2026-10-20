@@ -10,7 +10,7 @@ fire exactly once no matter which path wins the race.
 import logging
 from datetime import UTC, datetime
 
-from app.services import csat
+from app.services import cost_controls, csat
 from app.services.webhooks import enqueue_webhook_event
 from app.workflows.dispatch import enqueue_workflow_trigger
 from sqlalchemy import select
@@ -82,6 +82,9 @@ async def finalize_call(
     _enqueue_qa_scoring(call)
     if status == CallStatus.COMPLETED:
         await csat.schedule_after_call(db, call)
+    # The call's minutes now count toward the month: raise a budget alert if
+    # this pushed spend over a threshold.
+    await cost_controls.evaluate_alerts_safely(db, call.tenant_id)
     return True
 
 

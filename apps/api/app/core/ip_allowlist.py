@@ -80,3 +80,13 @@ async def enforce_ip_allowlist(
     ip = client_ip(request)
     if ip is None or not ip_allowed(ip, entries):
         raise PermissionDeniedError("Your IP address is not on this workspace's allowlist")
+
+
+def enforce_key_ip(request: Request | None, allowed_ips: list[str] | None) -> None:
+    """A key restricted to certain networks refuses everything else. An empty
+    list means anywhere; a request whose address can't be determined is refused."""
+    if not allowed_ips:
+        return
+    ip = client_ip(request) if request is not None else None
+    if ip is None or not ip_allowed(ip, allowed_ips):
+        raise PermissionDeniedError("This API key can't be used from your IP address")

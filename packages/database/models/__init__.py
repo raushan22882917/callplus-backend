@@ -33,6 +33,7 @@ from packages.database.models.conversation import (
     MessageDirection,
     MessageSender,
 )
+from packages.database.models.cost_controls import CostAlert, CostControls
 from packages.database.models.crm import (  # noqa: E402
     CrmCompany,
     CrmDeal,
@@ -108,6 +109,7 @@ from packages.database.models.rbac import (
     TenantUser,
     role_permissions,
 )
+from packages.database.models.session import UserSession
 from packages.database.models.telephony import CallEvent, PhoneNumber
 from packages.database.models.telephony_plus import (  # noqa: E402
     CallForwardingRule,
@@ -179,7 +181,10 @@ __all__ = [
     "IntegrationStatus",
     "Invoice",
     "InvoiceStatus",
+    "CostAlert",
+    "CostControls",
     "CsatSettings",
+    "UserSession",
     "CsatSurvey",
     "McpApiKey",
     "McpOAuthClient",

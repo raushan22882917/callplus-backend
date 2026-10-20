@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.integrations.twilio_client import TwilioClientError, place_outbound_call
 from app.integrations.whatsapp import WhatsAppAPIError, send_template_message
 from app.services import dialer, telephony_plus
+from app.services.cost_controls import SpendGuardError, guard_outbound
 from app.services.voicemail_detection import amd_callback_for_agent
 from app.services.webhooks import enqueue_webhook_event
 from app.worker.celery_app import celery_app
@@ -112,6 +113,12 @@ async def _run_campaign(campaign_id: str) -> None:
                     contact.status = CampaignContactStatus.SENT
                     contact.result = {"attempts": attempts} if attempts > 1 else contact.result
                     break
+                except SpendGuardError:
+                    # Over budget or a cap: stop the campaign (contacts stay pending
+                    # so it can be resumed) rather than failing them one by one.
+                    campaign.status = CampaignStatus.PAUSED
+                    await db.commit()
+                    return
                 except ValueError as exc:  # misconfiguration — retrying can't help
                     contact.status = CampaignContactStatus.FAILED
                     contact.result = {"error": str(exc), "attempts": attempts}
@@ -137,6 +144,7 @@ async def _run_campaign(campaign_id: str) -> None:
 async def _place_campaign_call(db, campaign: Campaign, phone_number, customer: Customer) -> Call:
     if phone_number is None:
         raise ValueError("no phone number assigned to this campaign's AI agent")
+    await guard_outbound(db, campaign.tenant_id)
 
     call = Call(
         tenant_id=campaign.tenant_id,
@@ -236,9 +244,17 @@ async def _run_dialer_pass(db, campaign: Campaign, ds, phone_number) -> None:
 
         state = await telephony_plus.get_or_create_state(db, campaign, contact)
         state.attempts += 1
+        previous_attempt = contact.attempted_at
         contact.attempted_at = now
         try:
             call = await _place_campaign_call(db, campaign, phone_number, customer)
+        except SpendGuardError as exc:
+            # Not this contact's fault: undo its attempt and stop placing for now.
+            state.attempts -= 1
+            contact.attempted_at = previous_attempt
+            if exc.code == "budget_exhausted":
+                campaign.status = CampaignStatus.PAUSED
+            break  # daily/concurrency caps clear by themselves; the next pass retries
         except ValueError as exc:  # misconfiguration — retrying can't help
             contact.status = CampaignContactStatus.FAILED
             contact.result = {"error": str(exc), "attempts": state.attempts}

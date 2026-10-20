@@ -98,7 +98,9 @@ async def _tenant_session(
 
 async def _principal(ctx: Context, db: AsyncSession, scope: str | None) -> McpPrincipal:
     try:
-        principal = await resolve_principal(ctx.headers, db)
+        # The HTTP request (for its client IP); absent on transports that have none.
+        request = getattr(getattr(ctx, "request_context", None), "request", None)
+        principal = await resolve_principal(ctx.headers, db, request)
     except McpAuthError as exc:
         raise ToolError(str(exc)) from exc
     if scope is not None and not principal.allows(scope):

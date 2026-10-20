@@ -15,7 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from packages.database.base import Base
@@ -44,6 +44,11 @@ class ApiKey(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # IPs or CIDR blocks this key may be used from; empty = anywhere (still
+    # subject to the workspace allowlist). A leaked key is useless off-network.
+    allowed_ips: Mapped[list] = mapped_column(
+        JSONB, default=list, server_default="[]", nullable=False
+    )
 
 
 class ApiKeyUsageDaily(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):

@@ -27,6 +27,7 @@ from app.integrations.twilio_client import CallNotLiveError, TwilioClientError, 
 from app.schemas import telephony_plus as schemas
 from app.services import dialer, ivr
 from app.services import telephony_plus as svc
+from app.services.cost_controls import SpendGuardError, guard_outbound
 from app.services.customer_lookup import find_or_create_customer_by_phone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
@@ -750,6 +751,10 @@ async def masked_bridge(
         if not owned:
             raise HTTPException(422, "caller_id must be one of this tenant's phone numbers")
 
+    try:
+        await guard_outbound(db, ctx.tenant_id)
+    except SpendGuardError as exc:
+        raise HTTPException(exc.http_status, {"code": exc.code, "message": exc.message}) from exc
     customer, _ = await find_or_create_customer_by_phone(db, ctx.tenant_id, payload.customer_number)
     call = Call(
         tenant_id=ctx.tenant_id,

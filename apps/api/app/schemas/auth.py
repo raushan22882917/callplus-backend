@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -74,3 +75,16 @@ class VerifyEmailRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class SessionRead(BaseModel):
+    id: uuid.UUID
+    device: str
+    ip_address: str | None
+    created_at: datetime
+    last_seen_at: datetime
+    current: bool
+
+
+class RevokedCount(BaseModel):
+    revoked: int

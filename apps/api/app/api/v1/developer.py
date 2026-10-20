@@ -6,7 +6,7 @@ also be managed by an API key carrying the `webhooks:manage` scope.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.core.api_keys import generate_developer_key
 from app.core.audit import log_audit_event
@@ -19,6 +19,8 @@ from app.schemas.developer import (
     ApiKeyCreate,
     ApiKeyCreated,
     ApiKeyRead,
+    ApiKeyRotate,
+    ApiKeyUpdate,
     UsageDay,
     UsageQuota,
     UsageSummary,
@@ -28,6 +30,7 @@ from app.schemas.developer import (
     WebhookEndpointRead,
     WebhookEndpointUpdate,
 )
+from app.services.security_alerts import notify_owners
 from app.services.webhooks import (
     TEST_EVENT,
     UnsafeWebhookURL,
@@ -69,6 +72,7 @@ def _key_read(key: ApiKey) -> dict:
         "prefix": key.key_prefix,
         "mode": key.mode,
         "scopes": list(key.scopes),
+        "allowed_ips": list(key.allowed_ips or []),
         "last_used_at": key.last_used_at,
         "expires_at": key.expires_at,
         "revoked_at": key.revoked_at,
@@ -128,6 +132,7 @@ async def create_api_key(
         mode=payload.mode,
         scopes=sorted(set(payload.scopes)),
         expires_at=payload.expires_at,
+        allowed_ips=payload.allowed_ips,
         created_by_user_id=ctx.user_id,
     )
     await log_audit_event(
@@ -141,7 +146,108 @@ async def create_api_key(
     )
     await db.commit()
     await db.refresh(key)
+    if payload.mode == "live":
+        await notify_owners(
+            db,
+            ctx.tenant_id,
+            subject="A new live API key was created",
+            message=f'A live API key named "{key.name}" was created with access to: '
+            f"{', '.join(key.scopes)}.",
+        )
     return {**_key_read(key), "secret": secret}
+
+
+@router.patch("/api-keys/{key_id}", response_model=ApiKeyRead)
+async def update_api_key(
+    key_id: uuid.UUID,
+    payload: ApiKeyUpdate,
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    if ctx.api_key_id is not None:
+        raise PermissionDeniedError("API keys cannot manage API keys")
+    key = await ApiKeyRepository(db, ctx.tenant_id).get(key_id)
+    if key.revoked_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "A revoked key cannot be edited")
+    changes = payload.model_dump(exclude_unset=True)
+    if changes.get("expires_at") is not None and changes["expires_at"] <= datetime.now(UTC):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "expires_at must be in the future")
+    if changes.get("name") is None:
+        changes.pop("name", None)
+    if changes.get("allowed_ips") is None:
+        changes.pop("allowed_ips", None)
+    for field, value in changes.items():
+        setattr(key, field, value)
+    await log_audit_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_user_id=ctx.user_id,
+        action="api_key.updated",
+        resource_type="api_key",
+        resource_id=key.id,
+        extra={"fields": sorted(changes)},
+    )
+    await db.commit()
+    await db.refresh(key)
+    return _key_read(key)
+
+
+@router.post(
+    "/api-keys/{key_id}/rotate", response_model=ApiKeyCreated, status_code=status.HTTP_201_CREATED
+)
+async def rotate_api_key(
+    key_id: uuid.UUID,
+    payload: ApiKeyRotate,
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Issue a replacement with the same name, scopes and IP limits. The old
+    key stops working after `grace_hours` (0 = immediately), so a deployment
+    can switch over without downtime."""
+    if ctx.api_key_id is not None:
+        raise PermissionDeniedError("API keys cannot manage API keys")
+    old = await ApiKeyRepository(db, ctx.tenant_id).get(key_id)
+    now = datetime.now(UTC)
+    if old.revoked_at is not None or (old.expires_at is not None and old.expires_at <= now):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a working key can be rotated")
+
+    secret, prefix, hashed = generate_developer_key(old.mode)
+    new = await ApiKeyRepository(db, ctx.tenant_id).create(
+        name=old.name,
+        key_prefix=prefix,
+        hashed_key=hashed,
+        mode=old.mode,
+        scopes=list(old.scopes),
+        expires_at=None,
+        allowed_ips=list(old.allowed_ips or []),
+        created_by_user_id=ctx.user_id,
+    )
+    if payload.grace_hours == 0:
+        old.revoked_at = now
+    else:
+        ends = now + timedelta(hours=payload.grace_hours)
+        # Never extend a key that was due to expire sooner than the grace period.
+        old.expires_at = min(ends, old.expires_at) if old.expires_at else ends
+    await log_audit_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_user_id=ctx.user_id,
+        action="api_key.rotated",
+        resource_type="api_key",
+        resource_id=old.id,
+        extra={"new_key_id": str(new.id), "grace_hours": payload.grace_hours},
+    )
+    await db.commit()
+    await db.refresh(new)
+    if old.mode == "live":
+        await notify_owners(
+            db,
+            ctx.tenant_id,
+            subject="An API key was rotated",
+            message=f'The live API key "{old.name}" was rotated. '
+            + ("The old key stopped working immediately." if payload.grace_hours == 0 else f"The old key works for {payload.grace_hours} more hours."),
+        )
+    return {**_key_read(new), "secret": secret}
 
 
 @router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)

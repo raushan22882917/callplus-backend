@@ -60,6 +60,7 @@ class TokenPayload(BaseModel):
     jti: str
     exp: int
     iat: int
+    sid: str | None = None  # signed-in session; absent on tokens issued before sessions existed
 
 
 def _create_token(
@@ -69,6 +70,7 @@ def _create_token(
     tenant_id: uuid.UUID,
     token_type: TokenType,
     expires_delta: timedelta,
+    session_id: uuid.UUID | None = None,
 ) -> str:
     now = datetime.now(UTC)
     payload = {
@@ -80,11 +82,17 @@ def _create_token(
         "iat": int(now.timestamp()),
         "exp": int((now + expires_delta).timestamp()),
     }
+    if session_id is not None:
+        payload["sid"] = str(session_id)
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
 def create_access_token(
-    *, user_id: uuid.UUID, membership_id: uuid.UUID, tenant_id: uuid.UUID
+    *,
+    user_id: uuid.UUID,
+    membership_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    session_id: uuid.UUID | None = None,
 ) -> str:
     return _create_token(
         user_id=user_id,
@@ -92,11 +100,16 @@ def create_access_token(
         tenant_id=tenant_id,
         token_type=TokenType.ACCESS,
         expires_delta=timedelta(minutes=settings.access_token_expire_minutes),
+        session_id=session_id,
     )
 
 
 def create_refresh_token(
-    *, user_id: uuid.UUID, membership_id: uuid.UUID, tenant_id: uuid.UUID
+    *,
+    user_id: uuid.UUID,
+    membership_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    session_id: uuid.UUID | None = None,
 ) -> str:
     return _create_token(
         user_id=user_id,
@@ -104,6 +117,7 @@ def create_refresh_token(
         tenant_id=tenant_id,
         token_type=TokenType.REFRESH,
         expires_delta=timedelta(days=settings.refresh_token_expire_days),
+        session_id=session_id,
     )
 
 

@@ -14,6 +14,7 @@ from app.schemas.call import CallCreate, CallRead
 from app.schemas.conversation import MessageRead
 from app.services.call_analysis import analyze_call
 from app.services.call_finalize import emit_call_webhooks
+from app.services.cost_controls import SpendGuardError, guard_outbound
 from app.services.customer_lookup import find_or_create_customer_by_phone
 from app.services.platform_masking import masked_calls, masked_messages
 from app.services.voicemail_detection import amd_callback_for_agent
@@ -167,6 +168,13 @@ async def create_call(
         call.started_at = call.ended_at = now
         call.duration_seconds = 0
     elif payload.direction == CallDirection.OUTBOUND:
+        try:
+            await guard_outbound(db, ctx.tenant_id)
+        except SpendGuardError as exc:
+            await db.rollback()
+            raise HTTPException(
+                exc.http_status, {"code": exc.code, "message": exc.message}
+            ) from exc
         settings = get_settings()
         voice_webhook_url = (
             f"{settings.public_base_url}/api/v1/webhooks/telephony/twilio/voice?call_id={call.id}"

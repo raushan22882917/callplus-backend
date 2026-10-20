@@ -2,6 +2,7 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from app.core.audit import log_audit_event
 from app.core.config import get_settings
 from app.core.deps import RequestContext, get_access_token_payload, get_current_context, get_db
 from app.core.exceptions import ConflictError, InvalidCredentialsError, PermissionDeniedError
@@ -28,6 +29,8 @@ from app.schemas.auth import (
     MessageResponse,
     RefreshRequest,
     ResetPasswordRequest,
+    RevokedCount,
+    SessionRead,
     SignupRequest,
     SwitchTenantRequest,
     TenantOption,
@@ -35,7 +38,17 @@ from app.schemas.auth import (
     VerifyEmailRequest,
 )
 from app.services.platform_totp import get_enabled_totp, verify_second_factor
-from fastapi import APIRouter, Depends, HTTPException, status
+from app.services.user_sessions import (
+    alert_new_sign_in,
+    create_session,
+    describe_device,
+    list_active,
+    revoke,
+    revoke_others,
+    session_is_active,
+    touch,
+)
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,13 +93,38 @@ async def _send_verification_email(user: User) -> None:
         logger.exception("failed to send verification email to %s", user.email)
 
 
-def _issue_tokens(membership: TenantUser) -> TokenPair:
+async def _issue_tokens(
+    db: AsyncSession,
+    membership: TenantUser,
+    request: Request,
+    *,
+    session_id: uuid.UUID | None = None,
+    announce: bool = False,
+) -> TokenPair:
+    """Tokens tied to a session. Pass `session_id` to keep an existing one (a
+    refresh); otherwise a new session is recorded for this browser. `announce`
+    emails the user when it is a sign-in from somewhere new."""
+    if session_id is None:
+        session = await create_session(
+            db, user_id=membership.user_id, tenant_id=membership.tenant_id, request=request
+        )
+        session_id = session.id
+        await db.commit()
+        if announce:
+            user = membership.user or await db.get(User, membership.user_id)
+            await alert_new_sign_in(db, user, session)
     return TokenPair(
         access_token=create_access_token(
-            user_id=membership.user_id, membership_id=membership.id, tenant_id=membership.tenant_id
+            user_id=membership.user_id,
+            membership_id=membership.id,
+            tenant_id=membership.tenant_id,
+            session_id=session_id,
         ),
         refresh_token=create_refresh_token(
-            user_id=membership.user_id, membership_id=membership.id, tenant_id=membership.tenant_id
+            user_id=membership.user_id,
+            membership_id=membership.id,
+            tenant_id=membership.tenant_id,
+            session_id=session_id,
         ),
     )
 
@@ -114,7 +152,9 @@ async def _load_active_membership(db: AsyncSession, membership_id: uuid.UUID) ->
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(_limit_signup)],
 )
-async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)) -> TokenPair:
+async def signup(
+    payload: SignupRequest, request: Request, db: AsyncSession = Depends(get_db)
+) -> TokenPair:
     owner_role = (
         await db.execute(select(Role).where(Role.tenant_id.is_(None), Role.name == "OWNER"))
     ).scalar_one_or_none()
@@ -144,11 +184,13 @@ async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)) -> 
 
     await _send_verification_email(user)
 
-    return _issue_tokens(membership)
+    return await _issue_tokens(db, membership, request)
 
 
 @router.post("/login", response_model=LoginResponse, dependencies=[Depends(_limit_login)])
-async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> LoginResponse:
+async def login(
+    payload: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)
+) -> LoginResponse:
     user = (
         await db.execute(select(User).where(User.email == payload.email.lower()))
     ).scalar_one_or_none()
@@ -197,11 +239,13 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> Lo
             ],
         )
 
-    return LoginResponse(tokens=_issue_tokens(memberships[0]))
+    return LoginResponse(tokens=await _issue_tokens(db, memberships[0], request, announce=True))
 
 
 @router.post("/refresh", response_model=TokenPair, dependencies=[Depends(_limit_login)])
-async def refresh(payload: RefreshRequest, db: AsyncSession = Depends(get_db)) -> TokenPair:
+async def refresh(
+    payload: RefreshRequest, request: Request, db: AsyncSession = Depends(get_db)
+) -> TokenPair:
     try:
         token_payload = decode_token(payload.refresh_token, expected_type=TokenType.REFRESH)
     except InvalidTokenError as exc:
@@ -213,12 +257,20 @@ async def refresh(payload: RefreshRequest, db: AsyncSession = Depends(get_db)) -
     if membership is None or str(membership.user_id) != token_payload.sub:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session is no longer valid")
 
-    return _issue_tokens(membership)
+    session_id = uuid.UUID(token_payload.sid) if token_payload.sid else None
+    if session_id is not None:
+        if not await session_is_active(db, session_id, membership.user_id):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This session was signed out")
+        await touch(db, session_id)
+        await db.commit()
+    # A token from before sessions existed gets its first session here.
+    return await _issue_tokens(db, membership, request, session_id=session_id)
 
 
 @router.post("/switch-tenant", response_model=TokenPair)
 async def switch_tenant(
     payload: SwitchTenantRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     token_payload=Depends(get_access_token_payload),
 ) -> TokenPair:
@@ -237,7 +289,8 @@ async def switch_tenant(
     if membership is None or not membership.user.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not a member of that tenant")
 
-    return _issue_tokens(membership)
+    session_id = uuid.UUID(token_payload.sid) if token_payload.sid else None
+    return await _issue_tokens(db, membership, request, session_id=session_id)
 
 
 @router.post(
@@ -296,6 +349,8 @@ async def reset_password(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired reset token")
 
     user.hashed_password = hash_password(payload.new_password)
+    # Whoever knew the old password (or stole a session) is signed out everywhere.
+    await revoke_others(db, user.id, keep=None)
     await db.commit()
 
     return MessageResponse(message="Password has been reset. You can now log in.")
@@ -334,3 +389,84 @@ async def resend_verification(
 
     await _send_verification_email(user)
     return MessageResponse(message="Verification email sent.")
+
+
+# --- Signed-in sessions -----------------------------------------------------
+
+
+def _session_read(row, current: uuid.UUID | None) -> SessionRead:
+    return SessionRead(
+        id=row.id,
+        device=describe_device(row.user_agent),
+        ip_address=row.ip_address,
+        created_at=row.created_at,
+        last_seen_at=row.last_seen_at,
+        current=row.id == current,
+    )
+
+
+def _humans_only(ctx: RequestContext) -> None:
+    if ctx.api_key_id is not None:
+        raise PermissionDeniedError("API keys have no sign-in sessions")
+
+
+@router.get("/sessions", response_model=list[SessionRead])
+async def list_sessions(
+    ctx: RequestContext = Depends(get_current_context), db: AsyncSession = Depends(get_db)
+) -> list[SessionRead]:
+    """The devices signed in to the caller's own account."""
+    _humans_only(ctx)
+    return [_session_read(row, ctx.session_id) for row in await list_active(db, ctx.user_id)]
+
+
+@router.post("/sessions/revoke-others", response_model=RevokedCount)
+async def revoke_other_sessions(
+    ctx: RequestContext = Depends(get_current_context), db: AsyncSession = Depends(get_db)
+) -> RevokedCount:
+    """Sign out everywhere except this browser."""
+    _humans_only(ctx)
+    count = await revoke_others(db, ctx.user_id, keep=ctx.session_id)
+    await log_audit_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_user_id=ctx.user_id,
+        action="session.revoked_others",
+        resource_type="user",
+        resource_id=ctx.user_id,
+        extra={"count": count},
+    )
+    await db.commit()
+    return RevokedCount(revoked=count)
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_session(
+    session_id: uuid.UUID,
+    ctx: RequestContext = Depends(get_current_context),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    _humans_only(ctx)
+    # A session that isn't yours looks exactly like one that doesn't exist.
+    if not await revoke(db, ctx.user_id, session_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    await log_audit_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_user_id=ctx.user_id,
+        action="session.revoked",
+        resource_type="user",
+        resource_id=ctx.user_id,
+        extra={"session_id": str(session_id), "current": session_id == ctx.session_id},
+    )
+    await db.commit()
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    ctx: RequestContext = Depends(get_current_context), db: AsyncSession = Depends(get_db)
+) -> None:
+    """Ends this browser's session on the server, so its tokens stop working
+    at once rather than when they expire."""
+    if ctx.session_id is not None:
+        await revoke(db, ctx.user_id, ctx.session_id)
+        await db.commit()

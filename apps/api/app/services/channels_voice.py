@@ -12,6 +12,7 @@ from app.integrations.channel_payloads import build_voicemail_twiml
 from app.integrations.credentials import get_twilio_credentials
 from app.integrations.twilio_client import TwilioClientError, place_outbound_call
 from app.services.channels import get_channel_settings
+from app.services.cost_controls import SpendGuardError, guard_outbound
 from app.services.customer_lookup import find_or_create_customer_by_phone
 from app.services.outbound_call import OutboundCallError, place_ai_outbound_call
 from sqlalchemy import select
@@ -163,6 +164,10 @@ async def place_click_to_call(
         raise OutboundCallError("agent_phone is required for a bridged call")
 
     resolved_from = await _tenant_from_number(db, tenant_id, from_number)
+    try:
+        await guard_outbound(db, tenant_id)
+    except SpendGuardError as exc:
+        raise OutboundCallError(exc.message) from exc
     customer, _ = await find_or_create_customer_by_phone(db, tenant_id, to_number)
     call = Call(
         tenant_id=tenant_id,

@@ -20,6 +20,7 @@ from app.integrations.oauth.errors import OAuthError
 from app.integrations.oauth.http import new_client
 from app.integrations.oauth.providers import get_provider
 from app.services.platform_totp import get_enabled_totp
+from app.services.user_sessions import alert_new_sign_in, create_session
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -130,7 +131,11 @@ async def oauth_callback(
             resource_id=user.id,
             extra={"provider": provider},
         )
+        session = await create_session(
+            db, user_id=user.id, tenant_id=membership.tenant_id, request=request
+        )
         await db.commit()
+        await alert_new_sign_in(db, user, session)
     except OAuthError as exc:
         await db.rollback()
         return _login_error(exc.code, exc.message)
@@ -141,10 +146,16 @@ async def oauth_callback(
     fragment = urlencode(
         {
             "access_token": create_access_token(
-                user_id=user.id, membership_id=membership.id, tenant_id=membership.tenant_id
+                user_id=user.id,
+                membership_id=membership.id,
+                tenant_id=membership.tenant_id,
+                session_id=session.id,
             ),
             "refresh_token": create_refresh_token(
-                user_id=user.id, membership_id=membership.id, tenant_id=membership.tenant_id
+                user_id=user.id,
+                membership_id=membership.id,
+                tenant_id=membership.tenant_id,
+                session_id=session.id,
             ),
         },
         quote_via=quote,

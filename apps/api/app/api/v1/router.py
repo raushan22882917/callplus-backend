@@ -12,6 +12,7 @@ from app.api.v1 import (
     campaigns,
     channels,
     crm,
+    cost_controls,
     csat,
     customers,
     developer,
@@ -71,6 +72,7 @@ api_router.include_router(transfer_targets.router)
 api_router.include_router(assistant.router)
 api_router.include_router(channels.router)
 api_router.include_router(crm.router)
+api_router.include_router(cost_controls.router)
 api_router.include_router(csat.router)
 api_router.include_router(guardrails.router)
 api_router.include_router(insights.router)

@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.core.api_keys import API_KEY_PREFIXES, hash_api_key
+from app.core.exceptions import PermissionDeniedError
+from app.core.ip_allowlist import enforce_ip_allowlist, enforce_key_ip
 from app.core.mcp_oauth import ACCESS_PREFIX
 from app.core.rate_limit import enforce_rate_limit
 from fastapi import HTTPException
@@ -32,6 +34,7 @@ from packages.database.models import (
     TenantUser,
     User,
 )
+from packages.database.session import set_tenant_context
 
 
 @dataclass(frozen=True)
@@ -99,7 +102,9 @@ async def valid_oauth_token(db: AsyncSession, token: str) -> McpOAuthToken | Non
     return row
 
 
-async def resolve_principal(headers: Mapping[str, str] | None, db: AsyncSession) -> McpPrincipal:
+async def resolve_principal(
+    headers: Mapping[str, str] | None, db: AsyncSession, request=None
+) -> McpPrincipal:
     token = _bearer_token(headers)
     if token is None:
         raise McpAuthError(
@@ -127,6 +132,10 @@ async def resolve_principal(headers: Mapping[str, str] | None, db: AsyncSession)
             or (dev_key.expires_at is not None and dev_key.expires_at <= now)
         ):
             raise McpAuthError("Invalid, expired or revoked API key")
+        try:
+            enforce_key_ip(request, dev_key.allowed_ips)
+        except PermissionDeniedError as exc:
+            raise McpAuthError(str(exc)) from exc
         key_id, tenant_id = dev_key.id, dev_key.tenant_id
         user_id, scopes = dev_key.created_by_user_id, frozenset(dev_key.scopes or [])
         dev_key.last_used_at = now
@@ -143,6 +152,15 @@ async def resolve_principal(headers: Mapping[str, str] | None, db: AsyncSession)
     tenant = await db.get(Tenant, tenant_id)
     if tenant is None or tenant.status not in (TenantStatus.ACTIVE, TenantStatus.TRIAL):
         raise McpAuthError("Account is not active")
+    if request is not None:
+        # The workspace allowlist covers MCP exactly as it covers the REST API.
+        # Its table is row-level-secured, so the tenant must be set first or the
+        # lookup would see no rows and let everyone in.
+        await set_tenant_context(db, tenant_id)
+        try:
+            await enforce_ip_allowlist(request, db, tenant_id)
+        except PermissionDeniedError as exc:
+            raise McpAuthError(str(exc)) from exc
     try:
         await enforce_rate_limit(key_id)
     except HTTPException as exc:

@@ -11,6 +11,7 @@ import uuid
 from app.core.config import get_settings
 from app.integrations.credentials import get_twilio_credentials
 from app.integrations.twilio_client import TwilioClientError, place_outbound_call
+from app.services.cost_controls import SpendGuardError, guard_outbound
 from app.services.customer_lookup import find_or_create_customer_by_phone
 from app.services.telephony_plus import check_outbound_allowed
 from app.services.voicemail_detection import amd_callback_for_agent
@@ -113,6 +114,11 @@ async def place_ai_outbound_call(
             f"{to_number} cannot be called: it is on this tenant's "
             + ("blocklist" if decision.reason == "blocked" else "do-not-disturb registry")
         )
+
+    try:
+        await guard_outbound(db, tenant_id)
+    except SpendGuardError as exc:
+        raise OutboundCallError(exc.message) from exc
 
     customer, created = await find_or_create_customer_by_phone(db, tenant_id, to_number)
 

@@ -6,9 +6,10 @@ from datetime import UTC, datetime
 
 from app.core.api_keys import API_KEY_PREFIXES, hash_api_key, permissions_for_scopes
 from app.core.exceptions import PermissionDeniedError
-from app.core.ip_allowlist import enforce_ip_allowlist
+from app.core.ip_allowlist import enforce_ip_allowlist, enforce_key_ip
 from app.core.rate_limit import enforce_rate_limit
 from app.core.security import InvalidTokenError, TokenPayload, TokenType, decode_token
+from app.services.user_sessions import session_is_active
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
@@ -67,6 +68,8 @@ class RequestContext:
     api_key_id: uuid.UUID | None = None
     api_key_mode: str | None = None
     api_key_scopes: frozenset[str] = frozenset()
+    # The signed-in session behind a JWT login (None for API keys and older tokens).
+    session_id: uuid.UUID | None = None
 
     def has_permission(self, code: str) -> bool:
         return self.is_platform_admin or code in self.permission_codes
@@ -120,6 +123,7 @@ async def context_from_api_key(
     await set_tenant_context(db, key.tenant_id)
     if request is not None:
         await enforce_ip_allowlist(request, db, key.tenant_id)
+        enforce_key_ip(request, key.allowed_ips)
     await _record_api_key_use(key.tenant_id, key.id)
 
     return RequestContext(
@@ -166,6 +170,10 @@ async def get_current_context(
     ):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session is no longer valid")
 
+    session_id = uuid.UUID(payload.sid) if payload.sid else None
+    if session_id is not None and not await session_is_active(db, session_id, membership.user_id):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This session was signed out")
+
     # Platform admins legitimately work across tenants, so they are not
     # confined by row-level security; everyone else is scoped to their tenant.
     if not membership.user.is_platform_admin:
@@ -181,6 +189,7 @@ async def get_current_context(
         role_name=membership.role.name,
         permission_codes=frozenset(p.code for p in membership.role.permissions),
         is_platform_admin=membership.user.is_platform_admin,
+        session_id=session_id,
     )
 
 

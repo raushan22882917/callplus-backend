@@ -55,7 +55,7 @@ async def test_inbound_call_to_known_number_creates_call_and_returns_stream_twim
     assert len(calls) == 1
     assert calls[0]["from_number"] == "+15551112222"
     assert calls[0]["ai_agent_id"] == agent_id
-    assert calls[0]["status"] == "ringing"
+    assert calls[0]["status"] == "in_progress"
 
 
 async def test_inbound_call_to_unknown_number_is_rejected(client: AsyncClient) -> None:

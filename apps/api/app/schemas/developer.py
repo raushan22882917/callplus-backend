@@ -2,6 +2,7 @@ import uuid
 from datetime import date, datetime
 from typing import Literal
 
+from app.core.ip_allowlist import normalize_entry
 from pydantic import BaseModel, Field, field_validator
 
 ApiKeyScope = Literal[
@@ -29,11 +30,40 @@ WebhookEventName = Literal[
 ]
 
 
+def _clean_ips(value: list[str] | None) -> list[str] | None:
+    if value is None:
+        return value
+    if len(value) > 20:
+        raise ValueError("use at most 20 IP addresses or ranges")
+    try:
+        return sorted({normalize_entry(entry) for entry in value if entry.strip()})
+    except ValueError as exc:
+        raise ValueError(f"not a valid IP address or range: {exc}") from exc
+
+
 class ApiKeyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     mode: Literal["live", "test"] = "test"
     scopes: list[ApiKeyScope] = Field(min_length=1)
     expires_at: datetime | None = None
+    allowed_ips: list[str] = Field(default_factory=list)
+
+    _ips = field_validator("allowed_ips")(_clean_ips)
+
+
+class ApiKeyUpdate(BaseModel):
+    """Edit a key without changing its secret. Omitted fields are unchanged."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    allowed_ips: list[str] | None = None
+    expires_at: datetime | None = None
+
+    _ips = field_validator("allowed_ips")(_clean_ips)
+
+
+class ApiKeyRotate(BaseModel):
+    # How long the old key keeps working so deployments can switch over. 0 = revoke now.
+    grace_hours: int = Field(default=24, ge=0, le=168)
 
 
 class ApiKeyRead(BaseModel):
@@ -42,6 +72,7 @@ class ApiKeyRead(BaseModel):
     prefix: str
     mode: Literal["live", "test"]
     scopes: list[str]
+    allowed_ips: list[str] = Field(default_factory=list)
     last_used_at: datetime | None
     expires_at: datetime | None
     revoked_at: datetime | None
