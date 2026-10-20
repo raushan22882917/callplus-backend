@@ -41,6 +41,7 @@ WEBHOOK_EVENTS = (
     "sla.breached",
     "csat.received",
     "budget.alert",
+    "lead.captured",
 )
 TEST_EVENT = "webhook.test"
 MAX_ATTEMPTS = 6

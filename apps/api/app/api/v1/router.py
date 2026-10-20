@@ -11,8 +11,8 @@ from app.api.v1 import (
     calls,
     campaigns,
     channels,
-    crm,
     cost_controls,
+    crm,
     csat,
     customers,
     developer,
@@ -27,6 +27,7 @@ from app.api.v1 import (
     operations,
     payments,
     platform,
+    post_call,
     roles,
     telephony,
     telephony_plus,
@@ -36,6 +37,7 @@ from app.api.v1 import (
     users,
     whatsapp,
     whatsapp_templates,
+    widget_leads,
     workflows,
     workspace,
 )
@@ -74,6 +76,8 @@ api_router.include_router(channels.router)
 api_router.include_router(crm.router)
 api_router.include_router(cost_controls.router)
 api_router.include_router(csat.router)
+api_router.include_router(post_call.router)
+api_router.include_router(widget_leads.router)
 api_router.include_router(guardrails.router)
 api_router.include_router(insights.router)
 api_router.include_router(operations.router)

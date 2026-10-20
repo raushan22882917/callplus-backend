@@ -186,6 +186,16 @@ async def _record_block(
     await db.commit()
 
 
+async def budget_exhausted(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
+    """True when the tenant chose to pause outbound at the budget and has reached it.
+    Used to hold back paid messages (SMS) the same way outbound calls are held back."""
+    controls = await _controls_or_none(db, tenant_id)
+    if controls is None or not controls.pause_outbound_at_budget or controls.monthly_budget is None:
+        return False
+    _, spend, _ = await month_spend(db, tenant_id)
+    return spend >= float(controls.monthly_budget)
+
+
 async def guard_outbound(db: AsyncSession, tenant_id: uuid.UUID, *, calls: int = 1) -> None:
     """Raises SpendGuardError if placing `calls` more outbound calls would break
     the tenant's budget or caps. Free (one cheap query) for a tenant that never

@@ -33,7 +33,7 @@ from app.schemas.internal import (
     CallTurnResponse,
 )
 from app.services.agent_engine import run_turn, run_turn_stream
-from app.services.call_closing import conversation_is_over
+from app.services.call_closing import caller_wants_to_end, conversation_is_over
 from app.services.call_finalize import finalize_call
 from app.services.routing import route_call
 from app.services.webhooks import enqueue_webhook_event
@@ -251,7 +251,9 @@ def _finish_call_turn(
         return CallTurnResponse(
             reply_text=result.reply_text,
             action="hangup",
-            reason="conversation_complete",
+            reason="caller_requested"
+            if caller_wants_to_end(payload.transcript)
+            else "conversation_complete",
             reply_message_id=result.reply_message_id,
         )
     return CallTurnResponse(

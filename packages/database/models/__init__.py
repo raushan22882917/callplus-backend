@@ -109,7 +109,9 @@ from packages.database.models.rbac import (
     TenantUser,
     role_permissions,
 )
+from packages.database.models.post_call import CallNotification, PostCallSettings
 from packages.database.models.session import UserSession
+from packages.database.models.widget_lead import WidgetLead
 from packages.database.models.telephony import CallEvent, PhoneNumber
 from packages.database.models.telephony_plus import (  # noqa: E402
     CallForwardingRule,
@@ -181,10 +183,13 @@ __all__ = [
     "IntegrationStatus",
     "Invoice",
     "InvoiceStatus",
+    "CallNotification",
     "CostAlert",
+    "PostCallSettings",
     "CostControls",
     "CsatSettings",
     "UserSession",
+    "WidgetLead",
     "CsatSurvey",
     "McpApiKey",
     "McpOAuthClient",

@@ -64,3 +64,16 @@ async def _score_call_qa(call_id: str) -> None:
 @celery_app.task(name="insights.score_call", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
 def score_call_qa_task(call_id: str) -> None:
     asyncio.run(_score_call_qa(call_id))
+
+
+async def _notify_after_call(call_id: str) -> None:
+    from app.services.post_call import notify_after_call
+
+    ensure_engine()
+    async with session_scope() as db:
+        await notify_after_call(db, uuid.UUID(call_id))
+
+
+@celery_app.task(name="calls.notify_after", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
+def notify_after_call_task(call_id: str) -> None:
+    asyncio.run(_notify_after_call(call_id))

@@ -12,10 +12,12 @@ or by that key. Treat those lookups as the trust boundary.
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 import httpx
@@ -55,6 +57,7 @@ from app.schemas.channels import (
 from app.services import channels as svc
 from app.services import channels_voice as voice
 from app.services import whatsapp_templates as tpl
+from app.services import widget_leads
 from app.services.customer_lookup import find_or_create_customer_by_phone
 from app.services.outbound_call import OutboundCallError, place_ai_outbound_call
 from app.services.webhooks import enqueue_webhook_event
@@ -73,6 +76,7 @@ from packages.database.models import (
     MessageDirection,
     MessageSender,
     PhoneNumber,
+    Tenant,
     Ticket,
     TicketComment,
     TicketPriority,
@@ -87,7 +91,9 @@ from packages.database.models.channels import (
     MissedCall,
     Voicemail,
 )
+from packages.database.models.widget_lead import WidgetLead
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/channels", tags=["channels"])
 
 _EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>'
@@ -154,6 +160,27 @@ def _origin_forbidden(request: Request, row: ChannelSettings) -> bool:
     origin = request.headers.get("origin")
     allowed = (row.config or {}).get("allowed_origins") or []
     return bool(allowed and origin and origin not in allowed)
+
+
+def _validate_widget_config(config: dict) -> None:
+    for key in ("lead_form", "require_phone", "call_me"):
+        if key in config and not isinstance(config[key], bool):
+            raise HTTPException(422, f"{key} must be true or false")
+    countries = config.get("allowed_countries")
+    if countries is not None and (
+        not isinstance(countries, list)
+        or len(countries) > 30
+        or not all(isinstance(c, str) and re.fullmatch(r"\+?\d{1,4}", c.strip()) for c in countries)
+    ):
+        raise HTTPException(422, "allowed_countries must be calling codes like +91, one per entry")
+    cap = config.get("max_calls_per_day")
+    if cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or not 1 <= cap <= 1000):
+        raise HTTPException(422, "max_calls_per_day must be a whole number from 1 to 1000")
+    consent = config.get("consent_text")
+    if consent is not None and (not isinstance(consent, str) or len(consent) > 600):
+        raise HTTPException(422, "consent_text must be text of at most 600 characters")
+    if config.get("require_phone") and not config.get("lead_form"):
+        raise HTTPException(422, "require_phone needs lead_form to be on")
 
 
 def _msg(m: Message) -> dict:
@@ -240,6 +267,8 @@ async def update_channel_settings(
             not isinstance(origins, list) or not all(isinstance(o, str) for o in origins)
         ):
             raise HTTPException(422, "allowed_origins must be a list of origin strings")
+        if channel == "web_chat":
+            _validate_widget_config(payload.config)
         row.config = {k: v for k, v in payload.config.items() if v not in (None, "")}
 
     if payload.credentials is not None:
@@ -554,10 +583,15 @@ async def webchat_config(public_key: str, request: Request, db: AsyncSession = D
     if row is None:
         return _cors_json(request, None, {"detail": "Chat is not available"}, 404)
     config = row.config or {}
+    tenant = await db.get(Tenant, row.tenant_id)
     return _cors_json(
         request,
         row,
-        {"title": config.get("title") or "Chat with us", "color": config.get("color") or "#2563eb"},
+        {
+            "title": config.get("title") or "Chat with us",
+            "color": config.get("color") or "#2563eb",
+            **widget_leads.widget_options(config, tenant.name if tenant else "us"),
+        },
     )
 
 
@@ -575,10 +609,32 @@ async def webchat_session(public_key: str, request: Request, db: AsyncSession = 
         payload = await _read_payload(request)
     except HTTPException:
         payload = {}
+    config = row.config or {}
     email = str(payload.get("email") or "").strip()[:254]
     name = str(payload.get("name") or "").strip()[:120] or None
+    capture = bool(config.get("lead_form"))
+    phone = None
+    if capture:
+        # A honeypot field that real visitors never see; bots fill it.
+        if payload.get("website"):
+            return _cors_json(request, row, {"session_token": secrets.token_urlsafe(32), "messages": []})
+        if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            return _cors_json(request, row, {"detail": "That email address doesn't look right."}, 422)
+        tenant = await db.get(Tenant, row.tenant_id)
+        try:
+            phone = widget_leads.normalize_visitor_phone(
+                str(payload.get("phone") or ""), tenant.country if tenant else None
+            )
+        except widget_leads.LeadError as exc:
+            return _cors_json(request, row, {"detail": exc.message}, exc.http_status)
+        if not name:
+            return _cors_json(request, row, {"detail": "Please tell us your name."}, 422)
+        if config.get("require_phone") and not phone:
+            return _cors_json(request, row, {"detail": "Please enter your phone number."}, 422)
+        if not phone and not email:
+            return _cors_json(request, row, {"detail": "Please give us a phone number or an email address."}, 422)
     customer_id = None
-    if email and re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+    if email and not capture and re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         customer, _ = await svc.find_or_create_customer_by_email(db, row.tenant_id, email, name)
         customer_id = customer.id
 
@@ -589,9 +645,39 @@ async def webchat_session(public_key: str, request: Request, db: AsyncSession = 
         ConversationChannel.WEB_CHAT,
         _session_hash(token),
         customer_id=customer_id,
-        contact_address=email or None,
+        contact_address=phone or email or None,
         subject="Website chat",
     )
+    if capture:
+        utm = payload.get("utm") if isinstance(payload.get("utm"), dict) else {}
+        lead, customer = await widget_leads.capture_lead(
+            db,
+            row,
+            conversation_id=conversation.id,
+            name=name,
+            phone=phone,
+            email=email or None,
+            interest=str(payload.get("interest") or "").strip()[:2000] or None,
+            page_url=str(payload.get("page_url") or "")[:2048] or None,
+            referrer=str(payload.get("referrer") or "")[:2048] or None,
+            utm={k: v for k, v in utm.items() if k.startswith("utm_")},
+            user_agent=request.headers.get("user-agent"),
+            ip=_client_ip(request),
+        )
+        conversation.customer_id = customer.id if customer else None
+        enqueue_webhook_event(
+            tenant_id=row.tenant_id,
+            event="lead.captured",
+            data={
+                "lead_id": str(lead.crm_lead_id) if lead.crm_lead_id else None,
+                "customer_id": str(lead.customer_id) if lead.customer_id else None,
+                "source": "web_chat",
+                "name": lead.name,
+                "phone": lead.phone,
+                "email": lead.email,
+                "page_url": lead.page_url,
+            },
+        )
     messages = []
     greeting = (row.config or {}).get("greeting")
     if greeting:
@@ -659,8 +745,84 @@ async def webchat_message(public_key: str, request: Request, db: AsyncSession = 
     return _cors_json(
         request,
         row,
-        {"messages": [_msg(m) for m in new_messages], "awaiting_human": agent is None},
+        {
+            "messages": [_msg(m) for m in new_messages],
+            "awaiting_human": agent is None,
+            # The visitor asked for a call: the widget shows a "Call me" card and
+            # waits for their explicit tap, which is also their consent.
+            "call_offer": bool((row.config or {}).get("call_me")) and widget_leads.wants_call(text),
+        },
     )
+
+
+@router.post("/webchat/{public_key}/call-request")
+async def webchat_call_request(public_key: str, request: Request, db: AsyncSession = Depends(get_db)) -> JSONResponse:
+    """The visitor asks the AI agent to phone them. Needs their explicit consent."""
+    row = await svc.get_settings_by_public_key(db, public_key, "web_chat")
+    if row is None:
+        return _cors_json(request, None, {"detail": "Chat is not available"}, 404)
+    # A detached copy for the response headers: the database row can be expired by a rollback below.
+    cors_row = SimpleNamespace(config=dict(row.config or {}))
+    if _origin_forbidden(request, row):
+        return _cors_json(request, cors_row, {"detail": "This website is not allowed to use the chat"}, 403)
+    try:
+        payload = await _read_payload(request)
+    except HTTPException as exc:
+        return _cors_json(request, cors_row, {"detail": exc.detail}, exc.status_code)
+
+    token = str(payload.get("session_token") or "")
+    if await svc.hit_rate_limit(f"wc-call-ip:{_client_ip(request)}", limit=3, window_seconds=3600) or (
+        await svc.hit_rate_limit(f"wc-call-sess:{_session_hash(token)}", limit=3, window_seconds=3600)
+    ):
+        return _cors_json(request, cors_row, {"detail": "Too many call requests. Please try again later."}, 429)
+    found = await _webchat_conversation(db, row, token)
+    if found is None:
+        return _cors_json(request, cors_row, {"detail": "Chat session expired"}, 404)
+    conversation, _ = found
+
+    try:
+        lead = (
+            await db.execute(select(WidgetLead).where(WidgetLead.conversation_id == conversation.id))
+        ).scalar_one_or_none()
+        if lead is None:
+            # No lead form was used: the details come with the request itself.
+            tenant = await db.get(Tenant, row.tenant_id)
+            name = str(payload.get("name") or "").strip()[:120] or None
+            phone = widget_leads.normalize_visitor_phone(str(payload.get("phone") or ""), tenant.country if tenant else None)
+            if not name or not phone:
+                raise widget_leads.LeadError("Please enter your name and phone number.")
+            lead, customer = await widget_leads.capture_lead(
+                db,
+                row,
+                conversation_id=conversation.id,
+                name=name,
+                phone=phone,
+                email=None,
+                interest=None,
+                page_url=str(payload.get("page_url") or "")[:2048] or None,
+                referrer=None,
+                utm=None,
+                user_agent=request.headers.get("user-agent"),
+                ip=_client_ip(request),
+            )
+            conversation.customer_id = customer.id if customer else None
+        result = await widget_leads.request_call(
+            db,
+            row,
+            lead,
+            phone=str(payload.get("phone") or "") or None,
+            consent=payload.get("consent") is True,
+            note=str(payload.get("note") or "").strip()[:500] or None,
+            ip=_client_ip(request),
+        )
+    except widget_leads.LeadError as exc:
+        # Nothing was committed on this path, so the request's session is simply discarded.
+        return _cors_json(request, cors_row, {"detail": exc.message}, exc.http_status)
+    except Exception:
+        # Always answer with CORS headers, or the visitor's browser only shows "Failed to fetch".
+        logger.exception("web chat call request failed for key %s", public_key)
+        return _cors_json(request, cors_row, {"detail": "Something went wrong. Please try again."}, 500)
+    return _cors_json(request, cors_row, result)
 
 
 @router.get("/webchat/{public_key}/messages")

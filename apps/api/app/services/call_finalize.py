@@ -79,12 +79,14 @@ async def finalize_call(
     )
     await emit_call_webhooks(db, call, status)
     _enqueue_analysis(call)
+    _enqueue_post_call(call)
     _enqueue_qa_scoring(call)
     if status == CallStatus.COMPLETED:
         await csat.schedule_after_call(db, call)
     # The call's minutes now count toward the month: raise a budget alert if
     # this pushed spend over a threshold.
     await cost_controls.evaluate_alerts_safely(db, call.tenant_id)
+    await _update_widget_lead(db, call)
     return True
 
 
@@ -149,6 +151,33 @@ def _enqueue_analysis(call: Call) -> None:
         analyze_call_task.delay(str(call.id))
     except Exception:
         logger.warning("failed to enqueue call analysis for %s", call.id, exc_info=True)
+
+
+async def _update_widget_lead(db: AsyncSession, call: Call) -> None:
+    """A call that came from the website chat widget updates its lead. Best effort."""
+    try:
+        from app.services import widget_leads
+
+        await widget_leads.on_call_finished(db, call)
+    except Exception:
+        logger.warning("failed to update web chat lead for call %s", call.id, exc_info=True)
+        await db.rollback()
+
+
+# Long enough for the AI summary (analysis runs in the background) to be ready.
+POST_CALL_DELAY_SECONDS = 60
+
+
+def _enqueue_post_call(call: Call) -> None:
+    """Thank-you SMS/email and the team summary, once the summary exists."""
+    if call.status != CallStatus.COMPLETED:
+        return
+    try:
+        from app.worker.tasks import notify_after_call_task
+
+        notify_after_call_task.apply_async(args=[str(call.id)], countdown=POST_CALL_DELAY_SECONDS)
+    except Exception:
+        logger.warning("failed to enqueue post-call messages for %s", call.id, exc_info=True)
 
 
 def _enqueue_qa_scoring(call: Call) -> None:
