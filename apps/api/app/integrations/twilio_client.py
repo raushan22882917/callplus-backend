@@ -141,6 +141,9 @@ def place_outbound_call(
     if status_callback_url:
         kwargs["status_callback"] = status_callback_url
         kwargs["status_callback_method"] = "POST"
+        # Twilio only reports "completed" unless asked, which left calls
+        # showing "ringing" for their whole length.
+        kwargs["status_callback_event"] = ["initiated", "ringing", "answered", "completed"]
     if amd_callback_url:
         kwargs["machine_detection"] = "DetectMessageEnd"
         kwargs["async_amd"] = "true"

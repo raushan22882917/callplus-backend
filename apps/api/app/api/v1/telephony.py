@@ -157,6 +157,8 @@ async def voice(request: Request, db: AsyncSession = Depends(get_db)) -> Respons
         # divides by a start time that was never recorded.
         if call.started_at is None:
             call.started_at = datetime.now(UTC)
+        if call.status in (CallStatus.QUEUED, CallStatus.RINGING):
+            call.status = CallStatus.IN_PROGRESS
     else:
         to_number = form.get("To", "")
         from_number = form.get("From", "")
@@ -232,6 +234,11 @@ async def voice(request: Request, db: AsyncSession = Depends(get_db)) -> Respons
         routed_twiml = await twiml_for_route(db, route, call)
         await db.commit()
         return Response(content=routed_twiml, media_type="application/xml")
+
+    if call.status == CallStatus.RINGING:
+        # Straight to the AI agent: the caller is already talking to it.
+        call.status = CallStatus.IN_PROGRESS
+        await db.commit()
 
     twiml = build_stream_twiml(call_id=str(call.id), tenant_id=str(call.tenant_id))
     return Response(content=twiml, media_type="application/xml")
