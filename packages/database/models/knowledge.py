@@ -23,7 +23,14 @@ class KnowledgeDocument(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
 
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     source: Mapped[KnowledgeDocumentSource] = mapped_column(
-        Enum(KnowledgeDocumentSource, name="knowledge_document_source"),
+        # The migration created this type with the lowercase VALUES ("text", "upload"), while
+        # SQLAlchemy writes member NAMES by default ("TEXT"), which Postgres rejected: adding a
+        # document failed on every migrated database. Write the values so the two agree.
+        Enum(
+            KnowledgeDocumentSource,
+            name="knowledge_document_source",
+            values_callable=lambda members: [m.value for m in members],
+        ),
         default=KnowledgeDocumentSource.TEXT,
         nullable=False,
     )
