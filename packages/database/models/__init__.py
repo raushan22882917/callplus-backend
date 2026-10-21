@@ -102,6 +102,13 @@ from packages.database.models.platform import (  # noqa: E402
     UsageEvent,
     UserTotp,
 )
+from packages.database.models.post_call import CallNotification, PostCallSettings
+from packages.database.models.privacy import (
+    ConsentRecord,
+    DataBreach,
+    PrivacyProfile,
+    PrivacyRequest,
+)
 from packages.database.models.rbac import (
     MembershipStatus,
     Permission,
@@ -109,9 +116,7 @@ from packages.database.models.rbac import (
     TenantUser,
     role_permissions,
 )
-from packages.database.models.post_call import CallNotification, PostCallSettings
 from packages.database.models.session import UserSession
-from packages.database.models.widget_lead import WidgetLead
 from packages.database.models.telephony import CallEvent, PhoneNumber
 from packages.database.models.telephony_plus import (  # noqa: E402
     CallForwardingRule,
@@ -131,6 +136,7 @@ from packages.database.models.ticket import Ticket, TicketComment, TicketPriorit
 from packages.database.models.transfer_target import TransferTarget
 from packages.database.models.user import User
 from packages.database.models.whatsapp import WhatsAppAccount, WhatsAppTemplate
+from packages.database.models.widget_lead import WidgetLead
 from packages.database.models.workflow import (
     Workflow,
     WorkflowRun,
@@ -184,7 +190,11 @@ __all__ = [
     "Invoice",
     "InvoiceStatus",
     "CallNotification",
+    "ConsentRecord",
     "CostAlert",
+    "DataBreach",
+    "PrivacyProfile",
+    "PrivacyRequest",
     "PostCallSettings",
     "CostControls",
     "CsatSettings",

@@ -57,6 +57,8 @@ async def _channel(client: AsyncClient, auth: dict, **config) -> str:
 
 
 async def _post(client: AsyncClient, key: str, path: str, body: dict) -> object:
+    if path == "session":  # visitors accept the privacy notice before a chat starts
+        body = {"privacy_accepted": True, "adult_confirmed": True, **body}
     return await client.post(f"/api/v1/channels/webchat/{key}/{path}", content=json.dumps(body), headers=TEXT)
 
 

@@ -5,10 +5,18 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, select, update
+from app.services.recordings import delete_provider_recording
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import Call, Conversation, ConversationChannel, Message
+from packages.database.models import (
+    Call,
+    Conversation,
+    ConversationChannel,
+    CrmLead,
+    Message,
+    WidgetLead,
+)
 from packages.database.models.platform import RetentionPolicy
 
 logger = logging.getLogger(__name__)
@@ -44,10 +52,31 @@ def expired_recordings_condition(tenant_id: uuid.UUID, days: int, now: datetime 
     )
 
 
+async def purge_old_leads(
+    db: AsyncSession, tenant_id: uuid.UUID, days: int, now: datetime | None = None
+) -> int:
+    """Website-chat enquiries and CRM leads older than the policy that never became
+    a customer. A lead that did become a customer is handled with the customer."""
+    old = cutoff(days, now)
+    widget = await db.execute(
+        delete(WidgetLead).where(
+            WidgetLead.tenant_id == tenant_id,
+            WidgetLead.customer_id.is_(None),
+            WidgetLead.created_at < old,
+        )
+    )
+    crm = await db.execute(
+        delete(CrmLead).where(
+            CrmLead.tenant_id == tenant_id, CrmLead.customer_id.is_(None), CrmLead.created_at < old
+        )
+    )
+    return (widget.rowcount or 0) + (crm.rowcount or 0)
+
+
 async def purge_tenant(
     db: AsyncSession, policy: RetentionPolicy, now: datetime | None = None
 ) -> dict[str, int]:
-    transcripts = recordings = 0
+    transcripts = recordings = recordings_failed = leads = 0
     if policy.transcript_days:
         result = await db.execute(
             delete(Message).where(
@@ -58,19 +87,35 @@ async def purge_tenant(
         )
         transcripts = result.rowcount or 0
     if policy.recording_days:
-        result = await db.execute(
-            update(Call)
-            .where(*expired_recordings_condition(policy.tenant_id, policy.recording_days, now))
-            .values(recording_url=None)
+        expired = (
+            (
+                await db.execute(
+                    select(Call).where(
+                        *expired_recordings_condition(policy.tenant_id, policy.recording_days, now)
+                    )
+                )
+            )
+            .scalars()
+            .all()
         )
-        recordings = result.rowcount or 0
+        for call in expired:
+            if await delete_provider_recording(db, policy.tenant_id, call.recording_url):
+                call.recording_url = None
+                recordings += 1
+            else:
+                recordings_failed += 1
+    if policy.lead_days:
+        leads = await purge_old_leads(db, policy.tenant_id, policy.lead_days, now)
     policy.last_purged_at = now or datetime.now(UTC)
-    policy.last_purge_summary = {
+    summary = {
         "transcripts_deleted": transcripts,
         "recordings_cleared": recordings,
+        "recordings_failed": recordings_failed,
+        "leads_deleted": leads,
     }
+    policy.last_purge_summary = summary
     await db.flush()
-    return {"transcripts_deleted": transcripts, "recordings_cleared": recordings}
+    return summary
 
 
 async def purge_all_tenants(db: AsyncSession, now: datetime | None = None) -> dict[str, int]:
@@ -79,7 +124,7 @@ async def purge_all_tenants(db: AsyncSession, now: datetime | None = None) -> di
         .scalars()
         .all()
     )
-    totals = {"tenants": 0, "transcripts_deleted": 0, "recordings_cleared": 0}
+    totals = {"tenants": 0, "transcripts_deleted": 0, "recordings_cleared": 0, "leads_deleted": 0}
     for policy in policies:
         try:
             result = await purge_tenant(db, policy, now)
@@ -91,4 +136,5 @@ async def purge_all_tenants(db: AsyncSession, now: datetime | None = None) -> di
         totals["tenants"] += 1
         totals["transcripts_deleted"] += result["transcripts_deleted"]
         totals["recordings_cleared"] += result["recordings_cleared"]
+        totals["leads_deleted"] += result["leads_deleted"]
     return totals

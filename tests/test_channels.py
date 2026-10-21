@@ -305,7 +305,7 @@ async def test_webchat_session_message_poll_and_staff_reply(client: AsyncClient,
     js = await client.get("/api/v1/channels/webchat/widget.js")
     assert js.status_code == 200 and "javascript" in js.headers["content-type"] and "data-key" in js.text
 
-    session = (await client.post(f"{base}/session", content="{}", headers={"Content-Type": "text/plain", "Origin": "https://shop.test"})).json()
+    session = (await client.post(f"{base}/session", content='{"privacy_accepted": true, "adult_confirmed": true}', headers={"Content-Type": "text/plain", "Origin": "https://shop.test"})).json()
     token = session["session_token"]
     assert session["messages"][0]["text"] == "Hello!"
 
@@ -328,9 +328,9 @@ async def test_webchat_session_message_poll_and_staff_reply(client: AsyncClient,
 
     # Origin allow-list blocks other sites.
     await client.put("/api/v1/channels/settings/web_chat", headers=auth, json={"config": {"allowed_origins": ["https://shop.test"]}})
-    blocked = await client.post(f"{base}/session", json={}, headers={"Origin": "https://evil.test"})
+    blocked = await client.post(f"{base}/session", json={"privacy_accepted": True, "adult_confirmed": True}, headers={"Origin": "https://evil.test"})
     assert blocked.status_code == 403
-    allowed = await client.post(f"{base}/session", json={}, headers={"Origin": "https://shop.test"})
+    allowed = await client.post(f"{base}/session", json={"privacy_accepted": True, "adult_confirmed": True}, headers={"Origin": "https://shop.test"})
     assert allowed.status_code == 200 and allowed.headers["access-control-allow-origin"] == "https://shop.test"
 
 

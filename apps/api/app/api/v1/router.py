@@ -27,6 +27,7 @@ from app.api.v1 import (
     operations,
     payments,
     platform,
+    privacy,
     post_call,
     roles,
     telephony,
@@ -84,4 +85,5 @@ api_router.include_router(operations.router)
 api_router.include_router(telephony_plus.router)
 api_router.include_router(workspace.router)
 api_router.include_router(platform.router)
+api_router.include_router(privacy.router)
 api_router.include_router(oauth.router)

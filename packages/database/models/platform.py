@@ -79,6 +79,8 @@ class RetentionPolicy(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     transcript_days: Mapped[int | None] = mapped_column(Integer)
     recording_days: Mapped[int | None] = mapped_column(Integer)
+    # Website-chat enquiries and other CRM leads that never became a customer.
+    lead_days: Mapped[int | None] = mapped_column(Integer)
     last_purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_purge_summary: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 

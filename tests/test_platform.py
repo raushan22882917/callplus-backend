@@ -352,7 +352,12 @@ async def test_retention_selection_and_purge(db_session: AsyncSession) -> None:
 
     result = await retention.purge_tenant(db_session, policy, now)
     await db_session.commit()
-    assert result == {"transcripts_deleted": 1, "recordings_cleared": 0}  # 45d old < 60d recording
+    assert result == {
+        "transcripts_deleted": 1,
+        "recordings_cleared": 0,
+        "recordings_failed": 0,
+        "leads_deleted": 0,
+    }  # 45d old < 60d recording
     result = await retention.purge_tenant(db_session, policy, now + timedelta(days=30))
     await db_session.commit()
     assert result["recordings_cleared"] == 1  # `old` is now 75d, `fresh` 35d
@@ -1196,7 +1201,12 @@ async def test_retention_api_requires_values_and_runs(client: AsyncClient) -> No
     )
     assert ok.status_code == 200 and ok.json()["transcript_days"] == 30
     ran = await client.post("/api/v1/platform/security/retention/purge", headers=h)
-    assert ran.json() == {"transcripts_deleted": 0, "recordings_cleared": 0}
+    assert ran.json() == {
+        "transcripts_deleted": 0,
+        "recordings_cleared": 0,
+        "recordings_failed": 0,
+        "leads_deleted": 0,
+    }
 
 
 async def test_non_admin_role_cannot_manage_security(client: AsyncClient) -> None:

@@ -30,8 +30,8 @@ WIDGET_JS = r"""(function () {
   var origin = new URL(script.src, location.href).origin;
   var api = origin + '/api/v1/channels/webchat/' + encodeURIComponent(key);
   var storeKey = 'autonxt_chat_' + key;
-  var cfg = { lead_form: false, require_phone: false, call_me: false, consent_text: '', fields: [], quick_replies: [] };
-  var state = { sentAny: false, token: null, name: '', phone: '', lastAt: null, open: false, seen: {}, timer: null, busy: false, called: false };
+  var cfg = { lead_form: false, require_phone: false, call_me: false, consent_text: '', fields: [], quick_replies: [], privacy: null };
+  var state = { privacy: false, sentAny: false, token: null, name: '', phone: '', lastAt: null, open: false, seen: {}, timer: null, busy: false, called: false };
   try {
     var saved = JSON.parse(localStorage.getItem(storeKey) || 'null');
     if (saved && saved.token) { state.token = saved.token; state.name = saved.name || ''; state.phone = saved.phone || ''; state.called = !!saved.called; }
@@ -117,6 +117,8 @@ WIDGET_JS = r"""(function () {
     '.axw-cta:disabled{opacity:.6;cursor:default;transform:none}',
     '.axw-alt{display:block;width:100%;height:42px;margin-top:8px;border:1px solid #dbe1ea;border-radius:12px;background:#fff;color:#334155;font-size:14px;font-weight:600;cursor:pointer}',
     '.axw-alt:hover{background:#f8fafc}',
+    '.axw-pn p{margin:0 0 8px;font-size:12.5px;line-height:1.5;color:#475569}',
+    '.axw-pl{display:block;margin:0 0 14px;font-size:12.5px;color:var(--ac)}',
     '.axw-trust{display:flex;align-items:center;justify-content:center;gap:6px;margin-top:12px;font-size:12px;color:#94a3b8}',
     '.axw-consent{display:flex;gap:9px;margin:0 0 14px;font-size:12.5px;line-height:1.45;color:#475569}',
     '.axw-consent input{margin-top:2px;accent-color:var(--ac)}',
@@ -212,6 +214,19 @@ WIDGET_JS = r"""(function () {
   var leadFields = el('div', 'axw-fields'); leadView.appendChild(leadFields);
     leadView.appendChild(trap); leadView.appendChild(leadError); leadView.appendChild(leadSubmit); leadView.appendChild(trust);
 
+  // Before anything is collected: what we keep, why, and who to ask (DPDP notice + consent + age).
+  var privacyView = el('form', 'axw-view'); privacyView.setAttribute('novalidate', 'novalidate');
+  var privacyLines = el('div', 'axw-pn');
+  var privacyLink = el('a', 'axw-pl', 'Read the full notice, or ask us to delete your data'); privacyLink.target = '_blank'; privacyLink.rel = 'noopener noreferrer';
+  var agree = el('input'); agree.type = 'checkbox'; agree.id = 'axw-agree-' + key;
+  var agreeLabel = el('label', 'axw-consent'); agreeLabel.setAttribute('for', agree.id);
+  agreeLabel.appendChild(agree); agreeLabel.appendChild(el('span', '', 'I am 18 or older and I agree to my details being used as described above.'));
+  var privacyError = el('div', 'axw-ferr'); privacyError.setAttribute('role', 'alert');
+  var privacySubmit = cta('Continue', true);
+  privacyView.appendChild(el('h3', 'axw-h', 'Before we start'));
+  privacyView.appendChild(privacyLines); privacyView.appendChild(privacyLink);
+  privacyView.appendChild(agreeLabel); privacyView.appendChild(privacyError); privacyView.appendChild(privacySubmit);
+
   // Ask for a call.
   var callView = el('form', 'axw-view'); callView.setAttribute('novalidate', 'novalidate');
   var callName = el('input'); callName.type = 'text'; callName.maxLength = 120; callName.autocomplete = 'name'; callName.placeholder = 'Your full name';
@@ -237,7 +252,7 @@ WIDGET_JS = r"""(function () {
   var brand = el('a', '', 'autobot360.com'); brand.href = 'https://autobot360.com'; brand.target = '_blank'; brand.rel = 'noopener noreferrer';
   foot.appendChild(brand);
 
-  panel.appendChild(head); panel.appendChild(list); panel.appendChild(leadView); panel.appendChild(callView); panel.appendChild(status); panel.appendChild(form); panel.appendChild(foot);
+  panel.appendChild(head); panel.appendChild(list); panel.appendChild(privacyView); panel.appendChild(leadView); panel.appendChild(callView); panel.appendChild(status); panel.appendChild(form); panel.appendChild(foot);
   var bubble = el('button', 'axw-launch'); bubble.type = 'button'; bubble.setAttribute('aria-label', 'Open chat'); bubble.appendChild(icon(I.chat, 26, 2));
   var bubbleLabel = el('span', '');
   root.appendChild(panel); root.appendChild(bubble); document.body.appendChild(root);
@@ -256,6 +271,12 @@ WIDGET_JS = r"""(function () {
     subText.textContent = c.subtitle || 'Online \u00b7 replies in a moment';
     cfg.lead_form = !!c.lead_form; cfg.require_phone = !!c.require_phone; cfg.call_me = !!c.call_me; cfg.consent_text = c.consent_text || '';
     consentText.textContent = cfg.consent_text || 'I agree to be called on this number.';
+    cfg.privacy = c.privacy && c.privacy.required ? c.privacy : null;
+    if (cfg.privacy) {
+      privacyLines.textContent = '';
+      (cfg.privacy.lines || []).forEach(function (t) { privacyLines.appendChild(el('p', '', t)); });
+      if (cfg.privacy.url) { privacyLink.href = cfg.privacy.url; privacyLink.style.display = 'block'; } else { privacyLink.style.display = 'none'; }
+    }
     cfg.fields = Array.isArray(c.fields) ? c.fields : []; cfg.quick_replies = Array.isArray(c.quick_replies) ? c.quick_replies : [];
     renderFields();
     leadHeading.textContent = c.lead_heading || 'Start a conversation';
@@ -273,6 +294,7 @@ WIDGET_JS = r"""(function () {
     list.style.display = view === 'chat' ? 'block' : 'none';
     status.style.display = view === 'chat' ? 'block' : 'none';
     form.style.display = view === 'chat' ? 'flex' : 'none';
+    privacyView.style.display = view === 'privacy' ? 'block' : 'none';
     leadView.style.display = view === 'lead' ? 'block' : 'none';
     callView.style.display = view === 'call' ? 'block' : 'none';
     callBtn.style.display = cfg.call_me && view === 'chat' && (state.token || preview) ? 'inline-flex' : 'none';
@@ -319,7 +341,8 @@ WIDGET_JS = r"""(function () {
     return out;
   }
   function startSession(extra) {
-    var body = { page_url: location.href.split('#')[0], referrer: document.referrer || '', utm: utmParams() };
+    var body = state.privacy ? { privacy_accepted: true, adult_confirmed: true, notice_version: cfg.privacy ? cfg.privacy.version : null } : {};
+    body.page_url = location.href.split('#')[0]; body.referrer = document.referrer || ''; body.utm = utmParams();
     if (extra) for (var k in extra) body[k] = extra[k];
     return request('POST', api + '/session', body).then(function (r) {
       state.token = r.session_token; save();
@@ -343,6 +366,7 @@ WIDGET_JS = r"""(function () {
         show('chat'); (r.messages || []).forEach(addMessage); showChips(); focusNow(input);
       }).catch(function (e) { if (e.status === 404) { resetSession(); return begin(); } throw e; });
     }
+    if (cfg.privacy && !state.privacy) { show('privacy'); focusNow(agree); return Promise.resolve(); }
     if (cfg.lead_form) { show('lead'); focusFirstField(); return Promise.resolve(); }
     return startSession().then(function () { show('chat'); showChips(); focusNow(input); });
   }
@@ -407,6 +431,14 @@ WIDGET_JS = r"""(function () {
     if (contact.length && !mapped.phone && !mapped.email) return { error: 'Please give us a phone number or an email address.', node: contact[0].node };
     return { answers: answers, mapped: mapped };
   }
+
+  privacyView.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    privacyError.textContent = '';
+    if (!agree.checked) { privacyError.textContent = 'Please tick the box to continue.'; focusNow(agree); return; }
+    state.privacy = true;
+    begin().catch(function (e) { privacyError.textContent = e.message; });
+  });
 
   leadView.addEventListener('submit', function (ev) {
     ev.preventDefault();
@@ -504,6 +536,7 @@ WIDGET_JS = r"""(function () {
     close.addEventListener('click', function () { previewView = 'launcher'; panel.style.display = 'none'; bubble.style.display = ''; root.classList.remove('axw-open'); });
     bubble.addEventListener('click', function () { previewView = 'chat'; renderPreview(); });
     ['submit'].forEach(function () {
+      privacyView.addEventListener('submit', function (ev) { ev.preventDefault(); ev.stopImmediatePropagation(); }, true);
       leadView.addEventListener('submit', function (ev) { ev.preventDefault(); ev.stopImmediatePropagation(); }, true);
       callView.addEventListener('submit', function (ev) { ev.preventDefault(); ev.stopImmediatePropagation(); }, true);
     });

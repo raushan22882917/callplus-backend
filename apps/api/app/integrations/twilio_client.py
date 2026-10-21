@@ -179,6 +179,17 @@ def start_call_recording(
     )
 
 
+def delete_recording(*, recording_sid: str, credentials: TwilioCredentials | None = None) -> bool:
+    """Deletes the audio at Twilio. Returns False if it was already gone (404)."""
+    try:
+        _client(credentials).recordings(recording_sid).delete()
+    except TwilioRestException as exc:
+        if exc.status == 404:
+            return False
+        raise
+    return True
+
+
 def send_sms(
     *, to: str, from_: str, body: str, credentials: TwilioCredentials | None = None
 ) -> str:

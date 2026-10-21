@@ -33,6 +33,7 @@ CONFIG_KEYS: dict[str, set[str]] = {
         "show_message",
         "use_knowledge",
         "kb_only",
+        "privacy_consent",
         "fallback_message",
         "quick_replies",
         "form_fields",

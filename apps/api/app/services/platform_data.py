@@ -12,17 +12,21 @@ from enum import Enum
 from typing import Any
 
 from app.core.exceptions import NotFoundError
-from sqlalchemy import delete, inspect, or_, select
+from app.services.recordings import delete_provider_recording
+from sqlalchemy import delete, inspect, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.database.models import (
     Call,
+    ConsentRecord,
     Conversation,
+    CrmLead,
     Customer,
     CustomerActivity,
     Message,
     Ticket,
     TicketComment,
+    WidgetLead,
 )
 
 
@@ -79,6 +83,26 @@ async def _conversation_ids(
         .scalars()
         .all()
     )
+
+
+def _widget_conditions(customer: Customer, customer_id: uuid.UUID, conversation_ids: list[uuid.UUID]):
+    conditions = [WidgetLead.customer_id == customer_id]
+    if conversation_ids:
+        conditions.append(WidgetLead.conversation_id.in_(conversation_ids))
+    if customer.phone:
+        conditions.append(WidgetLead.phone == customer.phone)
+    if customer.email:
+        conditions.append(WidgetLead.email == customer.email)
+    return conditions
+
+
+def _consent_conditions(customer: Customer, customer_id: uuid.UUID):
+    conditions = [ConsentRecord.customer_id == customer_id]
+    if customer.phone:
+        conditions.append(ConsentRecord.subject_phone == customer.phone)
+    if customer.email:
+        conditions.append(ConsentRecord.subject_email == customer.email)
+    return conditions
 
 
 async def collect_customer_data(
@@ -154,6 +178,41 @@ async def collect_customer_data(
         if tickets
         else []
     )
+    widget_leads = (
+        (
+            await db.execute(
+                select(WidgetLead).where(
+                    WidgetLead.tenant_id == tenant_id,
+                    or_(*_widget_conditions(customer, customer_id, conversation_ids)),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    crm_leads = (
+        (
+            await db.execute(
+                select(CrmLead).where(
+                    CrmLead.tenant_id == tenant_id, CrmLead.customer_id == customer_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    consents = (
+        (
+            await db.execute(
+                select(ConsentRecord).where(
+                    ConsentRecord.tenant_id == tenant_id,
+                    or_(*_consent_conditions(customer, customer_id)),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
     return {
         "customer": [row_to_dict(customer)],
         "calls": [row_to_dict(r) for r in calls],
@@ -162,6 +221,9 @@ async def collect_customer_data(
         "activities": [row_to_dict(r) for r in activities],
         "tickets": [row_to_dict(r) for r in tickets],
         "ticket_comments": [row_to_dict(r) for r in comments],
+        "website_chat_enquiries": [row_to_dict(r) for r in widget_leads],
+        "crm_leads": [row_to_dict(r) for r in crm_leads],
+        "consents": [row_to_dict(r) for r in consents],
     }
 
 
@@ -181,8 +243,11 @@ async def erase_customer(
     """Deletes the customer and everything tied to them: messages and
     conversations, calls (and via FK cascade their events), activities,
     tickets and comments. Payment records are financial records and are kept
-    but unlinked (their customer FK is SET NULL). Caller audit-logs and commits."""
-    await _customer(db, tenant_id, customer_id)
+    but unlinked (their customer FK is SET NULL). Also removes website-chat
+    enquiries and CRM leads (with their notes and tasks), deletes the call audio
+    at the provider, and strips identity from consent records, keeping only the
+    proof that consent existed. Caller audit-logs and commits."""
+    customer = await _customer(db, tenant_id, customer_id)
     call_ids = list(
         (
             await db.execute(
@@ -210,6 +275,43 @@ async def erase_customer(
     async def run(name: str, statement) -> None:
         result = await db.execute(statement)
         counts[name] = result.rowcount or 0
+
+    recording_urls = list(
+        (
+            await db.execute(
+                select(Call.recording_url).where(
+                    Call.tenant_id == tenant_id,
+                    Call.customer_id == customer_id,
+                    Call.recording_url.is_not(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    counts["recordings_deleted"] = counts["recordings_failed"] = 0
+    for url in recording_urls:
+        ok = await delete_provider_recording(db, tenant_id, url)
+        counts["recordings_deleted" if ok else "recordings_failed"] += 1
+
+    # Identity on consent proof goes; the record that consent was given stays.
+    await run(
+        "consents_anonymised",
+        update(ConsentRecord)
+        .where(ConsentRecord.tenant_id == tenant_id, or_(*_consent_conditions(customer, customer_id)))
+        .values(subject_name=None, subject_phone=None, subject_email=None, customer_id=None),
+    )
+    await run(
+        "website_chat_enquiries",
+        delete(WidgetLead).where(
+            WidgetLead.tenant_id == tenant_id,
+            or_(*_widget_conditions(customer, customer_id, conversation_ids)),
+        ),
+    )
+    await run(
+        "crm_leads",
+        delete(CrmLead).where(CrmLead.tenant_id == tenant_id, CrmLead.customer_id == customer_id),
+    )
 
     if conversation_ids:
         await run("messages", delete(Message).where(Message.conversation_id.in_(conversation_ids)))

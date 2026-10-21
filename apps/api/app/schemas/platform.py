@@ -51,6 +51,7 @@ class RetentionRead(BaseModel):
     enabled: bool
     transcript_days: int | None
     recording_days: int | None
+    lead_days: int | None
     last_purged_at: datetime | None
     last_purge_summary: dict[str, Any]
 
@@ -59,11 +60,14 @@ class RetentionUpdate(BaseModel):
     enabled: bool
     transcript_days: int | None = Field(default=None, ge=1, le=3650)
     recording_days: int | None = Field(default=None, ge=1, le=3650)
+    lead_days: int | None = Field(default=None, ge=1, le=3650)
 
 
 class RetentionPurgeResult(BaseModel):
     transcripts_deleted: int
     recordings_cleared: int
+    recordings_failed: int = 0
+    leads_deleted: int = 0
 
 
 class DataExportRequest(BaseModel):

@@ -57,6 +57,7 @@ from app.schemas.channels import (
 from app.services import channels as svc
 from app.services import channels_voice as voice
 from app.services import chat_form, plans, widget_install, widget_leads
+from app.services import privacy as privacy_svc
 from app.services import whatsapp_templates as tpl
 from app.services.customer_lookup import find_or_create_customer_by_phone
 from app.services.outbound_call import OutboundCallError, place_ai_outbound_call
@@ -166,6 +167,12 @@ def _origin_forbidden(request: Request, row: ChannelSettings) -> bool:
     return bool(allowed and origin and origin not in allowed)
 
 
+def _privacy_required(config: dict) -> bool:
+    """The privacy notice, age confirmation and consent are on unless the business
+    switches them off for a chat that collects nothing about a person."""
+    return config.get("privacy_consent") is not False
+
+
 def _own_origin() -> str:
     parsed = urlparse(get_settings().public_base_url)
     return f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else ""
@@ -182,7 +189,7 @@ _WIDGET_TEXT_LIMITS = {
 
 
 def _validate_widget_config(config: dict) -> None:
-    for key in ("lead_form", "require_phone", "call_me", "show_email", "show_message", "use_knowledge", "kb_only"):
+    for key in ("lead_form", "require_phone", "call_me", "show_email", "show_message", "use_knowledge", "kb_only", "privacy_consent"):
         if key in config and not isinstance(config[key], bool):
             raise HTTPException(422, f"{key} must be true or false")
     if config.get("template") not in (None, "", *widget_leads.WIDGET_TEMPLATES):
@@ -721,6 +728,16 @@ async def webchat_config(public_key: str, request: Request, db: AsyncSession = D
         widget_install.site_of(request.headers.get("origin"), request.headers.get("referer")),
         own_origin=_own_origin(),
     )
+    privacy = None
+    if _privacy_required(config) and tenant is not None:
+        notice = await privacy_svc.public_notice(db, row.tenant_id, tenant.name)
+        privacy = {
+            "required": True,
+            "version": notice["version"],
+            "lines": notice["lines"],
+            "url": privacy_svc.public_url(tenant.slug),
+        }
+        await db.commit()
     return _cors_json(
         request,
         row,
@@ -729,6 +746,7 @@ async def webchat_config(public_key: str, request: Request, db: AsyncSession = D
             "color": config.get("color") or "#2563eb",
             **widget_leads.widget_options(config, tenant.name if tenant else "us"),
             "fields": chat_form.effective_fields(config),
+            "privacy": privacy,
         },
     )
 
@@ -748,6 +766,12 @@ async def webchat_session(public_key: str, request: Request, db: AsyncSession = 
     except HTTPException:
         payload = {}
     config = row.config or {}
+    if _privacy_required(config) and not (
+        payload.get("privacy_accepted") is True and payload.get("adult_confirmed") is True
+    ):
+        return _cors_json(
+            request, row, {"detail": "Please read and accept the privacy notice to start the chat."}, 422
+        )
     email = str(payload.get("email") or "").strip()[:254]
     name = str(payload.get("name") or "").strip()[:120] or None
     capture = bool(config.get("lead_form"))
@@ -831,6 +855,21 @@ async def webchat_session(public_key: str, request: Request, db: AsyncSession = 
                 "page_url": lead.page_url,
                 "answers": lead.answers,
             },
+        )
+    if _privacy_required(config):
+        tenant_row = await db.get(Tenant, row.tenant_id)
+        await privacy_svc.record_consent(
+            db,
+            row.tenant_id,
+            purposes=["enquiry"],
+            source="web_chat",
+            business=tenant_row.name if tenant_row else "us",
+            name=name,
+            phone=phone,
+            email=email or None,
+            customer_id=conversation.customer_id,
+            ip=_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
         )
     messages = []
     greeting = (row.config or {}).get("greeting")

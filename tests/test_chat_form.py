@@ -232,6 +232,8 @@ async def _channel(client: AsyncClient, auth: dict, **config) -> str:
 
 
 async def _post(client, key, path, body, headers=TEXT):
+    if path == "session":  # visitors accept the privacy notice before a chat starts
+        body = {"privacy_accepted": True, "adult_confirmed": True, **body}
     return await client.post(f"/api/v1/channels/webchat/{key}/{path}", content=json.dumps(body), headers=headers)
 
 
@@ -405,7 +407,7 @@ async def test_the_test_page_shows_the_real_widget_and_works_even_with_a_site_al
     assert (await client.get("/api/v1/channels/webchat/try/nope")).status_code == 404
 
     own = channels_api._own_origin()
-    ok = await client.post(f"/api/v1/channels/webchat/{key}/session", content=json.dumps({"answers": GOOD}), headers={**TEXT, "Origin": own})
+    ok = await client.post(f"/api/v1/channels/webchat/{key}/session", content=json.dumps({"answers": GOOD, "privacy_accepted": True, "adult_confirmed": True}), headers={**TEXT, "Origin": own})
     assert ok.status_code == 200
     foreign = await client.post(f"/api/v1/channels/webchat/{key}/session", content=json.dumps({"answers": GOOD}), headers={**TEXT, "Origin": "https://evil.test"})
     assert foreign.status_code == 403

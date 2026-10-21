@@ -291,15 +291,21 @@ async def update_retention(
     ctx: RequestContext = Depends(require_permission(Permissions.SETTINGS_MANAGE)),
     db: AsyncSession = Depends(get_db),
 ) -> RetentionPolicy:
-    if payload.enabled and not payload.transcript_days and not payload.recording_days:
+    if (
+        payload.enabled
+        and not payload.transcript_days
+        and not payload.recording_days
+        and not payload.lead_days
+    ):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "Set transcript_days and/or recording_days before enabling retention",
+            "Set transcript_days, recording_days and/or lead_days before enabling retention",
         )
     row = await _retention_row(db, ctx.tenant_id)
     row.enabled = payload.enabled
     row.transcript_days = payload.transcript_days
     row.recording_days = payload.recording_days
+    row.lead_days = payload.lead_days
     await log_audit_event(
         db,
         tenant_id=ctx.tenant_id,

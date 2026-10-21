@@ -407,6 +407,20 @@ async def _record_consent(
     lead.consent_at = now
     lead.consent_ip = ip
     lead.call_note = (note or "").strip()[:500] or lead.call_note
+    from app.services import privacy  # local: privacy pulls in more than this module needs
+
+    await privacy.record_consent(
+        db,
+        row.tenant_id,
+        purposes=["call_back"],
+        source="web_chat",
+        business=tenant.name if tenant else "us",
+        name=lead.name,
+        phone=lead.phone,
+        email=lead.email,
+        customer_id=lead.customer_id,
+        ip=ip,
+    )
 
 
 async def on_call_finished(db: AsyncSession, call: Call) -> None:

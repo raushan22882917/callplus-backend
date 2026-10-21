@@ -32,7 +32,7 @@ from app.schemas.internal import (
     CallTurnRequest,
     CallTurnResponse,
 )
-from app.services import plans
+from app.services import plans, privacy
 from app.services.agent_engine import run_turn, run_turn_stream
 from app.services.call_closing import caller_wants_to_end, conversation_is_over
 from app.services.call_finalize import finalize_call
@@ -164,7 +164,11 @@ async def call_config(call_id: uuid.UUID, db: AsyncSession = Depends(get_db)) ->
         sarvam_api_key=sarvam_api_key,
         language=agent.language,
         voice=agent.voice or "priya",
-        greeting=agent.greeting or "",
+        greeting=" ".join(
+            part
+            for part in (await privacy.call_disclosure(db, call.tenant_id), agent.greeting or "")
+            if part
+        ),
         # The agent's own cap, the plan's per-call cap and the minutes left in the
         # plan's allowance, whichever is smallest (see services/plans.py).
         max_call_duration_seconds=await plans.effective_max_call_seconds(
