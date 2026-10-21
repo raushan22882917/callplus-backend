@@ -242,6 +242,7 @@ def _msg(m: Message) -> dict:
         "sender": m.sender.value,
         "text": m.text,
         "created_at": m.created_at.isoformat(),
+        "sources": [{"title": c["title"]} for c in (m.sources or [])],
     }
 
 

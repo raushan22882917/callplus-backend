@@ -36,6 +36,10 @@ class KnowledgeDocument(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # processing -> ready | failed. Indexing is quick for text and files, but a long
+    # source (a crawl, a big PDF) shows its progress here and a failure shows its reason.
+    status: Mapped[str] = mapped_column(String(10), default="ready", server_default="ready", nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
 
 
 class KnowledgeChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):

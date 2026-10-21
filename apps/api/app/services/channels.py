@@ -27,6 +27,7 @@ from app.integrations.channel_senders import (
 from app.integrations.whatsapp import WhatsAppAPIError, send_text_message
 from app.services import csat, plans
 from app.services.agent_engine import run_turn
+from app.services.knowledge import citations as knowledge_citations
 from app.services.knowledge import search as knowledge_search
 from app.services.webhooks import enqueue_webhook_event
 from app.workflows.dispatch import enqueue_workflow_trigger
@@ -427,8 +428,9 @@ async def process_inbound_text(
         agent = None  # staff have taken over this conversation
 
     extra_system = ""
+    cited: list[dict] = []
     if agent is not None and source == "web_chat" and (chat_options or {}).get("use_knowledge") is not False:
-        extra_system, canned_reply = await _knowledge_for_chat(db, tenant_id, text, chat_options or {})
+        extra_system, canned_reply, cited = await _knowledge_for_chat(db, tenant_id, text, chat_options or {})
         if canned_reply is not None:
             await record_message(
                 db,
@@ -464,6 +466,10 @@ async def process_inbound_text(
             extra_system=extra_system,
         )
         reply_text, reply_message_id = result.reply_text, result.reply_message_id
+        if cited and reply_message_id and not result.transfer_requested:
+            reply_row = await db.get(Message, reply_message_id)
+            if reply_row is not None:
+                reply_row.sources = cited
         if result.transfer_requested:
             ticket = await _escalation_ticket(
                 db, tenant_id, conversation.customer_id, channel, result.transfer_reason
@@ -620,17 +626,18 @@ async def knowledge_hits_for_visitors(db: AsyncSession, tenant_id: uuid.UUID, te
 
 async def _knowledge_for_chat(
     db: AsyncSession, tenant_id: uuid.UUID, text: str, options: dict
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, list[dict]]:
     """Looks the visitor's question up in the business's knowledge base.
 
-    Returns (extra instructions for the AI, a ready-made reply to send instead of asking the AI).
+    Returns (extra instructions for the AI, a ready-made reply to send instead of asking the AI,
+    the passages the answer will draw on, for citing).
     The reply is only set in "answer only from my knowledge base" mode when nothing matched."""
     hits = await knowledge_hits_for_visitors(db, tenant_id, text)
     strict = bool(options.get("kb_only"))
     if not hits:
         if strict:
-            return "", (str(options.get("fallback_message") or "").strip()[:300] or DEFAULT_KB_FALLBACK)
-        return "", None
+            return "", (str(options.get("fallback_message") or "").strip()[:300] or DEFAULT_KB_FALLBACK), []
+        return "", None, []
     excerpts = "\n---\n".join(f"[{h['title']}] {h['content'][:900]}" for h in hits)
     note = (
         "\n\nKnowledge base excerpts that match the customer's latest message. Answer from them; "
@@ -641,7 +648,7 @@ async def _knowledge_for_chat(
             "\nAnswer ONLY from these excerpts. If they do not cover the question, say you do not know "
             "and offer to connect a team member."
         )
-    return note, None
+    return note, None, knowledge_citations(hits)
 
 
 async def send_ai_reply(db: AsyncSession, outcome: InboundOutcome) -> dict:

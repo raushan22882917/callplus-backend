@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 from app.core.audit import log_audit_event
@@ -13,6 +14,7 @@ from app.schemas.knowledge import (
 )
 from app.services import knowledge as knowledge_service
 from app.services import plans
+from app.services.knowledge_extract import MAX_UPLOAD_BYTES, SUFFIXES, ExtractError, extract_text
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,8 +22,7 @@ from packages.database.models import KnowledgeDocument, KnowledgeDocumentSource
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
-MAX_UPLOAD_BYTES = 1_000_000
-ALLOWED_UPLOAD_SUFFIXES = (".txt", ".md", ".markdown", ".csv")
+ALLOWED_UPLOAD_SUFFIXES = SUFFIXES
 
 
 class KnowledgeDocumentRepository(TenantScopedRepository[KnowledgeDocument]):
@@ -85,13 +86,12 @@ async def upload_document(
         )
     raw = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File exceeds 1 MB")
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File exceeds 10 MB")
     try:
-        content = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "File must be UTF-8 text") from exc
-    if not content.strip():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "File is empty")
+        # Parsing a large PDF is CPU work; keep it off the event loop.
+        content = await asyncio.to_thread(extract_text, filename, raw)
+    except ExtractError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     return await _create_document(
         db,
         ctx,
@@ -138,6 +138,17 @@ async def delete_document(
     )
     await db.delete(document)
     await db.commit()
+
+
+@router.post("/reindex")
+async def reindex(
+    ctx: RequestContext = Depends(require_permission(Permissions.AGENTS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Embeds every passage again, for documents added before vector search was available."""
+    count = await knowledge_service.reindex_embeddings(db, ctx.tenant_id)
+    await db.commit()
+    return {"passages_embedded": count, "vector_search": await knowledge_service.vector_enabled(db)}
 
 
 @router.post("/search", response_model=list[KnowledgeSearchHit])

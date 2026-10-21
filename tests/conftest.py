@@ -45,6 +45,7 @@ from packages.database import models  # noqa: F401 — populates Base.metadata
 from packages.database.base import Base
 from packages.database.models import Permission, Role
 from packages.database.rls import apply_rls
+from packages.database.vector_support import ensure_embedding_column
 from packages.database.session import get_engine, get_session, init_engine, session_scope
 
 
@@ -81,6 +82,8 @@ async def _reset_database() -> AsyncIterator[None]:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+        # The migration adds the embedding column when the server has pgvector; so do the tests.
+        await conn.run_sync(ensure_embedding_column)
         if os.environ.get("TEST_RLS"):
             # Run the whole suite under row-level security (see
             # packages/database/rls.py) to prove no code path depends on

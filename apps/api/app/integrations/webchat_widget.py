@@ -117,6 +117,7 @@ WIDGET_JS = r"""(function () {
     '.axw-cta:disabled{opacity:.6;cursor:default;transform:none}',
     '.axw-alt{display:block;width:100%;height:42px;margin-top:8px;border:1px solid #dbe1ea;border-radius:12px;background:#fff;color:#334155;font-size:14px;font-weight:600;cursor:pointer}',
     '.axw-alt:hover{background:#f8fafc}',
+    '.axw-src{margin-top:4px;font-size:11.5px;color:#94a3b8}',
     '.axw-pn p{margin:0 0 8px;font-size:12.5px;line-height:1.5;color:#475569}',
     '.axw-pl{display:block;margin:0 0 14px;font-size:12.5px;color:var(--ac)}',
     '.axw-trust{display:flex;align-items:center;justify-content:center;gap:6px;margin-top:12px;font-size:12px;color:#94a3b8}',
@@ -321,6 +322,7 @@ WIDGET_JS = r"""(function () {
     var row = el('div', 'axw-row' + (mine ? ' me' : ''));
     var box = el('div', 'axw-msg');
     box.appendChild(el('div', 'axw-b', m.text || ''));
+    if (!mine && m.sources && m.sources.length) { box.appendChild(el('div', 'axw-src', 'Source: ' + m.sources.map(function (x) { return x.title; }).join(', '))); }
     var when = clock(m.created_at); if (when) box.appendChild(el('div', 'axw-t', when));
     row.appendChild(box); list.appendChild(row); list.scrollTop = list.scrollHeight;
     if (!state.lastAt || m.created_at > state.lastAt) state.lastAt = m.created_at;

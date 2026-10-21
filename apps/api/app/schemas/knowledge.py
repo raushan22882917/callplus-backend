@@ -18,6 +18,8 @@ class KnowledgeDocumentRead(BaseModel):
     title: str
     source: KnowledgeDocumentSource
     chunk_count: int
+    status: str
+    error: str | None
     created_at: datetime
 
 
@@ -32,6 +34,10 @@ class KnowledgeSearchRequest(BaseModel):
 
 class KnowledgeSearchHit(BaseModel):
     document_id: uuid.UUID
+    chunk_id: uuid.UUID | None = None
+    chunk_index: int | None = None
     title: str
     content: str
     score: float
+    match: float | None = None
+    via: str | None = None  # text | vector | both
