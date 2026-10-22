@@ -44,7 +44,13 @@ def ensure_embedding_column(conn: Connection) -> bool:
     ).first()
     if not available:
         return False
-    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    # Installing an extension needs privileges the app's role may not have. Try it in a
+    # savepoint so a refusal leaves the migration (and the deploy) intact.
+    try:
+        with conn.begin_nested():
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    except Exception:
+        return False
     conn.execute(
         text(f"ALTER TABLE knowledge_chunks ADD COLUMN IF NOT EXISTS embedding vector({EMBEDDING_DIM})")
     )
