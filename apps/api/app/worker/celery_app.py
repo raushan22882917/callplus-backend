@@ -29,6 +29,10 @@ celery_app.conf.beat_schedule = {
         "task": "csat.send_due_surveys",
         "schedule": 60.0,
     },
+    "knowledge-sweep-sources": {
+        "task": "knowledge.sweep_sources",
+        "schedule": 10 * 60.0,
+    },
     "operations-no-show-followups": {
         "task": "operations.no_show_followups",
         "schedule": 10 * 60.0,
@@ -39,6 +43,7 @@ celery_app.conf.beat_schedule = {
 # finds them.
 from app.worker import (  # noqa: E402,F401
     campaign_tasks,
+    knowledge_tasks,
     operations_tasks,
     platform_tasks,
     tasks,

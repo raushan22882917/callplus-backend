@@ -492,6 +492,18 @@ async def ensure_can_create(db: AsyncSession, tenant_id: uuid.UUID, resource: st
         )
 
 
+async def remaining(db: AsyncSession, tenant_id: uuid.UUID, resource: str) -> int | None:
+    """How many more `resource` rows the plan allows (None for unlimited)."""
+    tenant = await _tenant(db, tenant_id)
+    if tenant is None:
+        return None
+    limit = getattr(effective(tenant), resource)
+    if limit is None:
+        return None
+    _label, model, extra = _RESOURCES[resource]
+    return max(0, limit - await _count(db, model, tenant_id, *extra))
+
+
 async def ensure_feature(db: AsyncSession, tenant_id: uuid.UUID, feature: str) -> None:
     tenant = await _tenant(db, tenant_id)
     if tenant is None:

@@ -1,7 +1,9 @@
 import enum
 import uuid
+from datetime import datetime
 
-from sqlalchemy import Computed, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, Computed, DateTime, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.sql import expression
 from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -12,6 +14,27 @@ from packages.database.mixins import TenantScopedMixin, TimestampMixin, UUIDPrim
 class KnowledgeDocumentSource(str, enum.Enum):
     TEXT = "text"
     UPLOAD = "upload"
+
+
+class KnowledgeSource(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
+    """A website the knowledge base is built from. Each crawled page becomes a
+    document (`knowledge_documents.source_id`); the source carries the progress."""
+
+    __tablename__ = "knowledge_sources"
+
+    kind: Mapped[str] = mapped_column(String(10), default="website", nullable=False)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    # queued -> crawling -> ready | failed
+    status: Mapped[str] = mapped_column(String(10), default="queued", nullable=False)
+    page_limit: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
+    pages_found: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    pages_done: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    resync_weekly: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=expression.true(), nullable=False
+    )
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class KnowledgeDocument(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
@@ -40,6 +63,11 @@ class KnowledgeDocument(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
     # source (a crawl, a big PDF) shows its progress here and a failure shows its reason.
     status: Mapped[str] = mapped_column(String(10), default="ready", server_default="ready", nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
+    # Set for pages that came from a crawled website; deleting the source deletes them.
+    source_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("knowledge_sources.id", ondelete="CASCADE"), index=True
+    )
+    url: Mapped[str | None] = mapped_column(String(2048))
 
 
 class KnowledgeChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):

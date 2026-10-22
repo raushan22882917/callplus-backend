@@ -68,6 +68,7 @@ from packages.database.models.knowledge import (
     KnowledgeChunk,
     KnowledgeDocument,
     KnowledgeDocumentSource,
+    KnowledgeSource,
 )
 from packages.database.models.mcp import McpApiKey
 from packages.database.models.mcp_oauth import McpOAuthClient, McpOAuthCode, McpOAuthToken
@@ -162,6 +163,7 @@ __all__ = [
     "KnowledgeChunk",
     "KnowledgeDocument",
     "KnowledgeDocumentSource",
+    "KnowledgeSource",
     "AgentStatus",
     "AIAgent",
     "AIAgentTool",

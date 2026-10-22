@@ -11,14 +11,19 @@ from app.schemas.knowledge import (
     KnowledgeDocumentRead,
     KnowledgeSearchHit,
     KnowledgeSearchRequest,
+    KnowledgeSourceCreate,
+    KnowledgeSourceRead,
+    KnowledgeSourceUpdate,
 )
 from app.services import knowledge as knowledge_service
-from app.services import plans
+from app.services import knowledge_sources, plans
 from app.services.knowledge_extract import MAX_UPLOAD_BYTES, SUFFIXES, ExtractError, extract_text
+from app.services.safe_fetch import FetchError, UnsafeURL, assert_fetchable
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import KnowledgeDocument, KnowledgeDocumentSource
+from packages.database.models import KnowledgeDocument, KnowledgeDocumentSource, KnowledgeSource
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
@@ -137,6 +142,137 @@ async def delete_document(
         extra={"title": document.title},
     )
     await db.delete(document)
+    await db.commit()
+
+
+MAX_ACTIVE_SOURCES = 10
+
+
+class KnowledgeSourceRepository(TenantScopedRepository[KnowledgeSource]):
+    model = KnowledgeSource
+
+
+@router.post(
+    "/sources", response_model=KnowledgeSourceRead, status_code=status.HTTP_201_CREATED
+)
+async def create_source(
+    payload: KnowledgeSourceCreate,
+    ctx: RequestContext = Depends(require_permission(Permissions.AGENTS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> KnowledgeSource:
+    """Starts reading a website into the knowledge base. Pages are fetched in the
+    background; poll the source for progress."""
+    url = payload.url.strip()
+    if "://" not in url:
+        url = f"https://{url}"
+    try:
+        await assert_fetchable(url)
+    except UnsafeURL as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except FetchError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    await plans.ensure_can_create(db, ctx.tenant_id, "knowledge_documents")
+    count = (
+        await db.execute(
+            select(func.count(KnowledgeSource.id)).where(KnowledgeSource.tenant_id == ctx.tenant_id)
+        )
+    ).scalar_one()
+    if count >= MAX_ACTIVE_SOURCES:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"You can have up to {MAX_ACTIVE_SOURCES} website sources"
+        )
+    source = await KnowledgeSourceRepository(db, ctx.tenant_id).create(
+        url=url,
+        page_limit=payload.page_limit,
+        resync_weekly=payload.resync_weekly,
+        status="queued",
+    )
+    await log_audit_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_user_id=ctx.user_id,
+        action="knowledge_source.created",
+        resource_type="knowledge_source",
+        resource_id=source.id,
+        extra={"url": url},
+    )
+    await db.commit()
+    await db.refresh(source)
+    knowledge_sources.enqueue_crawl(source.id)
+    return source
+
+
+@router.get("/sources", response_model=list[KnowledgeSourceRead])
+async def list_sources(
+    ctx: RequestContext = Depends(require_permission(Permissions.AGENTS_READ)),
+    db: AsyncSession = Depends(get_db),
+) -> list[KnowledgeSource]:
+    rows = await db.execute(
+        select(KnowledgeSource)
+        .where(KnowledgeSource.tenant_id == ctx.tenant_id)
+        .order_by(KnowledgeSource.created_at.desc())
+    )
+    return list(rows.scalars().all())
+
+
+@router.get("/sources/{source_id}", response_model=KnowledgeSourceRead)
+async def get_source(
+    source_id: uuid.UUID,
+    ctx: RequestContext = Depends(require_permission(Permissions.AGENTS_READ)),
+    db: AsyncSession = Depends(get_db),
+) -> KnowledgeSource:
+    return await KnowledgeSourceRepository(db, ctx.tenant_id).get(source_id)
+
+
+@router.patch("/sources/{source_id}", response_model=KnowledgeSourceRead)
+async def update_source(
+    source_id: uuid.UUID,
+    payload: KnowledgeSourceUpdate,
+    ctx: RequestContext = Depends(require_permission(Permissions.AGENTS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> KnowledgeSource:
+    source = await KnowledgeSourceRepository(db, ctx.tenant_id).get(source_id)
+    if payload.resync_weekly is not None:
+        source.resync_weekly = payload.resync_weekly
+    await db.commit()
+    await db.refresh(source)
+    return source
+
+
+@router.post("/sources/{source_id}/resync", response_model=KnowledgeSourceRead)
+async def resync_source(
+    source_id: uuid.UUID,
+    ctx: RequestContext = Depends(require_permission(Permissions.AGENTS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> KnowledgeSource:
+    source = await KnowledgeSourceRepository(db, ctx.tenant_id).get(source_id)
+    if source.status in ("queued", "crawling"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This website is already being read")
+    source.status, source.error = "queued", None
+    await db.commit()
+    await db.refresh(source)
+    knowledge_sources.enqueue_crawl(source.id)
+    return source
+
+
+@router.delete("/sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_source(
+    source_id: uuid.UUID,
+    ctx: RequestContext = Depends(require_permission(Permissions.AGENTS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Removes the source and every page that came from it."""
+    source = await KnowledgeSourceRepository(db, ctx.tenant_id).get(source_id)
+    await log_audit_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_user_id=ctx.user_id,
+        action="knowledge_source.deleted",
+        resource_type="knowledge_source",
+        resource_id=source.id,
+        extra={"url": source.url},
+    )
+    await db.delete(source)
     await db.commit()
 
 
