@@ -11,8 +11,10 @@ x-app-env: &app-env
     DATABASE_URL: postgresql+asyncpg://callcenter:${POSTGRES_PASSWORD}@postgres:5432/callcenter
     REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
     PUBLIC_BASE_URL: https://${API_DOMAIN}
-    FRONTEND_BASE_URL: https://${APP_DOMAIN}
-    CORS_ALLOW_ORIGINS: '["https://${APP_DOMAIN}"]'
+    FRONTEND_BASE_URL: ${FRONTEND_URL}  # where people open the dashboard (links in emails, privacy page)
+    # Every website allowed to call this API from a browser, as a JSON list: the dashboard wherever
+    # it is hosted (the Railway one, this server's, or both).
+    CORS_ALLOW_ORIGINS: ${CORS_ORIGINS_JSON}
     REALTIME_WS_URL: wss://${REALTIME_DOMAIN}/ws/twilio
     TRUST_X_FORWARDED_FOR: "true"  # the real client address, from Caddy, for rate limits
 
@@ -111,6 +113,9 @@ services:
     networks: [internal]
 
   frontend:
+    # Optional: only started with `--profile frontend`. Leave it off when the dashboard is hosted
+    # elsewhere (for example Railway) and only the backend lives on this server.
+    profiles: ["frontend"]
     build:
       context: ${FRONTEND_DIR:-../../../frontend}
       dockerfile: Dockerfile.prod  # copied in from frontend.Dockerfile by deploy.sh
@@ -136,7 +141,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    depends_on: [api, realtime, frontend]
+    depends_on: [api, realtime]
     networks: [internal]
 
 networks:

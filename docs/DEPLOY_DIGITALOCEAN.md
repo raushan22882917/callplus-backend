@@ -8,6 +8,18 @@ Postgres and Redis are not reachable from outside.
 **Size:** Ubuntu 22.04 or 24.04, 4 GB RAM / 2 vCPU is the minimum (the bootstrap adds 2 GB swap);
 8 GB is comfortable with the dashboard on the same machine.
 
+## Backend only (dashboard hosted elsewhere)
+The backend can run on the droplet while the dashboard stays where it is (for example Railway).
+- Deploy with `./deploy.sh root@DROPLET_IP --backend-only`. In `.env` set `APP_DOMAIN=http://localhost:8081`
+  (no certificate is requested for it), `FRONTEND_URL` to the dashboard's real address, and
+  `CORS_ORIGINS_JSON` to every dashboard address allowed to call the API, for example
+  `["https://callpulse.autobot360.com"]`. Only the `api` and `rt` DNS names are needed.
+- Point the dashboard at the new API: the address is baked in when the dashboard is built, so set
+  `NEXT_PUBLIC_API_BASE_URL=https://api.yourdomain.com/api/v1` on the dashboard's host and **rebuild** it.
+  Do this only after `https://api.yourdomain.com/healthz` answers, and after deciding about the data
+  (a new database is empty, so nobody could sign in).
+- To host the dashboard on the droplet as well, pass the frontend folder to `deploy.sh` instead of `--backend-only`.
+
 ## 1. DNS
 Create three `A` records pointing at the droplet's IP, for example:
 

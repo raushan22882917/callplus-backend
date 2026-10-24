@@ -2,7 +2,8 @@
 	email {$ACME_EMAIL}
 }
 
-# The dashboard
+# The dashboard. For a backend-only server set APP_DOMAIN=http://localhost:8081 (plain HTTP,
+# no certificate is requested and nothing public is served).
 {$APP_DOMAIN} {
 	encode zstd gzip
 	reverse_proxy frontend:3000
