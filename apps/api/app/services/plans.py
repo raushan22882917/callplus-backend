@@ -192,12 +192,34 @@ ENTERPRISE = Tier(
     custom=True,
     blurb="Volume rates, custom limits and a close partner.",
 )
+PAYG = Tier(
+    code="payg",
+    name="Pay as you go",
+    price_month_inr=0,
+    price_year_inr=0,
+    overage_per_min_inr=None,
+    ai_minutes=None,  # not a plan allowance: calls are paid from the wallet (services/wallet.py)
+    ai_minutes_period="month",
+    whatsapp_messages=None,
+    whatsapp_period="month",
+    max_call_seconds=1800,
+    max_concurrent_calls=5,
+    daily_outbound_calls=None,
+    phone_numbers=3,
+    agents=5,
+    team_members=10,
+    knowledge_documents=100,
+    api_keys=10,
+    campaigns=True,
+    recording=True,
+    blurb="Top up a wallet and pay only for answered minutes and messages.",
+)
 _LEGACY_TIER = dataclasses.replace(
     ENTERPRISE, code=LEGACY, name="Legacy", custom=False, blurb="Pre-plan account."
 )
 
 TIERS: dict[str, Tier] = {
-    t.code: t for t in (FREE, STARTER, GROWTH, SCALE, ENTERPRISE, _LEGACY_TIER)
+    t.code: t for t in (FREE, PAYG, STARTER, GROWTH, SCALE, ENTERPRISE, _LEGACY_TIER)
 }
 PUBLIC_TIERS = [FREE, STARTER, GROWTH, SCALE, ENTERPRISE]
 
@@ -347,6 +369,10 @@ async def _tenant(db: AsyncSession, tenant_id: uuid.UUID) -> Tenant | None:
 async def minutes_remaining(db: AsyncSession, tenant: Tenant) -> int | None:
     """Billable minutes left, or None when unlimited."""
     tier = effective(tenant)
+    if tier.code == PAYG.code:
+        from app.services import wallet
+
+        return await wallet.minutes_available(db, tenant.id)
     if tier.ai_minutes is None or allows_overage(tenant):
         return None
     used = await billable_minutes_used(db, tenant.id, tier.ai_minutes_period)
@@ -357,6 +383,11 @@ async def ensure_minutes_available(db: AsyncSession, tenant_id: uuid.UUID) -> No
     """Refuses a new AI call once the minutes allowance is spent."""
     tenant = await _tenant(db, tenant_id)
     if tenant is None:
+        return
+    if effective(tenant).code == PAYG.code:
+        from app.services import wallet
+
+        await wallet.ensure_call_balance(db, tenant_id)
         return
     remaining = await minutes_remaining(db, tenant)
     if remaining is not None and remaining <= 0:
@@ -460,6 +491,11 @@ async def ensure_whatsapp_available(db: AsyncSession, tenant_id: uuid.UUID, coun
     if tenant is None:
         return
     tier = effective(tenant)
+    if tier.code == PAYG.code:
+        from app.services import wallet
+
+        await wallet.ensure_balance(db, tenant_id, wallet.WHATSAPP_MESSAGE_PAISE * count, "this message")
+        return
     if tier.whatsapp_messages is None or allows_overage(tenant):
         return
     used = await whatsapp_used(db, tenant_id, tier.whatsapp_period)

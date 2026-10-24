@@ -29,6 +29,10 @@ celery_app.conf.beat_schedule = {
         "task": "csat.send_due_surveys",
         "schedule": 60.0,
     },
+    "wallet-settle": {
+        "task": "wallet.settle_all",
+        "schedule": 60.0,
+    },
     "knowledge-sweep-sources": {
         "task": "knowledge.sweep_sources",
         "schedule": 10 * 60.0,
@@ -44,6 +48,7 @@ celery_app.conf.beat_schedule = {
 from app.worker import (  # noqa: E402,F401
     campaign_tasks,
     knowledge_tasks,
+    wallet_tasks,
     operations_tasks,
     platform_tasks,
     tasks,

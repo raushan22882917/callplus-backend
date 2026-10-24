@@ -151,3 +151,47 @@ bonus minutes or `allow_overage` per workspace:
    the internet, or the free pool is a free-calls machine.
 5. **Overage invoicing** is the next build if you want to sell beyond the allowance.
 6. **Exchange rate.** The model uses ₹88 per US dollar; carrier costs move with it.
+
+## Wallet (pay as you go)
+
+A prepaid option next to the monthly plans, for customers who want to pay only for the
+minutes and messages they use.
+
+- **Top up** from ₹100 to ₹50,000 through Razorpay Checkout. GST (18%) is added on top of the
+  credit; the credit never expires. Each top-up gets a GST invoice numbered `CP/<FY>/<n>`:
+  CGST+SGST when the buyer and the seller (`SELLER_STATE_CODE`) are in the same state, otherwise
+  IGST. A GSTIN is validated for format, state and check character.
+- **Rates** are set by the size of the top-up and stay until the next one (`RATE_TIERS` in
+  `apps/api/app/services/wallet.py`, the only place to change prices):
+
+  | Top-up | Inbound / min | Outbound / min |
+  |---|---|---|
+  | ₹100 – ₹999 | ₹5.00 | ₹9.00 |
+  | ₹1,000 – ₹4,999 | ₹4.50 | ₹8.00 |
+  | ₹5,000 – ₹19,999 | ₹4.00 | ₹7.50 |
+  | ₹20,000 and up | ₹3.50 | ₹7.00 |
+
+  WhatsApp messages ₹1.50, SMS ₹0.75. These leave a margin over today's cost (about ₹2.94
+  inbound, ₹6.64 outbound per minute, table above). **Lower them as the cost per minute falls**
+  (an Indian carrier, silence-gated speech-to-text); at today's cost, ₹2–4 per minute would lose money.
+- **Charging.** Calls are charged per started minute when they finish, WhatsApp and SMS per
+  message, from what already exists (calls, outbound WhatsApp messages, usage events). Every
+  charge is one ledger row with a unique reference, so a retry or a second worker cannot charge
+  twice. A Celery job settles every wallet each minute, and a wallet is settled whenever it is read
+  or checked. Usage before the first top-up is never charged.
+- **Gates.** A pay-as-you-go workspace (`plan_tier = "payg"`) cannot start a call or send a
+  message when the balance is below one minute / one message, and a call is capped so it cannot run
+  past the balance (priced at the outbound rate). The call in progress may take the balance a little
+  below zero; the next call is refused until the next top-up.
+- **Who can use it.** Free workspaces switch to pay-as-you-go on their first top-up. Workspaces on a
+  monthly plan have their own minutes, and `legacy` (unlimited) workspaces are not changed.
+- **Payment confirmation.** The browser confirms with Razorpay's signature right after Checkout;
+  the `payment.captured` / `order.paid` webhook does the same if the browser never returns. Both go
+  through one idempotent function, and the webhook only credits an order we created, for exactly the
+  amount we asked for.
+- **API:** `GET /wallet`, `PUT /wallet/billing-profile`, `POST /wallet/topups`,
+  `POST /wallet/topups/{id}/verify`, `GET /wallet/transactions`, `GET /wallet/topups`,
+  `GET /wallet/topups/{id}/invoice`. Dashboard: Billing → Wallet.
+- **Before launch:** set `SELLER_LEGAL_NAME`, `SELLER_GSTIN`, `SELLER_STATE_CODE`,
+  `SELLER_ADDRESS`; point the Razorpay webhook at `/api/v1/webhooks/payment/razorpay` and enable
+  `payment.captured` and `order.paid`; check the invoice wording with your accountant.

@@ -11,6 +11,7 @@ from app.integrations.razorpay_client import (
 )
 from app.schemas.payment import PaymentLinkCreate, PaymentLinkRead
 from app.services import plans
+from app.services import wallet as wallet_service
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +28,7 @@ from packages.database.models import (
     Subscription,
     SubscriptionStatus,
     Tenant,
+    WalletTopup,
 )
 
 router = APIRouter(tags=["payments"])
@@ -110,6 +112,8 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
             link_entity=payload.get("payment_link", {}).get("entity", {}),
             payment_entity=payload.get("payment", {}).get("entity", {}),
         )
+    elif event in ("payment.captured", "order.paid"):
+        await _handle_wallet_payment(db, payment_entity=payload.get("payment", {}).get("entity", {}))
     elif event in (
         "subscription.activated",
         "subscription.charged",
@@ -126,6 +130,25 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
 
     await db.commit()
     return {"status": "ok"}
+
+
+async def _handle_wallet_payment(db: AsyncSession, *, payment_entity: dict) -> None:
+    """A wallet top-up paid: credit it if the browser has not already confirmed it. Only an
+    order we created, for exactly the amount we asked for, is credited."""
+    order_id, payment_id = payment_entity.get("order_id"), payment_entity.get("id")
+    if not order_id or not payment_id:
+        return
+    topup = (
+        await db.execute(select(WalletTopup).where(WalletTopup.provider_order_id == order_id))
+    ).scalar_one_or_none()
+    if topup is None or payment_entity.get("amount") != topup.total_paise:
+        return
+    if await wallet_service.credit_topup(db, topup, payment_id):
+        await log_audit_event(
+            db, tenant_id=topup.tenant_id, actor_user_id=None, action="wallet.topped_up",
+            resource_type="wallet_topup", resource_id=topup.id,
+            extra={"amount_paise": topup.amount_paise, "via": "webhook"},
+        )
 
 
 async def _handle_payment_link_paid(

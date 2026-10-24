@@ -137,6 +137,7 @@ from packages.database.models.ticket import Ticket, TicketComment, TicketPriorit
 from packages.database.models.transfer_target import TransferTarget
 from packages.database.models.user import User
 from packages.database.models.whatsapp import WhatsAppAccount, WhatsAppTemplate
+from packages.database.models.wallet import Wallet, WalletTopup, WalletTransaction
 from packages.database.models.widget_lead import WidgetLead
 from packages.database.models.workflow import (
     Workflow,
@@ -201,6 +202,9 @@ __all__ = [
     "CostControls",
     "CsatSettings",
     "UserSession",
+    "Wallet",
+    "WalletTopup",
+    "WalletTransaction",
     "WidgetLead",
     "CsatSurvey",
     "McpApiKey",

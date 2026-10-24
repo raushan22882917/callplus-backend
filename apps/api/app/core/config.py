@@ -165,6 +165,12 @@ class Settings(BaseSettings):
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
     razorpay_webhook_secret: str = ""
+    # Who the GST invoice for a wallet top-up is issued by. The state code (GST numeric,
+    # e.g. "08" Rajasthan) decides CGST+SGST (same state) versus IGST (another state).
+    seller_legal_name: str = "CallPulse"
+    seller_gstin: str = ""
+    seller_state_code: str = ""
+    seller_address: str = ""
 
     # SMTP for transactional email (password reset, email verification). If
     # smtp_host is unset (the dev default), app.integrations.email_client

@@ -120,6 +120,23 @@ async def cancel_subscription(subscription_id: str, *, cancel_at_cycle_end: bool
     return response.json()
 
 
+async def create_order(*, amount_paise: int, receipt: str, notes: dict | None = None) -> dict:
+    """A one-time payment (a wallet top-up). The browser opens Razorpay Checkout with the
+    returned order id; the paid amount is confirmed by verify_checkout_signature and by the
+    `payment.captured` / `order.paid` webhook."""
+    payload = {
+        "amount": amount_paise,
+        "currency": "INR",
+        "receipt": receipt[:40],
+        "notes": notes or {},
+    }
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(f"{RAZORPAY_API_BASE}/orders", auth=_auth(), json=payload)
+    if response.status_code >= 400:
+        raise RazorpayAPIError(f"Razorpay order creation failed ({response.status_code}): {response.text}")
+    return response.json()
+
+
 def verify_webhook_signature(raw_body: bytes, signature_header: str | None) -> bool:
     settings = get_settings()
     if not signature_header or not settings.razorpay_webhook_secret:

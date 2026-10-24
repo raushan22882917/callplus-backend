@@ -27,8 +27,8 @@ from app.api.v1 import (
     operations,
     payments,
     platform,
-    privacy,
     post_call,
+    privacy,
     roles,
     telephony,
     telephony_plus,
@@ -36,6 +36,7 @@ from app.api.v1 import (
     tickets,
     transfer_targets,
     users,
+    wallet,
     whatsapp,
     whatsapp_templates,
     widget_leads,
@@ -86,4 +87,5 @@ api_router.include_router(telephony_plus.router)
 api_router.include_router(workspace.router)
 api_router.include_router(platform.router)
 api_router.include_router(privacy.router)
+api_router.include_router(wallet.router)
 api_router.include_router(oauth.router)
