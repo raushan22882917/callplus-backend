@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from app.core.config import get_settings
 from app.services.customer_lookup import normalize_phone
 from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.database.models import (
@@ -66,17 +67,25 @@ async def get_profile(db: AsyncSession, tenant_id: uuid.UUID, *, create: bool = 
     ).scalar_one_or_none()
     if row is None and create:
         tenant = await db.get(Tenant, tenant_id)
-        row = PrivacyProfile(
-            tenant_id=tenant_id,
-            legal_name=tenant.name if tenant else None,
-            officer_title="Grievance Officer",
-            purposes=list(DEFAULT_PURPOSES),
-            retention_summary=DEFAULT_RETENTION,
-            call_disclosure_text=DEFAULT_CALL_DISCLOSURE,
-            notice_version=1,
+        # Several requests can arrive together on a business's first visit (the page asks for the
+        # profile from more than one place). ON CONFLICT lets exactly one create the row and the
+        # others read it, instead of one of them failing with a 500.
+        await db.execute(
+            pg_insert(PrivacyProfile)
+            .values(
+                tenant_id=tenant_id,
+                legal_name=tenant.name if tenant else None,
+                officer_title="Grievance Officer",
+                purposes=list(DEFAULT_PURPOSES),
+                retention_summary=DEFAULT_RETENTION,
+                call_disclosure_text=DEFAULT_CALL_DISCLOSURE,
+                notice_version=1,
+            )
+            .on_conflict_do_nothing(index_elements=["tenant_id"])
         )
-        db.add(row)
-        await db.flush()
+        row = (
+            await db.execute(select(PrivacyProfile).where(PrivacyProfile.tenant_id == tenant_id))
+        ).scalar_one()
     return row
 
 

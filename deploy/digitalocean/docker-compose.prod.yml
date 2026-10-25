@@ -141,7 +141,10 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    depends_on: [api, realtime]
+    depends_on:
+      api: {condition: service_started}
+      realtime: {condition: service_started}
+      frontend: {condition: service_started, required: false}  # absent on a backend-only server
     networks: [internal]
 
 networks:

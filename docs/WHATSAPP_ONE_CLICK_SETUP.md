@@ -9,8 +9,8 @@ Your addresses (used below):
 | What | Value |
 |---|---|
 | Website (frontend) | `https://web-production-2b784.up.railway.app` |
-| API | `https://api-production-9c6d.up.railway.app` |
-| WhatsApp webhook URL | `https://api-production-9c6d.up.railway.app/api/v1/webhooks/whatsapp/meta` |
+| API | `https://api.callplus.autobot360.com` |
+| WhatsApp webhook URL | `https://api.callplus.autobot360.com/api/v1/webhooks/whatsapp/meta` |
 
 ## 1. Meta Business account (≈10 min, approval takes 1–5 days)
 

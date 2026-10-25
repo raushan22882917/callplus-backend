@@ -9,14 +9,22 @@
 	reverse_proxy frontend:3000
 }
 
-# The API, the chat widget script, webhooks and the MCP server
+# One address for everything people use: the dashboard and the API together. The API (and the chat
+# widget script, webhooks, OAuth and the MCP server) answers on its own paths; every other address is
+# the dashboard. This is the address to share with clients; a separate app.* name is optional above.
 {$API_DOMAIN} {
 	encode zstd gzip
 	request_body {
 		max_size 12MB
 	}
-	reverse_proxy api:8000 {
-		header_up X-Forwarded-For {remote_host}
+	@backend path /api/* /mcp /mcp/* /oauth/* /.well-known/* /healthz
+	handle @backend {
+		reverse_proxy api:8000 {
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+	handle {
+		reverse_proxy frontend:3000
 	}
 }
 

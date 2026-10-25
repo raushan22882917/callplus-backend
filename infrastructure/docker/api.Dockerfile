@@ -15,6 +15,7 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 COPY packages ./packages
 COPY apps ./apps
+COPY scripts ./scripts
 
 COPY infrastructure/docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

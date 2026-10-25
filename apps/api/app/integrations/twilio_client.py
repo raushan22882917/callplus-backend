@@ -248,6 +248,25 @@ def purchase_number(
     return incoming.sid
 
 
+def find_number_sid(*, phone_number: str, credentials: TwilioCredentials | None = None) -> str | None:
+    """The Twilio id of a number on this account, for numbers that were registered by hand."""
+    found = _client(credentials).incoming_phone_numbers.list(phone_number=phone_number, limit=1)
+    return found[0].sid if found else None
+
+
+def fetch_number_webhooks(*, provider_sid: str, credentials: TwilioCredentials | None = None) -> dict:
+    """The addresses a number currently sends Twilio events to."""
+    n = _client(credentials).incoming_phone_numbers(provider_sid).fetch()
+    return {"voice_url": n.voice_url, "status_callback": n.status_callback, "sms_url": n.sms_url}
+
+
+def update_number_webhooks(
+    *, provider_sid: str, changes: dict[str, str], credentials: TwilioCredentials | None = None
+) -> None:
+    """Points a number's webhooks at new addresses (keys: voice_url, status_callback, sms_url)."""
+    _client(credentials).incoming_phone_numbers(provider_sid).update(**changes)
+
+
 def release_number(*, provider_sid: str, credentials: TwilioCredentials | None = None) -> None:
     """Releases a number back to Twilio (stops the recurring charge)."""
     _client(credentials).incoming_phone_numbers(provider_sid).delete()

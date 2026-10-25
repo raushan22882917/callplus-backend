@@ -20,6 +20,13 @@ The backend can run on the droplet while the dashboard stays where it is (for ex
   (a new database is empty, so nobody could sign in).
 - To host the dashboard on the droplet as well, pass the frontend folder to `deploy.sh` instead of `--backend-only`.
 
+## One address for dashboard and API
+`deploy.sh` with the dashboard folder serves **both** on `API_DOMAIN` (for example
+`https://api.yourdomain.com`): the API, webhooks, widget script, OAuth and MCP answer on their own paths
+(`/api/*`, `/mcp`, `/oauth/*`, `/.well-known/*`, `/healthz`) and every other address is the dashboard. Only the
+`api` and `rt` DNS names are required. A separate `APP_DOMAIN` name (for example `app.yourdomain.com`) is
+optional: add its DNS record, set `APP_DOMAIN` in `.env` and redeploy.
+
 ## 1. DNS
 Create three `A` records pointing at the droplet's IP, for example:
 

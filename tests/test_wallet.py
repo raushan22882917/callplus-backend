@@ -417,3 +417,20 @@ async def test_other_plans_are_not_affected_by_the_wallet(client: AsyncClient):
 def test_the_pay_as_you_go_tier_is_not_listed_as_a_plan_to_buy():
     assert "payg" in plans.TIERS and all(t["code"] != "payg" for t in plans.public_catalogue())
     _ = (wallet_api, WalletTopup)
+
+
+async def test_two_first_requests_at_once_create_one_wallet_and_neither_fails(client: AsyncClient):
+    import asyncio
+
+    _, tenant_id = await _workspace(client, "w-race")
+
+    async def first_use():
+        async with session_scope() as db:
+            w = await wallet.ensure_wallet(db, tenant_id)
+            await db.commit()
+            return w.id
+
+    ids = await asyncio.gather(*(first_use() for _ in range(6)))
+    assert len(set(ids)) == 1
+    async with session_scope() as db:
+        assert (await db.execute(select(func.count()).select_from(Wallet))).scalar_one() == 1

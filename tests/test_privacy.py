@@ -503,3 +503,24 @@ async def test_public_notice_page_data(client: AsyncClient):
     assert len(notice["hash"]) == 64 and notice["purposes"]
     assert (await client.get("/api/v1/privacy/public/missing/notice")).status_code == 404
     _ = AIAgent  # imported for model registration
+
+
+async def test_two_first_requests_at_once_create_one_profile_and_neither_fails(client: AsyncClient):
+    """The privacy page asks for the profile from several places on a business's first visit."""
+    import asyncio
+
+    await _signup(client, "priv-race")
+    tenant = await _tenant("priv-race")
+
+    async def first_visit():
+        async with session_scope() as db:
+            row = await svc.get_profile(db, tenant.id)
+            await db.commit()
+            return row.id
+
+    ids = await asyncio.gather(*(first_visit() for _ in range(6)))
+    assert len(set(ids)) == 1
+    async with session_scope() as db:
+        from sqlalchemy import func as f
+        from packages.database.models import PrivacyProfile
+        assert (await db.execute(select(f.count()).select_from(PrivacyProfile))).scalar_one() == 1

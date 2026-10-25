@@ -19,6 +19,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.database.models import (
@@ -125,16 +126,20 @@ async def ensure_wallet(db: AsyncSession, tenant_id: uuid.UUID, *, lock: bool = 
     wallet = await get_wallet(db, tenant_id, lock=lock)
     if wallet is None:
         inbound, outbound = rates_for_topup(0)
-        wallet = Wallet(
-            tenant_id=tenant_id,
-            balance_paise=0,
-            inbound_rate_paise=inbound,
-            outbound_rate_paise=outbound,
-            low_balance_paise=LOW_BALANCE_PAISE,
-            billing_started_at=datetime.now(UTC),
+        # Two requests creating a first wallet together must not collide on the one-per-workspace rule.
+        await db.execute(
+            pg_insert(Wallet)
+            .values(
+                tenant_id=tenant_id,
+                balance_paise=0,
+                inbound_rate_paise=inbound,
+                outbound_rate_paise=outbound,
+                low_balance_paise=LOW_BALANCE_PAISE,
+                billing_started_at=datetime.now(UTC),
+            )
+            .on_conflict_do_nothing(index_elements=["tenant_id"])
         )
-        db.add(wallet)
-        await db.flush()
+        wallet = await get_wallet(db, tenant_id, lock=lock)
     return wallet
 
 

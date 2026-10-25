@@ -292,6 +292,31 @@ async def _ping_celery() -> dict[str, Any]:
         return {"ok": False, "workers": [], "error": exc.__class__.__name__}
 
 
+@router.post("/numbers/sync-webhooks")
+async def sync_number_webhooks_endpoint(
+    apply: bool = Query(default=False, description="False only reports what would change"),
+    tenant_id: uuid.UUID | None = None,
+    ctx: RequestContext = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Points every client's Twilio numbers at this platform's current address (PUBLIC_BASE_URL).
+    Run it after the platform moves; by default it only reports. Webhooks that are not ours are untouched."""
+    from app.services import number_webhooks
+
+    report = await number_webhooks.sync_number_webhooks(db, tenant_id=tenant_id, apply=apply)
+    if apply:
+        await log_audit_event(
+            db, tenant_id=None, actor_user_id=ctx.user_id, action="platform.number_webhooks_synced",
+            resource_type="platform", resource_id=None,
+            extra={"updated": sum(1 for r in report if r["status"] == "updated"), "numbers": len(report)},
+        )
+        await db.commit()
+    counts: dict[str, int] = {}
+    for row in report:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+    return {"applied": apply, "target": get_settings().public_base_url, "counts": counts, "numbers": report}
+
+
 @router.get("/health", response_model=AdminHealth)
 async def system_health(
     request: Request,
