@@ -15,6 +15,16 @@ from app.services import whatsapp_inbound as wa
 from packages.database.models import Message, MessageDirection, WhatsAppAccount
 
 
+@pytest.fixture(autouse=True)
+def _meta_accepts_details(monkeypatch):
+    """These tests use made-up IDs; the live Meta check has its own tests."""
+
+    async def ok(*_a, **_k):
+        return None
+
+    monkeypatch.setattr("app.api.v1.whatsapp.check_account_details", ok)
+
+
 async def _signup(client: AsyncClient, slug: str) -> dict:
     resp = await client.post(
         "/api/v1/auth/signup",

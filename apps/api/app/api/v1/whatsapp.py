@@ -9,7 +9,7 @@ from app.core.crypto import encrypt_secret
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
 from app.core.repository import TenantScopedRepository
-from app.integrations.whatsapp import verify_webhook_signature
+from app.integrations.whatsapp import check_account_details, verify_webhook_signature
 from app.schemas.whatsapp import WhatsAppAccountConnect, WhatsAppAccountRead, WhatsAppAccountUpdate
 from app.services import whatsapp_inbound as wa
 from app.services import whatsapp_templates as tpl
@@ -82,6 +82,9 @@ async def connect_whatsapp_account(
     ctx: RequestContext = Depends(require_permission(Permissions.CONVERSATIONS_MANAGE)),
     db: AsyncSession = Depends(get_db),
 ) -> WhatsAppAccount:
+    problem = await check_account_details(payload.waba_id, payload.phone_number_id, payload.access_token)
+    if problem:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, problem)
     account = await WhatsAppAccountRepository(db, ctx.tenant_id).create(
         phone_number_id=payload.phone_number_id,
         waba_id=payload.waba_id,

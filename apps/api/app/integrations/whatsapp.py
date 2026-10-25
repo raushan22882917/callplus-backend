@@ -155,6 +155,41 @@ def _error_from_response(response: httpx.Response) -> str:
     return friendly_error(err.get("code"), err.get("message") or response.text[:300])
 
 
+async def check_account_details(waba_id: str, phone_number_id: str, access_token: str) -> str | None:
+    """Asks Meta whether these three values belong together. Returns a plain-words
+    problem, or None when they check out (or Meta can't be reached: then we don't block)."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                _graph_url(f"{waba_id}/phone_numbers"),
+                params={"fields": "id", "limit": 100},
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+    except httpx.HTTPError:
+        return None
+    if r.status_code >= 500:
+        return None
+    if r.status_code == 200:
+        ids = {str(p.get("id")) for p in r.json().get("data", [])}
+        if phone_number_id not in ids:
+            return (
+                "That Phone number ID doesn't belong to this Business account ID. "
+                "Copy both from the same WhatsApp → API Setup page in Meta."
+            )
+        return None
+    try:
+        err = r.json().get("error") or {}
+    except ValueError:
+        err = {}
+    if err.get("code") == 190 or r.status_code == 401:
+        return "Your access token is wrong or has expired. Create a new permanent token and try again."
+    return (
+        "Meta can't find that Business account ID, or this token isn't allowed to use it. "
+        "Use the “WhatsApp Business Account ID” from API Setup (not the phone number ID), "
+        "and a token with the whatsapp_business_management permission."
+    )
+
+
 async def download_media(account: WhatsAppAccount, media_id: str) -> tuple[bytes, str]:
     """A customer's photo / voice note / document: look up its short-lived URL,
     then fetch the bytes with the same token."""
