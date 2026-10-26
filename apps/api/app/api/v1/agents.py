@@ -27,6 +27,7 @@ from app.schemas.agent import (
     TestChatRequest,
     TestChatResponse,
 )
+from app.services import exotel as exotel_service
 from app.services import plans
 from app.services.flow_compiler import compile_flow_to_system_prompt
 from app.tools.registry import TOOL_REGISTRY
@@ -293,6 +294,14 @@ async def assign_phone_number(
     GET /phone-numbers/available + POST /phone-numbers/provision below."""
     await plans.ensure_can_create(db, ctx.tenant_id, "phone_numbers")
     await _require_own_agent(db, ctx.tenant_id, payload.ai_agent_id)
+    if (
+        payload.provider == "exotel"
+        and await exotel_service.get_credentials(db, ctx.tenant_id) is None
+    ):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Connect your Exotel account first (Integrations → Exotel).",
+        )
     return await _save_number(db, ctx.tenant_id, **payload.model_dump())
 
 

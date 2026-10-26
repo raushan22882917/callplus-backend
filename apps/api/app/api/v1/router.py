@@ -20,6 +20,7 @@ from app.api.v1 import (
     insights,
     integrations,
     internal,
+    internal_exotel,
     internal_flowtest,
     knowledge,
     mcp,
@@ -64,6 +65,7 @@ api_router.include_router(workflows.router)
 api_router.include_router(campaigns.router)
 api_router.include_router(integrations.router)
 api_router.include_router(internal.router)
+api_router.include_router(internal_exotel.router)
 api_router.include_router(internal_flowtest.router)
 api_router.include_router(agent_tests.router)
 api_router.include_router(mcp.router)

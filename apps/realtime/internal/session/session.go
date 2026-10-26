@@ -45,6 +45,11 @@ type Session struct {
 	browserTest   bool
 	testSessionID string
 
+	// closeOnFinalize: a carrier other than Twilio (see internal/exotel) has no way for the backend
+	// to hang the call up, so once the agent has finished with the call we close the stream, which
+	// is what lets that carrier's flow move on to its hang-up step.
+	closeOnFinalize bool
+
 	streamSID string
 	callID    string
 	startedAt time.Time
@@ -173,6 +178,7 @@ func (s *Session) sendTestEvent(event string, data any) {
 func (s *Session) handleStart(start *twilio.StartPayload) {
 	s.streamSID = start.StreamSID
 	s.callID = start.CustomParameters["callId"]
+	s.closeOnFinalize = start.CustomParameters["closeOnFinalize"] == "1"
 	if s.browserTest {
 		s.callID = s.testSessionID
 	}
@@ -302,6 +308,7 @@ func (s *Session) actOn(action, reason string) {
 		if err := s.backendClient.Finalize(s.callID, action, reason); err != nil {
 			log.Printf("[session %s] finalize(%s) failed: %v", s.callID, action, err)
 		}
+		s.closeIfBridged()
 	default:
 		s.touchActivity()
 	}
@@ -408,6 +415,14 @@ func (s *Session) endCall(message, reason string) {
 	}
 	if err := s.backendClient.Finalize(s.callID, "hangup", reason); err != nil {
 		log.Printf("[session %s] finalize(hangup) failed: %v", s.callID, err)
+	}
+	s.closeIfBridged()
+}
+
+// closeIfBridged ends the stream for carriers that hang up when it closes (see closeOnFinalize).
+func (s *Session) closeIfBridged() {
+	if s.closeOnFinalize {
+		_ = s.conn.Close()
 	}
 }
 

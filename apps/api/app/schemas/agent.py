@@ -104,6 +104,8 @@ class AIAgentToolRead(BaseModel):
 class PhoneNumberCreate(BaseModel):
     e164_number: str = Field(min_length=8, max_length=20, pattern=r"^\+[1-9]\d{6,18}$")
     ai_agent_id: uuid.UUID | None = None
+    # Which carrier the number is with. Calls to an "exotel" number arrive through Exotel's stream.
+    provider: Literal["twilio", "exotel"] = "twilio"
 
 
 class PhoneNumberUpdate(BaseModel):

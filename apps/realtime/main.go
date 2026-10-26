@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"callcenter/realtime/internal/exotel"
 	"callcenter/realtime/internal/session"
 )
 
@@ -51,6 +52,26 @@ func main() {
 		}
 		sess := session.New(conn, cfg)
 		go sess.Run()
+	})
+
+	// Exotel Voicebot: an Indian carrier streaming 16-bit audio. The bridge translates it to the
+	// shape the call engine already speaks and hands it to /ws/twilio on this same server.
+	exotelCfg := exotel.Config{
+		EngineURL: "ws://127.0.0.1:" + port + "/ws/twilio",
+		Start:     exotel.HTTPStart(cfg.BackendBaseURL, cfg.InternalToken),
+	}
+	http.HandleFunc("/ws/exotel", func(w http.ResponseWriter, r *http.Request) {
+		key := r.URL.Query().Get("k")
+		if key == "" {
+			http.Error(w, "missing key", http.StatusUnauthorized)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("websocket upgrade failed: %v", err)
+			return
+		}
+		go exotel.Handle(conn, key, exotelCfg)
 	})
 
 	// Flow Studio "Test Audio": a browser speaking the same Media Streams protocol
