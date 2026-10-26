@@ -75,6 +75,16 @@ async def _seed_permissions_and_roles() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _meta_accepts_details(monkeypatch):
+    """Tests connect WhatsApp with made-up IDs; the live Meta check has its own tests."""
+
+    async def ok(*_a, **_k):
+        return None
+
+    monkeypatch.setattr("app.api.v1.whatsapp.check_account_details", ok)
+
+
+@pytest.fixture(autouse=True)
 async def _reset_database() -> AsyncIterator[None]:
     settings = get_settings()
     init_engine(settings.database_url)
