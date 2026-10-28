@@ -137,6 +137,22 @@ class SendTemplatePayload(BaseModel):
     values: dict[str, str] = {}
 
 
+class FollowUpPayload(BaseModel):
+    """Reach the customer of a conversation on another channel (after a call)."""
+
+    via: Literal["whatsapp", "sms", "email"]
+    text: str = Field(default="", max_length=4000)
+    subject: str | None = Field(default=None, max_length=200)
+    template_id: uuid.UUID | None = None
+    values: dict[str, str] = Field(default_factory=dict)
+
+
+class FollowUpResult(BaseModel):
+    conversation_id: uuid.UUID
+    channel: str
+    message: ThreadMessage
+
+
 class AIControlPayload(BaseModel):
     active: bool
 

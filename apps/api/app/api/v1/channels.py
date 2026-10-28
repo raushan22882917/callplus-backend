@@ -45,6 +45,8 @@ from app.schemas.channels import (
     ChannelSettingsUpdate,
     ClickToCallPayload,
     ClickToCallRead,
+    FollowUpPayload,
+    FollowUpResult,
     HandledPayload,
     InboxItem,
     MissedCallRead,
@@ -56,7 +58,7 @@ from app.schemas.channels import (
 )
 from app.services import channels as svc
 from app.services import channels_voice as voice
-from app.services import chat_form, plans, widget_install, widget_leads
+from app.services import chat_form, follow_up, plans, widget_install, widget_leads
 from app.services import privacy as privacy_svc
 from app.services import whatsapp_templates as tpl
 from app.services.customer_lookup import find_or_create_customer_by_phone
@@ -1634,6 +1636,52 @@ async def send_template_to_conversation(
     svc.pause_ai(conversation)
     await db.commit()
     return message
+
+
+@router.get("/conversations/{conversation_id}/follow-up")
+async def follow_up_options(
+    conversation_id: uuid.UUID,
+    ctx: RequestContext = Depends(require_permission(Permissions.CONVERSATIONS_READ)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Which ways of reaching this customer (WhatsApp, SMS, email) work right now, and why not if one doesn't."""
+    conversation = await _tenant_conversation(db, ctx.tenant_id, conversation_id)
+    return await follow_up.options(db, ctx.tenant_id, conversation)
+
+
+@router.post(
+    "/conversations/{conversation_id}/follow-up",
+    response_model=FollowUpResult,
+    status_code=status.HTTP_201_CREATED,
+)
+async def send_follow_up(
+    conversation_id: uuid.UUID,
+    payload: FollowUpPayload,
+    ctx: RequestContext = Depends(require_permission(Permissions.CONVERSATIONS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> FollowUpResult:
+    """After a call: message the customer on WhatsApp, SMS or email. It is saved in that channel's own
+    conversation, so their answer comes back to the same place."""
+    conversation = await _tenant_conversation(db, ctx.tenant_id, conversation_id)
+    try:
+        message, target = await follow_up.send(
+            db,
+            ctx.tenant_id,
+            conversation,
+            via=payload.via,
+            text=payload.text,
+            subject=payload.subject,
+            template_id=payload.template_id,
+            values=payload.values,
+        )
+    except follow_up.FollowUpError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    await db.commit()
+    return FollowUpResult(
+        conversation_id=target.id,
+        channel=payload.via,
+        message=ThreadMessage.model_validate(message, from_attributes=True),
+    )
 
 
 @router.post("/conversations/{conversation_id}/ai", response_model=ThreadRead)
