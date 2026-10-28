@@ -613,3 +613,14 @@ async def test_widget_design_options_are_validated_and_served(client: AsyncClien
             "/api/v1/channels/settings/web_chat", headers=auth, json={"config": bad}
         )
         assert resp.status_code == 422, bad
+
+
+async def test_the_designer_preview_never_starts_a_real_chat_session(client):
+    """In the preview the live open/close handlers would call the API and show 'Failed to fetch'."""
+    js = (await client.get("/api/v1/channels/webchat/widget.js")).text
+    preview = js[js.index("if (preview) {") :]
+    assert "bubble.addEventListener('click', function (ev) { ev.stopImmediatePropagation()" in preview
+    assert "close.addEventListener('click', function (ev) { ev.stopImmediatePropagation()" in preview
+    assert "only a preview" in preview
+    # nothing in the preview block, up to its own return, reaches the network
+    assert "request(" not in preview.split("return;")[0]

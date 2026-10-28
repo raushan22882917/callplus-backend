@@ -528,15 +528,26 @@ WIDGET_JS = r"""(function () {
       show(previewView);
     }
     applyConfig(previewCfg); renderPreview();
-    form.addEventListener('submit', function (ev) { ev.preventDefault(); ev.stopImmediatePropagation(); }, true);
+    // Nothing here may reach the network. Typing works, so the designer can see how messages look, and
+    // the reply says plainly that this is only a preview. (Capture listeners run before the live ones.)
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault(); ev.stopImmediatePropagation();
+      var typed = input.value.trim(); if (!typed) return; input.value = '';
+      var n = Date.now();
+      addMessage({ id: 'pv-' + n, direction: 'inbound', text: typed, created_at: new Date().toISOString() });
+      setTimeout(function () {
+        addMessage({ id: 'pv-r' + n, direction: 'outbound', text: 'This is only a preview, so I cannot answer here. On your website your AI agent replies.', created_at: new Date().toISOString() });
+      }, 600);
+    }, true);
     window.addEventListener('message', function (ev) {
       if (ev.source !== window.parent) return;
       var d = ev.data || {};
       if (d.type === 'axw-config' && d.config) { previewCfg = d.config; applyConfig(previewCfg); show(previewView); if (previewView === 'chat') showChips(true); }
       if (d.type === 'axw-view') { previewView = d.view; if (previewView === 'launcher') { panel.style.display = 'none'; bubble.style.display = ''; root.classList.remove('axw-open'); } else { renderPreview(); } }
     });
-    close.addEventListener('click', function () { previewView = 'launcher'; panel.style.display = 'none'; bubble.style.display = ''; root.classList.remove('axw-open'); });
-    bubble.addEventListener('click', function () { previewView = 'chat'; renderPreview(); });
+    // The live open and close handlers start a real chat session, which fails here ("Failed to fetch"): stop them.
+    close.addEventListener('click', function (ev) { ev.stopImmediatePropagation(); previewView = 'launcher'; panel.style.display = 'none'; bubble.style.display = ''; root.classList.remove('axw-open'); }, true);
+    bubble.addEventListener('click', function (ev) { ev.stopImmediatePropagation(); previewView = 'chat'; renderPreview(); }, true);
     ['submit'].forEach(function () {
       privacyView.addEventListener('submit', function (ev) { ev.preventDefault(); ev.stopImmediatePropagation(); }, true);
       leadView.addEventListener('submit', function (ev) { ev.preventDefault(); ev.stopImmediatePropagation(); }, true);
