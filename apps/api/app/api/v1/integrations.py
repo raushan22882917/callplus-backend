@@ -5,6 +5,7 @@ app/integrations/credentials.py for where that's resolved."""
 
 import uuid
 
+from app.core.config import get_settings
 from app.core.crypto import encrypt_secret
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
@@ -79,6 +80,15 @@ async def list_integrations(
 ) -> list[Integration]:
     result = await db.execute(select(Integration).where(Integration.tenant_id == ctx.tenant_id))
     return list(result.scalars().all())
+
+
+@router.get("/included")
+async def included_services(
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_READ)),
+) -> dict[str, bool]:
+    """What every workspace gets without connecting anything: the platform's Sarvam AI key is used
+    for a workspace that has not saved its own."""
+    return {"sarvam": bool(get_settings().sarvam_api_key)}
 
 
 @router.post("/twilio", response_model=IntegrationRead, status_code=status.HTTP_201_CREATED)

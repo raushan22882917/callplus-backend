@@ -100,3 +100,41 @@ async def test_provision_phone_number_without_twilio_configured_fails_cleanly(
     # No platform or tenant Twilio credentials configured — should fail with
     # a clear dependency error, not a 500.
     assert resp.status_code == 424
+
+
+async def test_included_services_say_whether_the_platform_sarvam_key_covers_everyone(
+    client, monkeypatch
+):
+    from app.core.config import get_settings
+
+    tokens = await _signup_for_included(client)
+    monkeypatch.setattr(get_settings(), "sarvam_api_key", "platform-key")
+    on = await client.get(
+        "/api/v1/integrations/included", headers={"Authorization": f"Bearer {tokens}"}
+    )
+    assert on.status_code == 200 and on.json() == {"sarvam": True}
+    monkeypatch.setattr(get_settings(), "sarvam_api_key", "")
+    off = await client.get(
+        "/api/v1/integrations/included", headers={"Authorization": f"Bearer {tokens}"}
+    )
+    assert off.json() == {"sarvam": False}
+    assert "platform-key" not in on.text  # only a yes or no, never the key
+
+
+async def test_included_services_need_a_signed_in_user(client):
+    assert (await client.get("/api/v1/integrations/included")).status_code in (401, 403)
+
+
+async def _signup_for_included(client) -> str:
+    resp = await client.post(
+        "/api/v1/auth/signup",
+        json={
+            "company_name": "Inc Co",
+            "tenant_slug": "inc-co",
+            "full_name": "Owner",
+            "email": "owner@inc-co.com",
+            "password": "supersecret1",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["access_token"]
