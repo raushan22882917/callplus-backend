@@ -80,8 +80,9 @@ async def check_credentials(
             "Exotel did not accept this API key and token. "
             "Copy them again from Exotel → API Settings."
         )
-    if response.status_code == 404:
-        raise ExotelError("Exotel doesn't know this Account SID. Check the SID and the region.")
+    if response.status_code in (400, 404):
+        # Exotel answers 400 for an Account SID it has never heard of, or one in the other region.
+        raise ExotelError("Exotel does not recognise this Account SID. Check the SID and the region.")
     if response.status_code >= 400:
         raise ExotelError(
             f"Exotel answered with an error ({response.status_code}). Please check the details."

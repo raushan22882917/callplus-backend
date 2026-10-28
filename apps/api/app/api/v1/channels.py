@@ -62,6 +62,7 @@ from app.services import whatsapp_templates as tpl
 from app.services.customer_lookup import find_or_create_customer_by_phone
 from app.services.outbound_call import OutboundCallError, place_ai_outbound_call
 from app.services.webhooks import enqueue_webhook_event
+from app.services.whatsapp_inbound import default_agent_id
 from app.workflows.dispatch import enqueue_workflow_trigger
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -364,6 +365,10 @@ async def update_channel_settings(
     if payload.enabled is not None:
         if payload.enabled:
             _require_ready(channel, row)
+            # A business with exactly one AI agent gets it here automatically (as on WhatsApp). Without
+            # this, switching a channel on left visitors talking to nobody and nothing said why.
+            if row.ai_agent_id is None and not payload.clear_ai_agent:
+                row.ai_agent_id = await default_agent_id(db, ctx.tenant_id)
         row.enabled = payload.enabled
 
     await db.commit()

@@ -247,7 +247,7 @@ def _fake_exotel(monkeypatch, status: int):
 
 @pytest.mark.parametrize(
     "status, words",
-    [(401, "did not accept"), (404, "doesn't know"), (500, r"error \(500\)")],
+    [(401, "did not accept"), (404, "does not recognise"), (400, "does not recognise"), (500, r"error \(500\)")],
 )
 async def test_exotels_answers_become_plain_sentences(monkeypatch, status, words):
     monkeypatch.undo()  # use the real check, not the always-ok one

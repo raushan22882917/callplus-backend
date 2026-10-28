@@ -1,3 +1,4 @@
+import pytest
 from httpx import AsyncClient
 
 
@@ -111,3 +112,43 @@ async def test_user_membership_update_blocks_removing_last_owner(client: AsyncCl
         f"/api/v1/users/{membership_id}", headers=_auth(tokens), json={"role_name": "AGENT"}
     )
     assert resp.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "typed, saved",
+    [
+        ("9876543210", "+919876543210"),
+        ("09876543210", "+919876543210"),
+        ("+91 98765 43210", "+919876543210"),
+        ("919876543210", "+919876543210"),
+        ("00919876543210", "+919876543210"),
+        ("+14155552671", "+14155552671"),
+    ],
+)
+async def test_a_customer_phone_is_saved_in_one_dialable_format(client, typed, saved):
+    from tests.test_whatsapp_pipeline import _auth, _signup
+
+    tokens = await _signup(client, "phones")
+    resp = await client.post("/api/v1/customers", headers=_auth(tokens), json={"name": "Test", "phone": typed})
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["phone"] == saved
+
+
+@pytest.mark.parametrize("typed", ["12345", "abc", "+12", "98765", "+9198765432101234"])
+async def test_a_number_that_can_never_be_dialled_is_refused_in_plain_words(client, typed):
+    from tests.test_whatsapp_pipeline import _auth, _signup
+
+    tokens = await _signup(client, "phones2")
+    resp = await client.post("/api/v1/customers", headers=_auth(tokens), json={"name": "Test", "phone": typed})
+    assert resp.status_code == 422
+    assert "country code" in resp.text
+
+
+async def test_a_customer_without_a_phone_is_still_fine(client):
+    from tests.test_whatsapp_pipeline import _auth, _signup
+
+    tokens = await _signup(client, "phones3")
+    for phone in (None, "", "   "):
+        resp = await client.post("/api/v1/customers", headers=_auth(tokens), json={"name": "No Phone", "phone": phone})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["phone"] is None

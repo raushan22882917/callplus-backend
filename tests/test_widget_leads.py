@@ -623,7 +623,8 @@ async def test_the_visitor_gets_the_call_from_the_right_number_even_when_the_cha
         db.add(PhoneNumber(tenant_id=tenant.id, e164_number="+912240009999"))  # a second number: the production situation
         db.add(AIAgent(tenant_id=tenant.id, name="Receptionist", status=AgentStatus.ACTIVE))
         await db.commit()
-    resp = await client.put("/api/v1/channels/settings/web_chat", headers=auth, json={"enabled": True, "config": {"lead_form": True, "call_me": True}})
+    # Switching a channel on now picks the only agent by itself; this case is a chat deliberately left without one.
+    resp = await client.put("/api/v1/channels/settings/web_chat", headers=auth, json={"enabled": True, "clear_ai_agent": True, "config": {"lead_form": True, "call_me": True}})
     key = resp.json()["public_key"]
     assert resp.json()["ai_agent_id"] is None
     token = (await _post(client, key, "session", {**VISITOR, "phone": "+919699234605"})).json()["session_token"]

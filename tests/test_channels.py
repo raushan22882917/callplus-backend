@@ -624,3 +624,33 @@ async def test_the_designer_preview_never_starts_a_real_chat_session(client):
     assert "only a preview" in preview
     # nothing in the preview block, up to its own return, reaches the network
     assert "request(" not in preview.split("return;")[0]
+
+
+async def test_switching_on_a_channel_picks_the_only_ai_agent_so_visitors_get_answers(client):
+    """Without this a visitor typed into the chat and nobody answered, with no hint why."""
+    from tests.test_whatsapp_pipeline import _auth, _signup
+
+    tokens = await _signup(client, "auto-agent")
+    agent = await client.post("/api/v1/ai-agents", headers=_auth(tokens), json={"name": "Desk"})
+    on = await client.put("/api/v1/channels/settings/web_chat", headers=_auth(tokens), json={"enabled": True})
+    assert on.status_code == 200, on.text
+    assert on.json()["ai_agent_id"] == agent.json()["id"]
+
+
+async def test_with_two_agents_it_does_not_guess_and_a_deliberate_no_agent_is_kept(client):
+    from tests.test_whatsapp_pipeline import _auth, _signup
+
+    tokens = await _signup(client, "two-agents")
+    await client.post("/api/v1/ai-agents", headers=_auth(tokens), json={"name": "One"})
+    await client.post("/api/v1/ai-agents", headers=_auth(tokens), json={"name": "Two"})
+    on = await client.put("/api/v1/channels/settings/web_chat", headers=_auth(tokens), json={"enabled": True})
+    assert on.json()["ai_agent_id"] is None
+
+    tokens2 = await _signup(client, "staff-only")
+    await client.post("/api/v1/ai-agents", headers=_auth(tokens2), json={"name": "Solo"})
+    off = await client.put(
+        "/api/v1/channels/settings/web_chat",
+        headers=_auth(tokens2),
+        json={"enabled": True, "clear_ai_agent": True},
+    )
+    assert off.json()["ai_agent_id"] is None
