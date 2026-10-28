@@ -1,6 +1,7 @@
 from app.api.v1 import (
     agent_tests,
     agents,
+    ai_write,
     analytics,
     assistant,
     audit,
@@ -56,6 +57,7 @@ api_router.include_router(customers.router)
 api_router.include_router(tickets.router)
 api_router.include_router(calls.router)
 api_router.include_router(agents.router)
+api_router.include_router(ai_write.router)
 api_router.include_router(blocklist.router)
 api_router.include_router(telephony.router)
 api_router.include_router(whatsapp.router)
