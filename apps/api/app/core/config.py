@@ -181,6 +181,10 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from_email: str = "no-reply@example.com"
     smtp_use_tls: bool = True
+    # Email over HTTPS (port 443), for hosts that block SMTP. "resend" or "brevo".
+    # When email_api_key is set it is used instead of SMTP.
+    email_api_provider: str = "resend"
+    email_api_key: str = ""
 
     # Base URL of the tenant-facing frontend, used to build links embedded
     # in transactional emails (password reset, email verification).

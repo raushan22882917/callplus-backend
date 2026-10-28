@@ -306,15 +306,27 @@ async def sync_number_webhooks_endpoint(
     report = await number_webhooks.sync_number_webhooks(db, tenant_id=tenant_id, apply=apply)
     if apply:
         await log_audit_event(
-            db, tenant_id=None, actor_user_id=ctx.user_id, action="platform.number_webhooks_synced",
-            resource_type="platform", resource_id=None,
-            extra={"updated": sum(1 for r in report if r["status"] == "updated"), "numbers": len(report)},
+            db,
+            tenant_id=None,
+            actor_user_id=ctx.user_id,
+            action="platform.number_webhooks_synced",
+            resource_type="platform",
+            resource_id=None,
+            extra={
+                "updated": sum(1 for r in report if r["status"] == "updated"),
+                "numbers": len(report),
+            },
         )
         await db.commit()
     counts: dict[str, int] = {}
     for row in report:
         counts[row["status"]] = counts.get(row["status"], 0) + 1
-    return {"applied": apply, "target": get_settings().public_base_url, "counts": counts, "numbers": report}
+    return {
+        "applied": apply,
+        "target": get_settings().public_base_url,
+        "counts": counts,
+        "numbers": report,
+    }
 
 
 @router.get("/health", response_model=AdminHealth)
@@ -331,3 +343,85 @@ async def system_health(
         redis=redis,
         celery=celery,
     )
+
+
+def _setup_items() -> list[dict[str, Any]]:
+    s = get_settings()
+
+    def item(key: str, label: str, enables: str, needs: list[str], ok: bool) -> dict[str, Any]:
+        return {"key": key, "label": label, "enables": enables, "needs": needs, "ready": ok}
+
+    return [
+        item(
+            "email",
+            "Email sending",
+            "Password resets, verification mails and follow-up emails",
+            ["EMAIL_API_KEY (Resend or Brevo), SMTP_FROM_EMAIL"],
+            bool(s.email_api_key or s.smtp_host),
+        ),
+        item(
+            "twilio",
+            "Twilio (platform account)",
+            "SMS and phone calls through the platform account",
+            ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"],
+            bool(s.twilio_account_sid and s.twilio_auth_token),
+        ),
+        item(
+            "sarvam",
+            "Sarvam AI",
+            "Voice, speech and replies for every workspace",
+            ["SARVAM_API_KEY"],
+            bool(s.sarvam_api_key),
+        ),
+        item(
+            "whatsapp",
+            "WhatsApp (Meta)",
+            "Receiving WhatsApp messages and one-click connect",
+            ["META_APP_ID", "META_APP_SECRET", "META_WHATSAPP_CONFIG_ID"],
+            bool(s.meta_app_id and (s.meta_app_secret or s.meta_whatsapp_app_secret)),
+        ),
+        item(
+            "razorpay",
+            "Razorpay",
+            "Wallet top-ups and confirming payments",
+            ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET"],
+            bool(s.razorpay_key_id and s.razorpay_key_secret and s.razorpay_webhook_secret),
+        ),
+        item(
+            "gst",
+            "GST invoices",
+            "Tax invoices with your GSTIN",
+            ["SELLER_GSTIN and the seller name/address"],
+            bool(s.seller_gstin),
+        ),
+        item(
+            "google",
+            "Google sign-in and calendar",
+            "Connecting Google Calendar",
+            ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
+            bool(s.google_client_id and s.google_client_secret),
+        ),
+        item(
+            "microsoft",
+            "Microsoft calendar",
+            "Connecting Outlook calendar",
+            ["MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"],
+            bool(s.microsoft_client_id and s.microsoft_client_secret),
+        ),
+        item(
+            "slack",
+            "Slack",
+            "Sending alerts to Slack",
+            ["SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET"],
+            bool(s.slack_client_id and s.slack_client_secret),
+        ),
+    ]
+
+
+@router.get("/setup-status")
+async def setup_status(
+    _: RequestContext = Depends(require_super_admin),
+) -> dict[str, Any]:
+    """Which platform-level services are filled in. Never returns the values."""
+    items = _setup_items()
+    return {"items": items, "ready": sum(1 for i in items if i["ready"]), "total": len(items)}

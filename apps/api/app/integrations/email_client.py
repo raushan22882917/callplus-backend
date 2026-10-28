@@ -11,6 +11,7 @@ import logging
 from email.message import EmailMessage
 
 import aiosmtplib
+import httpx
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,18 @@ async def send_email(
     """`headers` carries extras such as Message-ID / In-Reply-To / References /
     Reply-To (used by the email channel to keep replies in one thread)."""
     settings = get_settings()
+
+    if settings.email_api_key:
+        await _send_via_api(
+            settings.email_api_provider,
+            settings.email_api_key,
+            settings.smtp_from_email,
+            to_email,
+            subject,
+            html_body,
+            headers or {},
+        )
+        return
 
     if not settings.smtp_host:
         logger.info(
@@ -49,3 +62,43 @@ async def send_email(
         password=settings.smtp_password or None,
         start_tls=settings.smtp_use_tls,
     )
+
+
+async def _send_via_api(
+    provider: str,
+    api_key: str,
+    from_email: str,
+    to_email: str,
+    subject: str,
+    html_body: str,
+    headers: dict[str, str],
+) -> None:
+    """Send over HTTPS. Raises on a rejected request so callers can report it."""
+    provider = (provider or "resend").lower()
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        if provider == "brevo":
+            resp = await client.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={"api-key": api_key, "accept": "application/json"},
+                json={
+                    "sender": {"email": from_email},
+                    "to": [{"email": to_email}],
+                    "subject": subject,
+                    "htmlContent": html_body,
+                    **({"headers": headers} if headers else {}),
+                },
+            )
+        else:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "from": from_email,
+                    "to": [to_email],
+                    "subject": subject,
+                    "html": html_body,
+                    **({"headers": headers} if headers else {}),
+                },
+            )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"email provider {provider} rejected the message ({resp.status_code})")
