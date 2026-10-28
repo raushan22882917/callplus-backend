@@ -14,6 +14,12 @@ class WorkflowCreate(BaseModel):
     definition: dict[str, Any]
 
 
+class RecipeCreate(BaseModel):
+    recipe: str = Field(min_length=1, max_length=80)
+    answers: dict[str, str] = Field(default_factory=dict)
+    name: str | None = Field(default=None, max_length=255)
+
+
 class WorkflowUpdate(BaseModel):
     name: str | None = None
     is_active: bool | None = None

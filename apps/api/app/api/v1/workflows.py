@@ -3,8 +3,15 @@ import uuid
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
 from app.core.repository import TenantScopedRepository
-from app.schemas.workflow import WorkflowCreate, WorkflowRead, WorkflowRunRead, WorkflowUpdate
-from fastapi import APIRouter, Depends, Query
+from app.schemas.workflow import (
+    RecipeCreate,
+    WorkflowCreate,
+    WorkflowRead,
+    WorkflowRunRead,
+    WorkflowUpdate,
+)
+from app.workflows import recipes
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +39,43 @@ async def create_workflow(
     db: AsyncSession = Depends(get_db),
 ) -> Workflow:
     workflow = await WorkflowRepository(db, ctx.tenant_id).create(**payload.model_dump())
+    await db.commit()
+    await db.refresh(workflow)
+    return workflow
+
+
+@router.get("/workflows/recipes")
+async def list_recipes(
+    ctx: RequestContext = Depends(require_permission(Permissions.WORKFLOWS_READ)),
+) -> list[dict]:
+    """Ready-made automations, in plain words, for people who do not want to build one."""
+    return recipes.catalogue()
+
+
+@router.post("/workflows/from-recipe", response_model=WorkflowRead, status_code=201)
+async def create_from_recipe(
+    payload: RecipeCreate,
+    ctx: RequestContext = Depends(require_permission(Permissions.WORKFLOWS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> Workflow:
+    """Switches on one ready-made automation, with the owner's answers to its questions."""
+    try:
+        recipe = recipes.get_recipe(payload.recipe)
+        definition = recipes.build(recipe, payload.answers)
+    except recipes.RecipeError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    repo = WorkflowRepository(db, ctx.tenant_id)
+    if any((w.definition or {}).get("recipe") == recipe.id for w in await repo.list()):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "You already have this automation. Turn it on or off from the list.",
+        )
+    workflow = await repo.create(
+        name=(payload.name or recipe.title).strip()[:255],
+        trigger=recipe.trigger,
+        is_active=True,
+        definition=definition,
+    )
     await db.commit()
     await db.refresh(workflow)
     return workflow
