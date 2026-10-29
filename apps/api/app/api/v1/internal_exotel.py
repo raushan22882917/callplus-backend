@@ -8,12 +8,13 @@ every turn. A refusal is a 4xx and the gateway hangs up.
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.api.v1.telephony import _check_and_apply_spam_protection, _is_blocked
 from app.core.deps import get_db
 from app.core.internal_auth import require_internal_service
 from app.services import exotel, plans
+from app.services.call_finalize import TERMINAL_CALL_STATUSES
 from app.services.customer_lookup import find_or_create_customer_by_phone
 from app.workflows.dispatch import enqueue_workflow_trigger
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -31,6 +32,7 @@ from packages.database.models import (
 )
 
 logger = logging.getLogger(__name__)
+OUTBOUND_MATCH_WINDOW = timedelta(minutes=5)
 
 router = APIRouter(
     prefix="/internal/exotel", tags=["internal"], dependencies=[Depends(require_internal_service)]
@@ -51,6 +53,39 @@ class ExotelStartResponse(BaseModel):
     tenant_id: uuid.UUID
 
 
+async def _outbound_call(
+    db: AsyncSession, tenant_id: uuid.UUID, call_sid: str, from_number: str, to_number: str
+) -> Call | None:
+    """The outbound call this stream belongs to, if we placed it (see exotel.place_outbound_call).
+
+    Matched by Exotel's CallSid; failing that, by a call we are still ringing between the same two
+    numbers (on an outbound call Exotel reports the customer as "from" and the ExoPhone as "to")."""
+    result = await db.execute(
+        select(Call).where(
+            Call.tenant_id == tenant_id,
+            Call.provider_call_sid == call_sid,
+            Call.direction == CallDirection.OUTBOUND,
+        )
+    )
+    call = result.scalar_one_or_none()
+    if call is not None or not from_number:
+        return call
+    result = await db.execute(
+        select(Call)
+        .where(
+            Call.tenant_id == tenant_id,
+            Call.direction == CallDirection.OUTBOUND,
+            Call.status.in_([CallStatus.QUEUED, CallStatus.RINGING]),
+            Call.to_number == from_number,
+            Call.from_number == to_number,
+            Call.created_at > datetime.now(UTC) - OUTBOUND_MATCH_WINDOW,
+        )
+        .order_by(Call.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 @router.post("/start", response_model=ExotelStartResponse)
 async def start_call(
     payload: ExotelStart, db: AsyncSession = Depends(get_db)
@@ -61,6 +96,15 @@ async def start_call(
 
     to_number = exotel.to_e164(payload.to)
     from_number = exotel.to_e164(payload.from_number)
+    outbound = await _outbound_call(db, tenant_id, payload.call_sid, from_number, to_number)
+    if outbound is not None:
+        # One of our own outbound calls was answered: its checks ran when it was placed.
+        if outbound.status not in (CallStatus.IN_PROGRESS, *TERMINAL_CALL_STATUSES):
+            outbound.status = CallStatus.IN_PROGRESS
+            outbound.started_at = outbound.started_at or datetime.now(UTC)
+            await db.commit()
+        return ExotelStartResponse(call_id=outbound.id, tenant_id=tenant_id)
+
     result = await db.execute(
         select(PhoneNumber).where(
             PhoneNumber.tenant_id == tenant_id,

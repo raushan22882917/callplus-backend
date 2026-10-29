@@ -33,6 +33,11 @@ class ConnectExotelRequest(BaseModel):
     subdomain: str = Field(default="api.exotel.com", max_length=64)
 
 
+class ExotelOutboundRequest(BaseModel):
+    # The App ID of the Exotel flow (with the Voicebot step) that outbound calls run when answered.
+    app_id: str = Field(min_length=1, max_length=20)
+
+
 class ExotelSetup(BaseModel):
     """What the person pastes into their Exotel flow; the address is shown only when created."""
 

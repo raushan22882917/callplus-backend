@@ -97,7 +97,9 @@ async def _settle(db: AsyncSession, call: Call, result: ReapResult) -> None:
     duration: int | None = None
     reason = "stale_call_reaped"
     live = False
-    if call.provider_call_sid:
+    # Twilio's Call SIDs all start with "CA"; anything else went out through Exotel, which reports
+    # the outcome to its own status callback, so asking Twilio would only fail every sweep.
+    if call.provider_call_sid and call.provider_call_sid.startswith("CA"):
         try:
             credentials = await get_twilio_credentials(db, call.tenant_id)
             twilio_status, duration = fetch_call_outcome(

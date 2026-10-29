@@ -11,6 +11,7 @@ import uuid
 from app.core.config import get_settings
 from app.integrations.credentials import get_twilio_credentials
 from app.integrations.twilio_client import TwilioClientError, place_outbound_call
+from app.services import exotel
 from app.services.cost_controls import SpendGuardError, guard_outbound
 from app.services.customer_lookup import find_or_create_customer_by_phone
 from app.services.telephony_plus import check_outbound_allowed
@@ -139,16 +140,19 @@ async def place_ai_outbound_call(
     )
     status_callback_url = f"{settings.public_base_url}/api/v1/webhooks/telephony/twilio/status"
     try:
-        credentials = await get_twilio_credentials(db, tenant_id)
-        call_sid = place_outbound_call(
-            to=to_number,
-            from_=resolved_from_number,
-            voice_webhook_url=voice_webhook_url,
-            status_callback_url=status_callback_url,
-            credentials=credentials,
-            amd_callback_url=await amd_callback_for_agent(db, resolved_agent_id),
-        )
-    except (TwilioClientError, TwilioException) as exc:
+        if await exotel.is_exotel_number(db, tenant_id, resolved_from_number):
+            call_sid = await exotel.place_outbound_call(db, call)
+        else:
+            credentials = await get_twilio_credentials(db, tenant_id)
+            call_sid = place_outbound_call(
+                to=to_number,
+                from_=resolved_from_number,
+                voice_webhook_url=voice_webhook_url,
+                status_callback_url=status_callback_url,
+                credentials=credentials,
+                amd_callback_url=await amd_callback_for_agent(db, resolved_agent_id),
+            )
+    except (TwilioClientError, TwilioException, exotel.ExotelError) as exc:
         raise OutboundCallError(str(exc)) from exc
 
     call.provider_call_sid = call_sid

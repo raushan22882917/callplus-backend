@@ -268,3 +268,167 @@ async def test_good_details_pass_and_a_made_up_region_is_refused(monkeypatch):
         await exotel.check_credentials(
             subdomain="evil.example.com", account_sid="a", api_key="k", api_token="t"
         )
+
+
+# ---- outbound calls -------------------------------------------------------------------------
+
+
+def _exotel_dials(monkeypatch, *, status=200, body=None) -> list[dict]:
+    """Stands in for Exotel's Calls/connect; returns the requests it received."""
+    sent: list[dict] = []
+
+    async def post(url, data, *, auth):
+        sent.append({"url": url, "data": data, "auth": auth})
+        return httpx.Response(
+            status, json=body if body is not None else {"Call": {"Sid": "ex-out-1"}}
+        )
+
+    monkeypatch.setattr(exotel, "_post", post)
+    return sent
+
+
+def _no_twilio(monkeypatch):
+    def refuse(**_kw):
+        raise AssertionError("an Exotel number must not dial through Twilio")
+
+    monkeypatch.setattr("app.api.v1.calls.place_outbound_call", refuse)
+
+
+async def _outbound_ready(client: AsyncClient, slug: str):
+    tokens, key, agent_id = await _workspace(client, slug)
+    resp = await client.put(
+        "/api/v1/integrations/exotel/outbound", headers=_auth(tokens), json={"app_id": "1367464"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config"]["outbound_app_id"] == "1367464"
+    return tokens, key, agent_id
+
+
+async def _dial(client: AsyncClient, tokens, agent_id):
+    return await client.post(
+        "/api/v1/calls",
+        headers=_auth(tokens),
+        json={
+            "direction": "outbound",
+            "to_number": "+919800000001",
+            "from_number": "+918000000002",
+            "ai_agent_id": agent_id,
+        },
+    )
+
+
+async def test_a_call_from_an_exotel_number_goes_out_through_exotel(
+    client: AsyncClient, monkeypatch
+):
+    sent = _exotel_dials(monkeypatch)
+    _no_twilio(monkeypatch)
+    tokens, _, agent_id = await _outbound_ready(client, "dial-out")
+
+    resp = await _dial(client, tokens, agent_id)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["status"] == "ringing"
+
+    (request,) = sent
+    assert request["url"] == "https://api.exotel.com/v1/Accounts/acme1/Calls/connect.json"
+    assert request["auth"] == ("key-abc", "token-xyz")
+    data = request["data"]
+    assert data["From"] == "+919800000001"
+    assert data["CallerId"] == "08000000002"
+    assert data["Url"] == "http://my.exotel.com/acme1/exoml/start_voice/1367464"
+    assert f"call_id={resp.json()['id']}" in data["StatusCallback"]
+    async with session_scope() as db:
+        call = await db.get(Call, uuid.UUID(resp.json()["id"]))
+        assert call.provider_call_sid == "ex-out-1"
+
+
+async def test_without_a_flow_app_id_the_owner_is_told_where_to_add_it(
+    client: AsyncClient, monkeypatch
+):
+    sent = _exotel_dials(monkeypatch)
+    _no_twilio(monkeypatch)
+    tokens, _, agent_id = await _workspace(client, "no-flow")
+
+    resp = await _dial(client, tokens, agent_id)
+    assert resp.status_code == 424
+    assert "App ID" in resp.json()["detail"]
+    assert sent == []
+
+
+async def test_exotels_refusal_reaches_the_owner_in_its_own_words(client: AsyncClient, monkeypatch):
+    _exotel_dials(
+        monkeypatch,
+        status=403,
+        body={
+            "RestException": {
+                "Status": 403,
+                "Message": "Trial accounts can only call verified numbers",
+            }
+        },
+    )
+    tokens, _, agent_id = await _outbound_ready(client, "trial-acct")
+    resp = await _dial(client, tokens, agent_id)
+    assert resp.status_code == 424
+    assert "verified numbers" in resp.json()["detail"]
+
+
+async def test_the_answered_call_streams_into_the_same_call_not_a_new_one(
+    client: AsyncClient, monkeypatch
+):
+    _exotel_dials(monkeypatch)
+    tokens, key, agent_id = await _outbound_ready(client, "answered")
+    call_id = (await _dial(client, tokens, agent_id)).json()["id"]
+
+    # Exotel reports the customer as "from" and the ExoPhone as "to" on an outbound call.
+    resp = await client.post(
+        "/api/v1/internal/exotel/start",
+        headers=_internal(),
+        json=_start(key, call_sid="ex-out-1", **{"from": "09800000001", "to": "08000000002"}),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["call_id"] == call_id
+    async with session_scope() as db:
+        calls = (await db.execute(select(Call))).scalars().all()
+        assert len(calls) == 1
+        assert calls[0].status.value == "in_progress" and calls[0].started_at is not None
+
+
+async def test_a_stream_with_an_unexpected_sid_still_finds_the_ringing_call(
+    client: AsyncClient, monkeypatch
+):
+    _exotel_dials(monkeypatch)
+    tokens, key, agent_id = await _outbound_ready(client, "other-sid")
+    call_id = (await _dial(client, tokens, agent_id)).json()["id"]
+    resp = await client.post(
+        "/api/v1/internal/exotel/start",
+        headers=_internal(),
+        json=_start(key, call_sid="leg-2", **{"from": "09800000001", "to": "08000000002"}),
+    )
+    assert resp.json()["call_id"] == call_id
+
+
+async def test_an_unanswered_call_is_closed_by_exotels_callback(client: AsyncClient, monkeypatch):
+    sent = _exotel_dials(monkeypatch)
+    tokens, _, agent_id = await _outbound_ready(client, "no-answer")
+    call_id = (await _dial(client, tokens, agent_id)).json()["id"]
+    callback = sent[0]["data"]["StatusCallback"]
+    path = callback[callback.index("/api/v1/") :]
+
+    forged = path.split("&t=")[0] + "&t=0000"
+    assert (await client.post(forged, json={"Status": "no-answer"})).status_code == 403
+
+    resp = await client.post(path, json={"CallSid": "ex-out-1", "Status": "no-answer"})
+    assert resp.status_code == 200
+    async with session_scope() as db:
+        call = await db.get(Call, uuid.UUID(call_id))
+        assert call.status.value == "no_answer" and call.ended_at is not None
+
+
+async def test_the_flow_app_id_must_be_a_number_and_survives_reconnecting(client: AsyncClient):
+    tokens, _, _ = await _outbound_ready(client, "keep-flow")
+    bad = await client.put(
+        "/api/v1/integrations/exotel/outbound", headers=_auth(tokens), json={"app_id": "my flow"}
+    )
+    assert bad.status_code == 422
+
+    again = await client.post("/api/v1/integrations/exotel", headers=_auth(tokens), json=CREDS)
+    assert again.json()["integration"]["config"]["outbound_app_id"] == "1367464"

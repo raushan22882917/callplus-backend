@@ -17,6 +17,7 @@ from app.api.v1 import (
     csat,
     customers,
     developer,
+    exotel_webhooks,
     guardrails,
     insights,
     integrations,
@@ -60,6 +61,7 @@ api_router.include_router(agents.router)
 api_router.include_router(ai_write.router)
 api_router.include_router(blocklist.router)
 api_router.include_router(telephony.router)
+api_router.include_router(exotel_webhooks.router)
 api_router.include_router(whatsapp.router)
 api_router.include_router(whatsapp_templates.router)
 api_router.include_router(payments.router)

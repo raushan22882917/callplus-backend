@@ -13,6 +13,7 @@ from app.schemas.integration import (
     ConnectExotelRequest,
     ConnectSarvamRequest,
     ConnectTwilioRequest,
+    ExotelOutboundRequest,
     ExotelSetup,
     IntegrationRead,
 )
@@ -132,6 +133,8 @@ def _exotel_steps() -> list[str]:
         "Attach your Exotel number (ExoPhone) to this flow.",
         "In CallPulse, add the same number under Phone numbers, choose Exotel, "
         "and pick the AI agent.",
+        "To place calls from this number too, copy the flow's App ID (next to it in App Bazaar) "
+        "into Integrations → Exotel → Outgoing calls.",
     ]
 
 
@@ -188,6 +191,23 @@ async def new_exotel_stream_address(
         stream_url=exotel_service.stream_url(key),
         steps=_exotel_steps(),
     )
+
+
+@router.put("/exotel/outbound", response_model=IntegrationRead)
+async def set_exotel_outbound_flow(
+    payload: ExotelOutboundRequest,
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> Integration:
+    """Saves which Exotel flow an answered outbound call runs, so the dialer can call from
+    Exotel numbers."""
+    try:
+        integration = await exotel_service.set_outbound_app_id(db, ctx.tenant_id, payload.app_id)
+    except exotel_service.ExotelError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    await db.commit()
+    await db.refresh(integration)
+    return integration
 
 
 @router.delete("/{provider}", status_code=status.HTTP_204_NO_CONTENT)

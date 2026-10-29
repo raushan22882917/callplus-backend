@@ -12,6 +12,7 @@ from app.integrations.credentials import get_twilio_credentials
 from app.integrations.twilio_client import TwilioClientError, place_outbound_call
 from app.schemas.call import CallCreate, CallRead
 from app.schemas.conversation import MessageRead
+from app.services import exotel
 from app.services.call_analysis import analyze_call
 from app.services.call_finalize import emit_call_webhooks
 from app.services.cost_controls import SpendGuardError, guard_outbound
@@ -181,16 +182,19 @@ async def create_call(
         )
         status_callback_url = f"{settings.public_base_url}/api/v1/webhooks/telephony/twilio/status"
         try:
-            credentials = await get_twilio_credentials(db, ctx.tenant_id)
-            call_sid = place_outbound_call(
-                to=payload.to_number,
-                from_=payload.from_number,
-                voice_webhook_url=voice_webhook_url,
-                status_callback_url=status_callback_url,
-                credentials=credentials,
-                amd_callback_url=await amd_callback_for_agent(db, call.ai_agent_id),
-            )
-        except (TwilioClientError, TwilioException) as exc:
+            if await exotel.is_exotel_number(db, ctx.tenant_id, payload.from_number):
+                call_sid = await exotel.place_outbound_call(db, call)
+            else:
+                credentials = await get_twilio_credentials(db, ctx.tenant_id)
+                call_sid = place_outbound_call(
+                    to=payload.to_number,
+                    from_=payload.from_number,
+                    voice_webhook_url=voice_webhook_url,
+                    status_callback_url=status_callback_url,
+                    credentials=credentials,
+                    amd_callback_url=await amd_callback_for_agent(db, call.ai_agent_id),
+                )
+        except (TwilioClientError, TwilioException, exotel.ExotelError) as exc:
             await db.rollback()
             raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(exc)) from exc
         call.provider_call_sid = call_sid
