@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from app.core.config import get_settings
 from app.integrations.credentials import get_sarvam_api_key
 from app.integrations.sarvam import (
     SARVAM_LANGUAGES,
@@ -646,7 +647,9 @@ async def _finish_buffered(
         llm_tools=prep.llm_tools,
         tool_ctx=prep.tool_ctx,
         sarvam_api_key=prep.sarvam_api_key,
-        reasoning_effort="low" if is_voice else None,
+        # "low" = Sarvam's fast conversational model (~0.4s a reply). The reasoning model takes 8-10s,
+        # far too slow for a customer waiting in a chat window. It stays as the automatic fallback.
+        reasoning_effort="low" if (is_voice or get_settings().fast_model_for_text) else None,
     )
     if is_voice:
         reply_text = clean_for_speech(reply_text) or "Sorry, could you say that again?"

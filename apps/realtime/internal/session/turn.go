@@ -117,7 +117,7 @@ func (s *Session) runTurn(gen int) {
 		defer close(fillerDone)
 		select {
 		case <-time.After(fillerDelay):
-			if !s.turnIsStale(gen) {
+			if !s.turnIsStale(gen) && !s.isEnded() {
 				s.sendTestEvent("cb_filler", map[string]any{"after_ms": fillerDelay.Milliseconds()})
 				s.speak(fillerPhrase(ttsLanguage(text, s.language)))
 			}
@@ -133,7 +133,8 @@ func (s *Session) runTurn(gen int) {
 		replyMs    int64
 	)
 	if s.cfg.StreamReplies && s.tts != nil && s.backendClient.CanStream() {
-		result, streamed, firstAudio, err = s.streamingTurn(text, func() bool { return s.turnIsStale(gen) }, endFiller)
+		// A hung-up caller cancels synthesis too: there is nobody left to hear it.
+		result, streamed, firstAudio, err = s.streamingTurn(text, func() bool { return s.turnIsStale(gen) || s.isEnded() }, endFiller)
 		if err != nil && streamed == 0 {
 			log.Printf("[session %s] streaming turn failed before any speech, retrying normally: %v", s.callID, err)
 			result, err = s.backendClient.Turn(s.callID, text)
@@ -152,6 +153,12 @@ func (s *Session) runTurn(gen int) {
 				log.Printf("[session %s] retract unspoken reply failed: %v", s.callID, rerr)
 			}
 		}
+		return
+	}
+	if s.isEnded() {
+		// The caller hung up while the reply was being prepared. The transcript keeps it; nothing is
+		// spoken, so no speech is synthesized for a closed line.
+		log.Printf("[session %s] call ended while replying; not speaking", s.callID)
 		return
 	}
 	if err != nil {

@@ -149,10 +149,30 @@ def place_outbound_call(
         kwargs["async_amd"] = "true"
         kwargs["async_amd_status_callback"] = amd_callback_url
         kwargs["async_amd_status_callback_method"] = "POST"
-    call = _client(credentials).calls.create(
-        to=to, from_=from_, url=voice_webhook_url, method="POST", **kwargs
-    )
+    try:
+        call = _client(credentials).calls.create(
+            to=to, from_=from_, url=voice_webhook_url, method="POST", **kwargs
+        )
+    except TwilioRestException as exc:
+        if exc.status == 401:
+            raise TwilioClientError(_auth_failure_message(exc)) from exc
+        raise
     return call.sid
+
+
+def _auth_failure_message(exc: TwilioRestException) -> str:
+    """Twilio's own 401 text ("...with status 4 is not active") means nothing
+    to a business owner; say what is wrong and where to fix it."""
+    if "not active" in (exc.msg or ""):
+        return (
+            "Your Twilio account is suspended or closed, so Twilio refused the call. "
+            "Reactivate it in the Twilio Console (check billing/balance), or connect "
+            "an active Twilio account in Integrations → Twilio."
+        )
+    return (
+        "Twilio rejected the Account SID / Auth Token. Check them in "
+        "Integrations → Twilio (the Auth Token changes if it was rotated in Twilio)."
+    )
 
 
 def redirect_call(
@@ -160,6 +180,21 @@ def redirect_call(
 ) -> None:
     """Used for a live human-transfer: replaces the running call's TwiML."""
     redirect_live(client=_client(credentials), call_sid=call_sid, twiml=twiml)
+
+
+def fetch_call_outcome(
+    *, call_sid: str, credentials: TwilioCredentials | None = None
+) -> tuple[str, int | None]:
+    """What Twilio itself says about a call: (status, duration in seconds).
+    Raises CallNotLiveError when Twilio no longer knows the SID."""
+    try:
+        call = _client(credentials).calls(call_sid).fetch()
+    except TwilioRestException as exc:
+        if exc.status == 404 or exc.code in _CALL_NOT_LIVE_CODES:
+            raise CallNotLiveError(f"Call {call_sid} is not known to Twilio") from exc
+        raise
+    duration = int(call.duration) if call.duration and str(call.duration).isdigit() else None
+    return str(call.status), duration
 
 
 def start_call_recording(

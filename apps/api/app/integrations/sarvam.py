@@ -79,6 +79,16 @@ def _http() -> httpx.AsyncClient:
     return _client
 
 
+async def warm_connection() -> None:
+    """Keeps a TLS connection to Sarvam open in the pool. The pool drops idle connections after
+    `keepalive_expiry`, so the first turn after a quiet minute paid a fresh TCP + TLS handshake
+    (~150-300ms on a live call). Any response, even a 404, proves the connection is alive."""
+    try:
+        await _http().get("https://api.sarvam.ai/", timeout=5.0)
+    except httpx.HTTPError:
+        logger.debug("sarvam warm-up request failed", exc_info=True)
+
+
 async def chat_completion(
     *,
     messages: list[dict],

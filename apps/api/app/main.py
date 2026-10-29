@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from app.api.mcp_oauth import router as mcp_oauth_router
@@ -14,15 +16,43 @@ from fastapi.responses import JSONResponse
 from packages.database.session import init_engine
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+
+async def _keep_warm() -> None:
+    """Pays the cold-start costs once at boot and then every 30s, so no caller's first reply does:
+    the TLS connection to Sarvam, a database connection, and the task-queue connection."""
+    from app.integrations.sarvam import warm_connection
+    from sqlalchemy import text
+
+    from packages.database.session import get_engine
+
+    while True:
+        try:
+            await warm_connection()
+            async with get_engine().connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            from app.worker.celery_app import celery_app
+
+            await asyncio.to_thread(lambda: celery_app.connection_for_write().ensure_connection(max_retries=1))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("keep-warm pass failed", exc_info=True)
+        await asyncio.sleep(30)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_engine(settings.database_url, echo=settings.debug)
+    warm = asyncio.create_task(_keep_warm())
     # A mounted sub-application's own lifespan never runs, so the MCP
     # session manager has to be entered here instead (see app/mcp/server.py).
-    async with mcp.session_manager.run():
-        yield
+    try:
+        async with mcp.session_manager.run():
+            yield
+    finally:
+        warm.cancel()
 
 
 # Interactive docs and the schema map every endpoint for an attacker, so they

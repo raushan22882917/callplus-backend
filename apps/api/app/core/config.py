@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     campaign_retry_backoff_seconds: float = 2.0
 
     sarvam_api_key: str = ""
+    # Text channels (web chat, WhatsApp, SMS, email, Instagram, Messenger) answer with Sarvam's fast
+    # conversational model, ~0.4s per reply instead of 8-10s on the reasoning model. Set to false to
+    # roll back to the reasoning model for text.
+    fast_model_for_text: bool = True
 
     # Plan a brand-new workspace starts on (see app/services/plans.py). 'free' is
     # the 10-minute trial; 'legacy' means unlimited (what existing tenants have).

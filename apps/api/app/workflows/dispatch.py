@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -13,6 +14,8 @@ from packages.database.models import (
     WorkflowTask,
     WorkflowTrigger,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def run_pending_workflows(
@@ -81,4 +84,8 @@ def enqueue_workflow_trigger(
 ) -> None:
     from app.worker.tasks import run_workflow_trigger_task
 
-    run_workflow_trigger_task.delay(str(tenant_id), trigger.value, payload)
+    try:
+        run_workflow_trigger_task.delay(str(tenant_id), trigger.value, payload)
+    except Exception:
+        # Automations are best-effort here: the customer's message matters more than the queue.
+        logger.warning("could not queue workflow trigger %s", trigger.value, exc_info=True)

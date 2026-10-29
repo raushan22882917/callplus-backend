@@ -426,6 +426,14 @@ func (s *Session) closeIfBridged() {
 	}
 }
 
+// isEnded reports whether the call is over (the caller hung up, or we ended it). In-flight work
+// for an ended call is wasted: nobody can hear it.
+func (s *Session) isEnded() bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.ended
+}
+
 // markEnded returns true the first time it's called for this session, and
 // false on every call after — the guard that keeps a natural Twilio "stop"
 // event from double-processing a call we already finalized ourselves (or
@@ -568,6 +576,11 @@ func (s *Session) writeJSON(v any) {
 	}
 }
 
+const (
+	endNotifyAttempts = 4
+	endNotifyBackoff  = 500 * time.Millisecond
+)
+
 // cleanup runs whenever Run() exits, however it exits — an explicit Twilio
 // "stop" event, a read error, or the readIdleTimeout above. If nothing has
 // finalized this call yet (no transfer/hangup action, no no-response
@@ -578,8 +591,18 @@ func (s *Session) cleanup() {
 	close(s.watchdogStop)
 	if s.markEnded() && s.callID != "" {
 		duration := int(time.Since(s.startedAt).Seconds())
-		if err := s.backendClient.End(s.callID, "completed", duration); err != nil {
-			log.Printf("[session %s] failed to notify backend of call end: %v", s.callID, err)
+		// A deploy or a brief network blip must not leave the call "in progress" forever, so a
+		// failed notification is retried. The backend ends a call exactly once, so this is safe.
+		for attempt := 1; ; attempt++ {
+			err := s.backendClient.End(s.callID, "completed", duration)
+			if err == nil {
+				break
+			}
+			log.Printf("[session %s] failed to notify backend of call end (attempt %d): %v", s.callID, attempt, err)
+			if attempt >= endNotifyAttempts {
+				break
+			}
+			time.Sleep(time.Duration(attempt) * endNotifyBackoff)
 		}
 	}
 	if s.stt != nil {

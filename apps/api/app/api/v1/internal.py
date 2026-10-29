@@ -461,6 +461,7 @@ async def call_end(
     call = await _get_call(db, call_id)
     if payload.recording_url:
         call.recording_url = payload.recording_url
+        await db.commit()  # saved even if another path finalizes the call first
     if await is_human_controlled(db, call.id):
         # The caller was moved into a human-handled conference, which ends the
         # media stream; the call is finalized when that conference ends instead.

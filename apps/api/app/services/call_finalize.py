@@ -39,8 +39,20 @@ async def finalize_call(
     reason: str | None = None,
     duration_seconds: int | None = None,
 ) -> bool:
-    """Returns False (no-op) if the call was already finalized."""
+    """Returns False (no-op) if the call was already finalized.
+
+    When a caller hangs up, Twilio's status webhook and the gateway's /end arrive within
+    milliseconds of each other, each in its own session. A plain "is it finished yet?" check let both
+    pass and finalize twice (duplicate CALL_ENDED events, webhooks, summaries, surveys). The row lock
+    makes the second one wait for the first to commit and then see the call as finished."""
     if call.status in TERMINAL_CALL_STATUSES:
+        return False
+    current = (
+        await db.execute(select(Call.status).where(Call.id == call.id).with_for_update())
+    ).scalar_one_or_none()
+    if current in TERMINAL_CALL_STATUSES:
+        call.status = current  # another request finished it first; report what it recorded
+        await db.commit()  # releases the lock
         return False
 
     call.status = status

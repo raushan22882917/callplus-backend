@@ -67,3 +67,19 @@ func TestFillerPhrasesVaryAndExistForEveryLanguage(t *testing.T) {
 		t.Fatal("an unknown language falls back to English")
 	}
 }
+
+func TestIsEndedFlipsOnceAndStopsWork(t *testing.T) {
+	s := &Session{}
+	if s.isEnded() {
+		t.Fatal("a new session must not be ended")
+	}
+	if !s.markEnded() {
+		t.Fatal("first markEnded should claim the end")
+	}
+	if !s.isEnded() {
+		t.Fatal("session should report ended after markEnded")
+	}
+	if s.markEnded() {
+		t.Fatal("a second markEnded must not claim the end again")
+	}
+}
