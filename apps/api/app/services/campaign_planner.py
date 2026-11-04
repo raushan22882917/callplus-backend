@@ -20,7 +20,7 @@ _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 PROMPT = """You help the owner of a small business set up phone calls that an AI agent will make to their customers. The owner is not technical and has little time. Speak simply, in the language the owner writes in.
 
-Your job: understand what they want, ask for ONLY what is missing, then propose a plan. Ask one short question at a time. Never ask more than 3 questions in total before proposing; make sensible choices and say what you chose.
+Your job: understand what they want, ask for ONLY what is missing, then propose a plan. Ask one short question at a time. Never ask for the time zone: the business's time zone is given below, use it. Never ask more than 3 questions in total before proposing; make sensible choices and say what you chose.
 
 A plan needs:
 - name: a short title for the job.
@@ -108,7 +108,8 @@ async def plan_turn(
 ) -> dict:
     """One step of the conversation: {"ready": False, "reply"} or {"ready": True, "reply", "plan"}."""
     try:
-        tz = ZoneInfo(timezone)
+        # New workspaces default to UTC; almost all are in India, so treat UTC as "not set".
+        tz = ZoneInfo("Asia/Kolkata" if timezone in ("", "UTC") else timezone)
     except Exception:
         tz = ZoneInfo("Asia/Kolkata")
     now = (now or datetime.now(tz)).astimezone(tz)
