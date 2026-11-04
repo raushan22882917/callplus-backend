@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime
 
 from app.core.audit import log_audit_event
 from app.core.deps import RequestContext, get_db, require_permission
@@ -10,13 +11,26 @@ from app.schemas.campaign import (
     CampaignCreate,
     CampaignRead,
 )
-from app.services import plans
+from app.integrations.credentials import get_sarvam_api_key
+from app.integrations.sarvam import SarvamAPIError
+from app.schemas.campaign import PlanRequest, PlanResponse, FromPlanRequest
+from app.services import campaign_planner, plans
+from app.services.customer_lookup import find_or_create_customer_by_phone
 from app.worker.campaign_tasks import run_campaign_task
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import Campaign, CampaignContact, CampaignStatus
+from packages.database.models import (
+    AIAgent,
+    Campaign,
+    CampaignChannel,
+    CampaignContact,
+    CampaignStatus,
+    Customer,
+    PhoneNumber,
+    Tenant,
+)
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
@@ -108,7 +122,8 @@ async def launch_campaign(
             status.HTTP_409_CONFLICT, f"Campaign is already {campaign.status.value}"
         )
 
-    campaign.status = CampaignStatus.RUNNING
+    scheduled_later = campaign.scheduled_at is not None and campaign.scheduled_at > datetime.now(UTC)
+    campaign.status = CampaignStatus.SCHEDULED if scheduled_later else CampaignStatus.RUNNING
     await log_audit_event(
         db,
         tenant_id=ctx.tenant_id,
@@ -120,7 +135,8 @@ async def launch_campaign(
     await db.commit()
     await db.refresh(campaign)
 
-    run_campaign_task.delay(str(campaign.id))
+    if not scheduled_later:  # a scheduled one is started by the minute-by-minute check
+        run_campaign_task.delay(str(campaign.id))
     return campaign
 
 
@@ -132,7 +148,7 @@ async def pause_campaign(
 ) -> Campaign:
     repo = CampaignRepository(db, ctx.tenant_id)
     campaign = await repo.get(campaign_id)
-    if campaign.status != CampaignStatus.RUNNING:
+    if campaign.status not in (CampaignStatus.RUNNING, CampaignStatus.SCHEDULED):
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"Campaign is {campaign.status.value}, not running"
         )
@@ -178,3 +194,88 @@ async def resume_campaign(
 
     run_campaign_task.delay(str(campaign.id))
     return campaign
+
+
+@router.post("/plan", response_model=PlanResponse)
+async def plan_campaign(
+    payload: PlanRequest,
+    ctx: RequestContext = Depends(require_permission(Permissions.CAMPAIGNS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> PlanResponse:
+    """Talk the owner through setting up a calling job. Creates nothing."""
+    tenant = await db.get(Tenant, ctx.tenant_id)
+    count = (
+        await db.execute(
+            select(func.count()).select_from(Customer).where(
+                Customer.tenant_id == ctx.tenant_id, Customer.phone.is_not(None)
+            )
+        )
+    ).scalar_one()
+    tag_rows = await db.execute(
+        select(func.unnest(Customer.tags)).where(Customer.tenant_id == ctx.tenant_id).distinct().limit(30)
+    )
+    try:
+        result = await campaign_planner.plan_turn(
+            messages=[m.model_dump() for m in payload.messages],
+            timezone=tenant.timezone if tenant else "Asia/Kolkata",
+            tags=[t for (t,) in tag_rows.all()],
+            customer_count=count,
+            api_key=await get_sarvam_api_key(db, ctx.tenant_id),
+        )
+    except SarvamAPIError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "The AI helper is busy. Please try again.") from exc
+    return PlanResponse(**result)
+
+
+@router.post("/from-plan", response_model=CampaignRead, status_code=status.HTTP_201_CREATED)
+async def create_from_plan(
+    payload: FromPlanRequest,
+    ctx: RequestContext = Depends(require_permission(Permissions.CAMPAIGNS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> Campaign:
+    """Creates the campaign the owner approved, adds the people to call, and starts or schedules it."""
+    await plans.ensure_feature(db, ctx.tenant_id, "campaigns")
+    plan = payload.plan
+
+    agent_id = payload.ai_agent_id
+    if agent_id is None:
+        # The first AI agent that has a phone number to call from.
+        row = await db.execute(
+            select(PhoneNumber.ai_agent_id)
+            .join(AIAgent, AIAgent.id == PhoneNumber.ai_agent_id)
+            .where(PhoneNumber.tenant_id == ctx.tenant_id)
+            .limit(1)
+        )
+        agent_id = row.scalar_one_or_none()
+    if agent_id is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Give one of your AI agents a phone number first (Phone numbers), so there is a number to call from.",
+        )
+
+    audience = plan.audience
+    if audience.type == "numbers":
+        customers = []
+        for number in audience.numbers:
+            customer, _ = await find_or_create_customer_by_phone(db, ctx.tenant_id, number)
+            customers.append(customer)
+    else:
+        query = select(Customer).where(Customer.tenant_id == ctx.tenant_id, Customer.phone.is_not(None))
+        if audience.type == "tag":
+            query = query.where(Customer.tags.overlap(audience.tags))
+        customers = list((await db.execute(query.limit(10000))).scalars().all())
+    if not customers:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "No customers match, so there is nobody to call.")
+
+    campaign = await CampaignRepository(db, ctx.tenant_id).create(
+        name=plan.name,
+        channel=CampaignChannel.VOICE,
+        ai_agent_id=agent_id,
+        goal=plan.goal,
+        questions=plan.questions,
+        scheduled_at=plan.scheduled_at,
+    )
+    for customer in customers:
+        db.add(CampaignContact(tenant_id=ctx.tenant_id, campaign_id=campaign.id, customer_id=customer.id))
+    await db.commit()
+    return await launch_campaign(campaign.id, ctx, db)

@@ -97,6 +97,10 @@ celery_app.conf.beat_schedule = {
         "task": "knowledge.sweep_sources",
         "schedule": 10 * 60.0,
     },
+    "campaigns-start-due": {
+        "task": "campaigns.start_due",
+        "schedule": 60.0,
+    },
     "calls-reap-stuck": {
         "task": "calls.reap_stuck_calls",
         "schedule": 2 * 60.0,

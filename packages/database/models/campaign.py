@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, String
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -47,6 +47,9 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # template to message outside the 24h customer-service window).
     whatsapp_template_name: Mapped[str | None] = mapped_column(String(255))
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # What the AI is calling about, and what it must find out. Answers are saved per contact.
+    goal: Mapped[str | None] = mapped_column(Text)
+    questions: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
 
     __table_args__ = (Index("ix_campaigns_tenant_status", "tenant_id", "status"),)
 

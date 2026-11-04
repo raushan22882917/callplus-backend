@@ -314,6 +314,28 @@ def describe_action(name: str, arguments: dict | None) -> str | None:
     return f"{label}: {str(detail)[:140]}" if detail else label
 
 
+def mission_note(mission: dict | None) -> str:
+    """For a call the business placed on purpose (a campaign): why we are calling and what to find out."""
+    if not mission:
+        return ""
+    goal = str(mission.get("goal") or "").strip()
+    questions = [str(q).strip() for q in (mission.get("questions") or []) if str(q).strip()]
+    if not goal and not questions:
+        return ""
+    note = "\n\nYOU PLACED THIS CALL. Say who you are and why you are calling in your first sentence."
+    if goal:
+        note += f"\nReason for the call: {goal}"
+    if questions:
+        note += (
+            "\nBy the end of the call, find out the answers to these, one question at a time, "
+            "in a natural order, without sounding like a form. Skip one the person already answered:\n"
+            + "\n".join(f"- {q}" for q in questions)
+        )
+        note += "\nThen confirm the key answers back to them in one short sentence and thank them."
+    note += "\nIf they say it is a bad time, offer to call back and ask when."
+    return note
+
+
 def actions_note(actions: list[str]) -> str:
     if not actions:
         return ""
@@ -579,6 +601,13 @@ class _TurnPrep:
     is_voice: bool
 
 
+async def _mission_for(db: AsyncSession, conversation: Conversation) -> str:
+    if conversation.call_id is None:
+        return ""
+    call = await db.get(Call, conversation.call_id)
+    return mission_note(call.mission) if call is not None else ""
+
+
 async def _prepare_turn(
     *,
     db: AsyncSession,
@@ -613,6 +642,7 @@ async def _prepare_turn(
         + await other_channel_note(db, conversation)
         + await _booking_context(db, conversation)
         + actions_note(await _actions_this_conversation(db, conversation))
+        + await _mission_for(db, conversation)
     )
     guardrail_rules = await guardrails.load_rules(db, tenant_id, agent.id)
     system_prompt += guardrails.build_guardrail_prompt(guardrail_rules)

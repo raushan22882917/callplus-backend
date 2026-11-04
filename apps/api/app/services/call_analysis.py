@@ -15,7 +15,13 @@ from app.integrations.sarvam import SarvamAPIError, chat_completion
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import Call, Conversation, Message, MessageSender
+from packages.database.models import (
+    Call,
+    CampaignContact,
+    Conversation,
+    Message,
+    MessageSender,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +108,77 @@ async def _rescore_customer_leads(db: AsyncSession, call: Call) -> None:
         logger.warning("could not rescore leads for call %s", call.id, exc_info=True)
 
 
+def parse_answers(text: str, questions: list[str]) -> dict[str, str]:
+    """{question: answer} for the questions the person actually answered; others are left out."""
+    text = re.sub(r"<think>.*", "", _THINK.sub("", text), flags=re.DOTALL | re.IGNORECASE)
+    match = _JSON_OBJ.search(text)
+    if not match:
+        return {}
+    try:
+        data = json.loads(match.group(0))
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    answers: dict[str, str] = {}
+    for question in questions:
+        value = data.get(question)
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            answer = str(value).strip()[:500]
+            if answer.lower() not in {"null", "none", "unknown", "not answered", "n/a"}:
+                answers[question] = answer
+    return answers
+
+
+async def _collect_answers(db: AsyncSession, call: Call, transcript: str) -> None:
+    """For a campaign call: pull the answers to its questions out of the transcript and file them
+    on the call and on the campaign contact, so the owner sees a table of what each person said."""
+    questions = [str(q) for q in ((call.mission or {}).get("questions") or [])]
+    if not questions:
+        return
+    prompt = (
+        "From the phone-call transcript, extract the person's answer to each question. Reply with ONLY "
+        "a JSON object whose keys are exactly the questions below and whose values are short English "
+        "answers. Use null for a question that was not answered. Never invent an answer.\n"
+        + "\n".join(f"- {q}" for q in questions)
+    )
+    try:
+        completion = await chat_completion(
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": transcript[-12000:]},
+            ],
+            api_key=await get_sarvam_api_key(db, call.tenant_id),
+            temperature=0,
+            max_tokens=2048,
+            timeout=60.0,
+            reasoning_effort="low",
+        )
+    except SarvamAPIError as exc:
+        logger.warning("answer extraction failed for %s: %s", call.id, exc)
+        return
+    answers = parse_answers(completion["choices"][0]["message"].get("content") or "", questions)
+    call.answers = answers
+    campaign_id = (call.mission or {}).get("campaign_id")
+    if campaign_id and call.customer_id:
+        contact = (
+            await db.execute(
+                select(CampaignContact).where(
+                    CampaignContact.campaign_id == uuid.UUID(campaign_id),
+                    CampaignContact.customer_id == call.customer_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if contact is not None:
+            contact.result = {
+                **(contact.result or {}),
+                "answers": answers,
+                "call_id": str(call.id),
+                "summary": call.summary,
+            }
+    await db.commit()
+
+
 async def analyze_call(db: AsyncSession, call_id: uuid.UUID) -> bool:
     """Returns True if the analysis was stored. Never raises for model problems."""
     call = await db.get(Call, call_id)
@@ -164,5 +241,6 @@ async def analyze_call(db: AsyncSession, call_id: uuid.UUID) -> bool:
     call.action_items = result["action_items"]
     call.analyzed_at = datetime.now(UTC)
     await db.commit()
+    await _collect_answers(db, call, transcript)
     await _rescore_customer_leads(db, call)
     return True

@@ -69,6 +69,10 @@ class Call(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     outcome: Mapped[str | None] = mapped_column(String(40))
     action_items: Mapped[list | None] = mapped_column(JSONB)
     analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # {"campaign_id", "goal", "questions"} for a call placed by a campaign; `answers` is
+    # {question: answer} extracted from the transcript afterwards.
+    mission: Mapped[dict | None] = mapped_column(JSONB)
+    answers: Mapped[dict | None] = mapped_column(JSONB)
 
     __table_args__ = (
         Index("ix_calls_tenant_status", "tenant_id", "status"),

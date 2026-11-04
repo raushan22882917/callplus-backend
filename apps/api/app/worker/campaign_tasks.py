@@ -143,6 +143,16 @@ async def _run_campaign(campaign_id: str) -> None:
         )
 
 
+def campaign_mission(campaign: Campaign) -> dict | None:
+    if not (campaign.goal or campaign.questions):
+        return None
+    return {
+        "campaign_id": str(campaign.id),
+        "goal": campaign.goal or "",
+        "questions": list(campaign.questions or []),
+    }
+
+
 async def _place_campaign_call(db, campaign: Campaign, phone_number, customer: Customer) -> Call:
     if phone_number is None:
         raise ValueError("no phone number assigned to this campaign's AI agent")
@@ -156,6 +166,7 @@ async def _place_campaign_call(db, campaign: Campaign, phone_number, customer: C
         status=CallStatus.QUEUED,
         from_number=phone_number.e164_number,
         to_number=customer.phone,
+        mission=campaign_mission(campaign),
     )
     db.add(call)
     await db.flush()
@@ -347,3 +358,28 @@ async def _send_campaign_whatsapp(db, campaign: Campaign, whatsapp_account, cust
 @celery_app.task(name="campaigns.run")
 def run_campaign_task(campaign_id: str) -> None:
     asyncio.run(_run_campaign(campaign_id))
+
+
+async def _start_due_campaigns() -> int:
+    """Starts every campaign whose scheduled time has come (status SCHEDULED, scheduled_at <= now)."""
+    ensure_engine()
+    started: list[str] = []
+    async with session_scope() as db:
+        result = await db.execute(
+            select(Campaign).where(
+                Campaign.status == CampaignStatus.SCHEDULED,
+                Campaign.scheduled_at <= datetime.now(UTC),
+            )
+        )
+        for campaign in result.scalars().all():
+            campaign.status = CampaignStatus.RUNNING
+            started.append(str(campaign.id))
+        await db.commit()
+    for campaign_id in started:
+        run_campaign_task.delay(campaign_id)
+    return len(started)
+
+
+@celery_app.task(name="campaigns.start_due")
+def start_due_campaigns_task() -> int:
+    return asyncio.run(_start_due_campaigns())
