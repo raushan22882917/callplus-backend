@@ -138,3 +138,34 @@ async def _signup_for_included(client) -> str:
     )
     assert resp.status_code == 201, resp.text
     return resp.json()["access_token"]
+
+
+async def test_twilio_details_twilio_refuses_are_not_saved(
+    client: AsyncClient, monkeypatch
+) -> None:
+    tokens = await _signup(client, slug="twilio-check", email="owner@twilio-check.com")
+    monkeypatch.setattr(
+        "app.api.v1.integrations.check_account",
+        lambda *_a, **_k: (False, "Your Twilio account is suspended. Reactivate it."),
+    )
+    resp = await client.post(
+        "/api/v1/integrations/twilio",
+        headers=_auth(tokens),
+        json={"account_sid": "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "auth_token": "tok"},
+    )
+    assert resp.status_code == 422 and "suspended" in resp.json()["detail"]
+    listed = await client.get("/api/v1/integrations", headers=_auth(tokens))
+    assert [i for i in listed.json() if i["provider"] == "twilio"] == []
+
+
+async def test_twilio_status_reports_what_twilio_says(client: AsyncClient, monkeypatch) -> None:
+    tokens = await _signup(client, slug="twilio-check", email="owner@twilio-check.com")
+    monkeypatch.setattr(
+        "app.api.v1.integrations.check_account",
+        lambda *_a, **_k: (False, "Your Twilio account is closed."),
+    )
+    resp = await client.get("/api/v1/integrations/twilio/status", headers=_auth(tokens))
+    assert resp.status_code == 200 and resp.json() == {
+        "ok": False,
+        "message": "Your Twilio account is closed.",
+    }

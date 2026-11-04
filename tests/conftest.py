@@ -85,6 +85,12 @@ def _meta_accepts_details(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _twilio_accepts_details(monkeypatch):
+    """Tests save made-up Twilio details; the live Twilio check has its own tests."""
+    monkeypatch.setattr("app.api.v1.integrations.check_account", lambda *_a, **_k: (True, "ok"))
+
+
+@pytest.fixture(autouse=True)
 async def _reset_database() -> AsyncIterator[None]:
     settings = get_settings()
     init_engine(settings.database_url)

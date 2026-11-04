@@ -305,3 +305,31 @@ def update_number_webhooks(
 def release_number(*, provider_sid: str, credentials: TwilioCredentials | None = None) -> None:
     """Releases a number back to Twilio (stops the recurring charge)."""
     _client(credentials).incoming_phone_numbers(provider_sid).delete()
+
+
+def check_account(credentials: TwilioCredentials | None = None) -> tuple[bool, str]:
+    """Asks Twilio about the account itself: (usable, plain-words message). Never raises for a
+    Twilio problem; a "Connected" badge is only honest if Twilio would accept a call."""
+    try:
+        creds = _resolve(credentials)
+        if not creds.account_sid or not creds.auth_token:
+            return False, "No Twilio account is set up yet."
+        account = Client(creds.account_sid, creds.auth_token).api.accounts(creds.account_sid).fetch()
+    except TwilioRestException as exc:
+        if exc.status == 401:
+            return False, _auth_failure_message(exc)
+        return False, "We could not check your Twilio account right now. Please try again in a moment."
+    except Exception:
+        return False, "We could not reach Twilio. Please try again in a moment."
+    state = str(account.status or "").lower()
+    if state == "active":
+        return True, "Twilio accepted these details and the account is active."
+    if state == "suspended":
+        return False, (
+            "Your Twilio account is suspended. Open the Twilio Console, fix billing or the "
+            "reason it was paused, and reactivate it."
+        )
+    return False, (
+        "Your Twilio account is closed. Calls cannot go through it. Open a new Twilio account, "
+        "or call from an Exotel number instead."
+    )

@@ -3,12 +3,15 @@ Sarvam API key. Connecting one here means every call/message/turn for this
 tenant uses their credentials instead of the platform's shared ones — see
 app/integrations/credentials.py for where that's resolved."""
 
+import asyncio
 import uuid
 
 from app.core.config import get_settings
 from app.core.crypto import encrypt_secret
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
+from app.integrations.credentials import TwilioCredentials, get_twilio_credentials
+from app.integrations.twilio_client import check_account
 from app.schemas.integration import (
     ConnectExotelRequest,
     ConnectSarvamRequest,
@@ -98,6 +101,13 @@ async def connect_twilio(
     ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
     db: AsyncSession = Depends(get_db),
 ) -> Integration:
+    # Check with Twilio first: saving details Twilio will refuse only produces a false "Connected".
+    ok, message = await asyncio.to_thread(
+        check_account,
+        TwilioCredentials(account_sid=payload.account_sid, auth_token=payload.auth_token),
+    )
+    if not ok:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, message)
     integration = await _upsert_integration(
         db,
         tenant_id=ctx.tenant_id,
@@ -108,6 +118,17 @@ async def connect_twilio(
     await db.commit()
     await db.refresh(integration)
     return integration
+
+
+@router.get("/twilio/status")
+async def twilio_status(
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_READ)),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Would Twilio accept a call from this workspace right now? Uses the workspace's own account
+    if it saved one, otherwise the platform's."""
+    ok, message = await asyncio.to_thread(check_account, await get_twilio_credentials(db, ctx.tenant_id))
+    return {"ok": ok, "message": message}
 
 
 @router.post("/sarvam", response_model=IntegrationRead, status_code=status.HTTP_201_CREATED)
