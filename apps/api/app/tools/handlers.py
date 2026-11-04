@@ -9,18 +9,20 @@ from datetime import UTC, datetime, timedelta
 
 from app.integrations.razorpay_client import RazorpayAPIError, create_payment_link
 from app.integrations.whatsapp import WhatsAppAPIError, send_text_message
+from app.services import callbacks, plans
 from app.services import knowledge as knowledge_service
-from app.services import plans
 from app.services.operations import apply_sla_safely
 from app.services.webhooks import enqueue_webhook_event
 from app.tools.context import ToolContext
 from sqlalchemy import func, select
 
 from packages.database.models import (
+    Call,
     Customer,
     CustomerActivity,
     PaymentLink,
     PaymentLinkStatus,
+    Tenant,
     Ticket,
     TicketPriority,
     WhatsAppAccount,
@@ -230,7 +232,8 @@ async def add_customer_note(ctx: ToolContext, *, note: str, customer_id: str | N
 async def schedule_callback(
     ctx: ToolContext,
     *,
-    requested_time: str,
+    requested_time: str = "",
+    minutes_from_now: int | None = None,
     note: str = "",
     customer_id: str | None = None,
     caller_name: str | None = None,
@@ -243,6 +246,40 @@ async def schedule_callback(
     target_id = _target_customer(ctx, customer_id)
     if target_id is None:
         return {"error": "no customer_id given and no customer on this conversation"}
+
+    # A time we can work out becomes an automatic AI call; anything else goes to staff as before.
+    tenant = await ctx.db.get(Tenant, ctx.tenant_id)
+    tz = callbacks.tz_for(tenant.timezone if tenant else None)
+    due = callbacks.parse_when(requested_time, minutes_from_now=minutes_from_now, tz=tz)
+    owner_row = await ctx.db.get(Customer, target_id)
+    other_number = _other_number(contact_phone, owner_row.phone if owner_row else None)
+    if due is not None and (other_number or (owner_row and owner_row.phone)):
+        call = await ctx.db.get(Call, ctx.call_id) if ctx.call_id else None
+        follow_up = await callbacks.schedule(
+            ctx.db,
+            tenant_id=ctx.tenant_id,
+            customer_id=target_id,
+            due_at=due,
+            call=call,
+            reason=note,
+            phone=other_number,
+        )
+        ctx.db.add(
+            CustomerActivity(
+                tenant_id=ctx.tenant_id,
+                customer_id=target_id,
+                type="CALLBACK_SCHEDULED",
+                source="ai_agent",
+                reference_id=ctx.call_id,
+                extra={"due_at": due.isoformat(), "note": note, "follow_up_id": str(follow_up.id)},
+            )
+        )
+        await remember_caller_name(ctx, target_id, caller_name)
+        return {
+            "scheduled": True,
+            "call_back": callbacks.describe(due, tz),
+            "instruction": "Tell the caller you will call them back at that time.",
+        }
 
     ctx.db.add(
         CustomerActivity(

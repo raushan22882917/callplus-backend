@@ -99,6 +99,11 @@ async def finalize_call(
     # this pushed spend over a threshold.
     await cost_controls.evaluate_alerts_safely(db, call.tenant_id)
     await _update_widget_lead(db, call)
+    if status in (CallStatus.NO_ANSWER, CallStatus.FAILED) and (call.mission or {}).get("callback_of"):
+        from app.services import callbacks
+
+        if await callbacks.retry_if_unanswered(db, call) is not None:
+            await db.commit()
     return True
 
 

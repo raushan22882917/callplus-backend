@@ -109,9 +109,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "schedule_callback": ToolSpec(
         name="schedule_callback",
-        description="Record a request for a human agent to call the customer back "
-        "at a requested time. This does not book a calendar slot — it flags the "
-        "request for staff to action.",
+        description="Use this whenever the caller asks to be called back later ('call me in 5 "
+        "minutes', 'ring me tomorrow at 4'). It schedules an automatic call from you at that time. "
+        "For 'in N minutes/hours' fill minutes_from_now. For a clock time fill requested_time with "
+        "the local date and time as YYYY-MM-DD HH:MM. Then tell the caller the time back in one short "
+        "sentence. If the caller has not given a time, ask for one before calling this.",
         parameters={
             "type": "object",
             "properties": {
@@ -121,7 +123,14 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                         "The time the customer asked for, in their own words or ISO 8601"
                     ),
                 },
-                "note": {"type": "string"},
+                "minutes_from_now": {
+                    "type": "integer",
+                    "description": "How many minutes from now to call, when they said 'in 5 minutes' or 'in an hour' (60).",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "Why they want the call, in a few words, so you remember when you call back.",
+                },
                 "customer_id": {"type": "string"},
                 "caller_name": {
                     "type": "string",
@@ -132,7 +141,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                     "description": "Only if the caller wants to be called back on a different number than the one they're calling from.",
                 },
             },
-            "required": ["requested_time"],
+            "required": [],
         },
         handler=handlers.schedule_callback,
     ),

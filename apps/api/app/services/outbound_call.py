@@ -100,6 +100,7 @@ async def place_ai_outbound_call(
     to_number: str,
     ai_agent_id: str | None = None,
     from_number: str | None = None,
+    mission: dict | None = None,
 ) -> Call:
     """Commits and returns the created Call row. Raises OutboundCallError
     for anything the caller can fix (ambiguous agent/number, Twilio
@@ -130,6 +131,7 @@ async def place_ai_outbound_call(
         direction=CallDirection.OUTBOUND,
         to_number=to_number,
         from_number=resolved_from_number,
+        mission=mission,
     )
     db.add(call)
     await db.flush()

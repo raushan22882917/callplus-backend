@@ -53,6 +53,7 @@ from packages.database.models import (
     Message,
     MessageDirection,
     MessageSender,
+    Tenant,
     Ticket,
     TicketStatus,
 )
@@ -310,7 +311,7 @@ def describe_action(name: str, arguments: dict | None) -> str | None:
     if not label:
         return None
     a = arguments or {}
-    detail = a.get("subject") or a.get("requested_time") or a.get("note") or a.get("message") or a.get("amount") or ""
+    detail = a.get("subject") or a.get("requested_time") or (f"in {a.get('minutes_from_now')} minutes" if a.get("minutes_from_now") else "") or a.get("note") or a.get("message") or a.get("amount") or ""
     return f"{label}: {str(detail)[:140]}" if detail else label
 
 
@@ -601,6 +602,20 @@ class _TurnPrep:
     is_voice: bool
 
 
+async def _time_note(db: AsyncSession, tenant_id: uuid.UUID) -> str:
+    """The AI has no clock: tell it the date, time and zone so "in 5 minutes" and "tomorrow at 4" work."""
+    from app.services import callbacks
+
+    tenant = await db.get(Tenant, tenant_id)
+    tz = callbacks.tz_for(tenant.timezone if tenant else None)
+    now = datetime.now(tz)
+    return (
+        f"\n\nIt is now {now.strftime('%A %d %B %Y, %I:%M %p')} ({tz.key}). "
+        "If the caller asks you to call back later, use the schedule_callback tool with the time, "
+        "then say the time back to them."
+    )
+
+
 async def _mission_for(db: AsyncSession, conversation: Conversation) -> str:
     if conversation.call_id is None:
         return ""
@@ -643,6 +658,7 @@ async def _prepare_turn(
         + await _booking_context(db, conversation)
         + actions_note(await _actions_this_conversation(db, conversation))
         + await _mission_for(db, conversation)
+        + await _time_note(db, tenant_id)
     )
     guardrail_rules = await guardrails.load_rules(db, tenant_id, agent.id)
     system_prompt += guardrails.build_guardrail_prompt(guardrail_rules)

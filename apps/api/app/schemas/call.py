@@ -43,4 +43,6 @@ class CallRead(BaseModel):
     outcome: str | None = None
     action_items: list[str] | None = None
     analyzed_at: datetime | None = None
+    mission: dict | None = None
+    answers: dict | None = None
     created_at: datetime

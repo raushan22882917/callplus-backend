@@ -801,12 +801,15 @@ async def _dispatch_follow_up(db: AsyncSession, follow_up: FollowUp, customer: C
         from app.services.outbound_call import OutboundCallError, place_ai_outbound_call
 
         try:
+            from app.services import callbacks
+
             await place_ai_outbound_call(
                 db,
                 follow_up.tenant_id,
-                to_number=customer.phone,
+                to_number=payload.get("to_number") or customer.phone,
                 ai_agent_id=payload.get("ai_agent_id"),
                 from_number=payload.get("from_number"),
+                mission=callbacks.mission_for(payload) if payload.get("callback_of") else None,
             )
         except OutboundCallError as exc:
             raise FollowUpError(str(exc)) from exc
