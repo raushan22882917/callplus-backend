@@ -35,7 +35,7 @@ def sent(monkeypatch):
         log.append(("sms", to, from_, body))
         return "SM_TEST"
 
-    async def email(*, to_email, subject, body, in_reply_to, references, reply_to):
+    async def email(*, to_email, subject, body, in_reply_to, references, reply_to, **_workspace):
         log.append(("email", to_email, subject, body))
         return "<follow-up-1@callpulse.test>"
 
