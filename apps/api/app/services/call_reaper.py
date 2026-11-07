@@ -87,6 +87,10 @@ async def reap_stuck_calls(db: AsyncSession, *, now: datetime | None = None) -> 
             cap = agent.max_call_duration_seconds if agent else None
         if not _due(call, cap, now):
             continue
+        # Exotel reports its own outcome. Closing those calls here would mark a
+        # live call finished without asking the carrier.
+        if call.provider_call_sid and not call.provider_call_sid.startswith("CA"):
+            continue
         result.checked += 1
         await _settle(db, call, result)
     return result

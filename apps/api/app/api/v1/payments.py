@@ -1,9 +1,11 @@
+import json
 from datetime import UTC, datetime
 
 from app.core.audit import log_audit_event
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
 from app.core.repository import TenantScopedRepository
+from app.integrations import paypal_client
 from app.integrations.razorpay_client import (
     RazorpayAPIError,
     create_payment_link,
@@ -132,6 +134,78 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
     return {"status": "ok"}
 
 
+@router.post("/webhooks/payment/paypal")
+async def paypal_webhook(request: Request, db: AsyncSession = Depends(get_db)) -> dict:
+    raw = await request.body()
+    try:
+        event = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid JSON") from exc
+    if not await paypal_client.verify_webhook(request.headers, event):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid webhook signature")
+    kind = event.get("event_type")
+    resource = event.get("resource") or {}
+    if kind == "CHECKOUT.ORDER.APPROVED":
+        order_id = resource.get("id")
+        if order_id:
+            try:
+                order = await paypal_client.capture_order(order_id)
+            except paypal_client.PayPalAPIError as exc:
+                raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+            await _credit_paypal_order(db, order)
+    elif kind == "PAYMENT.CAPTURE.COMPLETED":
+        await _credit_paypal_capture(db, resource)
+    await db.commit()
+    return {"status": "ok"}
+
+
+async def _credit_paypal_order(db: AsyncSession, order: dict) -> None:
+    captured = paypal_client.capture_from_order(order)
+    if captured is None or captured[2] != "INR":
+        return
+    payment_id, paid_paise, _currency = captured
+    if await wallet_service.credit_paid_order(
+        db,
+        order_id=order.get("id", ""),
+        payment_id=payment_id,
+        paid_paise=paid_paise,
+        provider="paypal",
+    ):
+        topup = (
+            await db.execute(
+                select(WalletTopup).where(WalletTopup.provider_order_id == order.get("id"))
+            )
+        ).scalar_one_or_none()
+        if topup is not None:
+            await log_audit_event(
+                db, tenant_id=topup.tenant_id, actor_user_id=None, action="wallet.topped_up",
+                resource_type="wallet_topup", resource_id=topup.id,
+                extra={"amount_paise": topup.amount_paise, "via": "paypal_webhook"},
+            )
+
+
+async def _credit_paypal_capture(db: AsyncSession, resource: dict) -> None:
+    related = (resource.get("supplementary_data") or {}).get("related_ids") or {}
+    order_id = related.get("order_id")
+    payment_id = resource.get("id")
+    paid = paypal_client.paise_from_amount(resource.get("amount") or {})
+    currency = (resource.get("amount") or {}).get("currency_code")
+    if not order_id or not payment_id or paid is None or currency != "INR":
+        return
+    if await wallet_service.credit_paid_order(
+        db, order_id=order_id, payment_id=payment_id, paid_paise=paid, provider="paypal"
+    ):
+        topup = (
+            await db.execute(select(WalletTopup).where(WalletTopup.provider_order_id == order_id))
+        ).scalar_one_or_none()
+        if topup is not None:
+            await log_audit_event(
+                db, tenant_id=topup.tenant_id, actor_user_id=None, action="wallet.topped_up",
+                resource_type="wallet_topup", resource_id=topup.id,
+                extra={"amount_paise": topup.amount_paise, "via": "paypal_webhook"},
+            )
+
+
 async def _handle_wallet_payment(db: AsyncSession, *, payment_entity: dict) -> None:
     """A wallet top-up paid: credit it if the browser has not already confirmed it. Only an
     order we created, for exactly the amount we asked for, is credited."""
@@ -141,7 +215,9 @@ async def _handle_wallet_payment(db: AsyncSession, *, payment_entity: dict) -> N
     topup = (
         await db.execute(select(WalletTopup).where(WalletTopup.provider_order_id == order_id))
     ).scalar_one_or_none()
-    if topup is None or payment_entity.get("amount") != topup.total_paise:
+    if topup is None or topup.provider != "razorpay":
+        return
+    if payment_entity.get("amount") != topup.total_paise:
         return
     if await wallet_service.credit_topup(db, topup, payment_id):
         await log_audit_event(

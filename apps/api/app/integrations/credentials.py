@@ -46,6 +46,12 @@ async def _connected_integration(
     return integration, decrypt_secret(credential.encrypted_secret)
 
 
+async def uses_platform_twilio(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
+    """True when this tenant has not connected its own Twilio account, so a
+    purchase or a call would bill the platform's account."""
+    return await _connected_integration(db, tenant_id, "twilio") is None
+
+
 async def get_twilio_credentials(db: AsyncSession, tenant_id: uuid.UUID) -> TwilioCredentials:
     connected = await _connected_integration(db, tenant_id, "twilio")
     if connected is not None:
@@ -60,9 +66,37 @@ async def get_twilio_credentials(db: AsyncSession, tenant_id: uuid.UUID) -> Twil
     )
 
 
+class SharedAccountError(Exception):
+    """The workspace has not connected its own account, so the shared one must not be billed."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+OWN_ACCOUNT_MESSAGE = (
+    "Connect your own account under Integrations. For an Indian number, connect Exotel and "
+    "add the ExoPhone you bought there. For any other number, connect Twilio. Nothing is "
+    "placed or bought on a shared account."
+)
+
+
+async def require_own_twilio(db: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """Refuse when this call or message would be billed to the shared Twilio account."""
+    if not await uses_platform_twilio(db, tenant_id):
+        return
+    settings = get_settings()
+    if settings.twilio_account_sid and settings.twilio_auth_token:
+        raise SharedAccountError(OWN_ACCOUNT_MESSAGE)
+
+
 async def get_sarvam_api_key(db: AsyncSession, tenant_id: uuid.UUID) -> str:
+    """The workspace's own Sarvam key. Empty when they have not connected one.
+
+    The platform key is not used for a workspace. Each business pastes its own key
+    so its calls are billed to its own Sarvam account.
+    """
     connected = await _connected_integration(db, tenant_id, "sarvam")
-    if connected is not None:
-        _, api_key = connected
-        return api_key
-    return get_settings().sarvam_api_key
+    if connected is None:
+        return ""
+    return connected[1]

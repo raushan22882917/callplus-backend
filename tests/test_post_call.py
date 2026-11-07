@@ -46,7 +46,7 @@ async def _setup(*, enabled=True, phone="+919699234605", email="sam@example.com"
 def outbox(monkeypatch):
     sent: dict[str, list] = {"sms": [], "email": []}
 
-    async def sms(db, tenant_id, customer, body):
+    async def sms(db, tenant_id, customer, body, *, meter=True):
         sent["sms"].append((customer.phone, body))
 
     async def email(*, to_email, subject, html_body, headers=None):
@@ -179,7 +179,7 @@ async def test_sms_not_set_up_fails_that_message_but_the_email_still_goes(monkey
 
 
 async def test_a_broken_email_server_is_recorded_not_raised(monkeypatch):
-    async def sms(db, tenant_id, customer, body):
+    async def sms(db, tenant_id, customer, body, *, meter=True):
         return None
 
     async def boom(**kw):
@@ -198,7 +198,9 @@ async def test_sms_counts_toward_usage_and_the_budget(outbox):
         await db.commit()
     await _run(call_id)
     async with session_scope() as db:
-        event = (await db.execute(select(UsageEvent))).scalar_one()
+        event = (
+            await db.execute(select(UsageEvent).where(UsageEvent.metric == "sms"))
+        ).scalar_one()
         assert event.metric == "sms" and float(event.quantity) == 2  # 200 chars = 2 segments
         assert event.reference_id == call_id
 

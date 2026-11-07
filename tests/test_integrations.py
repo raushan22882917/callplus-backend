@@ -1,7 +1,8 @@
 import uuid
 
+import pytest
 from app.core.config import get_settings
-from app.integrations.credentials import get_sarvam_api_key, get_twilio_credentials
+from app.integrations.credentials import SharedAccountError, get_sarvam_api_key, require_own_twilio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,20 +28,19 @@ def _auth(tokens: dict) -> dict:
     return {"Authorization": f"Bearer {tokens['access_token']}"}
 
 
-async def test_credential_resolution_falls_back_to_platform_when_not_connected(
-    db_session: AsyncSession,
+async def test_a_workspace_does_not_receive_the_platform_sarvam_key(
+    db_session: AsyncSession, monkeypatch
 ) -> None:
     tenant = Tenant(name="Acme", slug=f"acme-{uuid.uuid4().hex[:8]}")
     db_session.add(tenant)
     await db_session.commit()
 
-    settings = get_settings()
-    twilio_creds = await get_twilio_credentials(db_session, tenant.id)
-    assert twilio_creds.account_sid == settings.twilio_account_sid
-    assert twilio_creds.auth_token == settings.twilio_auth_token
-
-    sarvam_key = await get_sarvam_api_key(db_session, tenant.id)
-    assert sarvam_key == settings.sarvam_api_key
+    monkeypatch.setattr(get_settings(), "sarvam_api_key", "platform-key")
+    assert await get_sarvam_api_key(db_session, tenant.id) == ""
+    monkeypatch.setattr(get_settings(), "twilio_account_sid", "ACplatform")
+    monkeypatch.setattr(get_settings(), "twilio_auth_token", "platform-token")
+    with pytest.raises(SharedAccountError):
+        await require_own_twilio(db_session, tenant.id)
 
 
 async def test_connect_twilio_then_credentials_resolve_to_tenants_own(client: AsyncClient) -> None:
@@ -97,28 +97,26 @@ async def test_provision_phone_number_without_twilio_configured_fails_cleanly(
         headers=_auth(tokens),
         json={"phone_number": "+15551234567"},
     )
-    # No platform or tenant Twilio credentials configured — should fail with
-    # a clear dependency error, not a 500.
-    assert resp.status_code == 424
+    assert resp.status_code == 422
+    assert "Exotel" in resp.json()["detail"]
 
 
-async def test_included_services_say_whether_the_platform_sarvam_key_covers_everyone(
-    client, monkeypatch
-):
-    from app.core.config import get_settings
-
+async def test_setup_lists_what_the_workspace_still_has_to_connect(client):
     tokens = await _signup_for_included(client)
-    monkeypatch.setattr(get_settings(), "sarvam_api_key", "platform-key")
-    on = await client.get(
-        "/api/v1/integrations/included", headers={"Authorization": f"Bearer {tokens}"}
-    )
-    assert on.status_code == 200 and on.json() == {"sarvam": True}
-    monkeypatch.setattr(get_settings(), "sarvam_api_key", "")
-    off = await client.get(
-        "/api/v1/integrations/included", headers={"Authorization": f"Bearer {tokens}"}
-    )
-    assert off.json() == {"sarvam": False}
-    assert "platform-key" not in on.text  # only a yes or no, never the key
+    headers = {"Authorization": f"Bearer {tokens}"}
+    before = await client.get("/api/v1/integrations/setup", headers=headers)
+    assert before.status_code == 200, before.text
+    body = before.json()
+    assert body["ready_for_calls"] is False
+    assert {item["id"]: item["connected"] for item in body["items"]} == {
+        "exotel": False,
+        "twilio": False,
+        "sarvam": False,
+        "whatsapp": False,
+    }
+    await client.post("/api/v1/integrations/sarvam", headers=headers, json={"api_key": "tenant-key"})
+    after = (await client.get("/api/v1/integrations/included", headers=headers)).json()
+    assert after["sarvam"] is True and after["exotel"] is False and after["twilio"] is False
 
 
 async def test_included_services_need_a_signed_in_user(client):

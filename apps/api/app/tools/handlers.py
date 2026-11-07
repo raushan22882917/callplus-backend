@@ -320,7 +320,8 @@ async def send_whatsapp_message(ctx: ToolContext, *, phone: str, message: str) -
         return {"error": "no WhatsApp number connected for this business"}
 
     try:
-        await plans.ensure_whatsapp_available(ctx.db, ctx.tenant_id)
+        # The send claims the allowance itself, in its own transaction, before
+        # Meta is called. Claiming here as well would deadlock on the tenant row.
         response = await send_text_message(account, to=phone, body=message)
     except plans.PlanLimitError as exc:
         return {"error": exc.message}

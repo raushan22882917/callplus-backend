@@ -1,4 +1,4 @@
-"""Prepaid wallet: balance and rates, top-ups through Razorpay Checkout, the ledger and the
+"""Prepaid wallet: balance and rates, top-ups through Razorpay or PayPal, the ledger and the
 GST invoices. See services/wallet.py for how usage is charged."""
 
 import uuid
@@ -7,7 +7,7 @@ from app.core.audit import log_audit_event
 from app.core.config import get_settings
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
-from app.integrations import razorpay_client
+from app.integrations import paypal_client, razorpay_client
 from app.schemas.wallet import BillingProfile, TopupCreate, TopupRead, TopupVerify, TransactionRead
 from app.services import plans, wallet
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -46,6 +46,13 @@ async def _summary(db: AsyncSession, tenant: Tenant) -> dict:
         "minutes_left_outbound": max(balance, 0) // max(outbound, 1),
         "whatsapp_message_paise": wallet.WHATSAPP_MESSAGE_PAISE,
         "sms_paise": wallet.SMS_PAISE,
+        "email_paise": wallet.EMAIL_PAISE,
+        "social_paise": wallet.SOCIAL_PAISE,
+        "paypal_enabled": bool(
+            get_settings().paypal_client_id and get_settings().paypal_client_secret
+        ),
+        "paypal_client_id": get_settings().paypal_client_id or None,
+        "paypal_mode": get_settings().paypal_mode,
         "gst_percent": wallet.GST_PERCENT,
         "min_topup_paise": wallet.TOPUP_MIN_PAISE,
         "max_topup_paise": wallet.TOPUP_MAX_PAISE,
@@ -114,14 +121,21 @@ async def create_topup(
     tax = wallet.gst_split(amount, w.state_code, settings.seller_state_code or None)
     inbound, outbound = wallet.rates_for_topup(amount)
     receipt = f"wt_{uuid.uuid4().hex[:24]}"
+    provider = payload.provider
     try:
-        order = await razorpay_client.create_order(
-            amount_paise=tax["total"], receipt=receipt, notes={"tenant_id": str(ctx.tenant_id)}
-        )
-    except razorpay_client.RazorpayAPIError as exc:
+        if provider == "paypal":
+            order = await paypal_client.create_order(
+                amount_paise=tax["total"], receipt=receipt, custom_id=str(ctx.tenant_id)
+            )
+        else:
+            order = await razorpay_client.create_order(
+                amount_paise=tax["total"], receipt=receipt, notes={"tenant_id": str(ctx.tenant_id)}
+            )
+    except (razorpay_client.RazorpayAPIError, paypal_client.PayPalAPIError) as exc:
         raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(exc)) from exc
     topup = WalletTopup(
         tenant_id=ctx.tenant_id,
+        provider=provider,
         provider_order_id=order["id"],
         status="created",
         amount_paise=amount,
@@ -145,8 +159,11 @@ async def create_topup(
     await db.commit()
     return {
         "topup_id": str(topup.id),
+        "provider": provider,
         "order_id": order["id"],
-        "key_id": settings.razorpay_key_id,
+        "key_id": settings.razorpay_key_id if provider == "razorpay" else None,
+        "client_id": settings.paypal_client_id if provider == "paypal" else None,
+        "approve_url": order.get("approve_url") if provider == "paypal" else None,
         "amount_paise": tax["total"],
         "credit_paise": amount,
         "gst_paise": tax["gst"],
@@ -178,6 +195,8 @@ async def verify_topup(
     Razorpay confirmed this payment for this order; the webhook does the same if the
     browser never gets here."""
     topup = await _own_topup(db, ctx.tenant_id, topup_id)
+    if topup.provider == "paypal":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Confirm a PayPal top-up with the capture endpoint")
     try:
         valid = razorpay_client.verify_checkout_signature(
             order_id=topup.provider_order_id, payment_id=payload.payment_id, signature=payload.signature
@@ -190,6 +209,42 @@ async def verify_topup(
         await log_audit_event(
             db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="wallet.topped_up",
             resource_type="wallet_topup", resource_id=topup.id, extra={"amount_paise": topup.amount_paise},
+        )
+    tenant = await db.get(Tenant, ctx.tenant_id)
+    out = await _summary(db, tenant)
+    await db.commit()
+    return out
+
+
+@router.post("/topups/{topup_id}/capture")
+async def capture_topup(
+    topup_id: uuid.UUID, ctx: RequestContext = Billing, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Called after the buyer approves the PayPal order. We capture it ourselves, so the
+    browser never has to send a signature, and credit the wallet when the captured amount
+    is the one we asked for."""
+    topup = await _own_topup(db, ctx.tenant_id, topup_id)
+    if topup.provider != "paypal":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This top-up is paid with Razorpay")
+    try:
+        order = await paypal_client.capture_order(topup.provider_order_id)
+    except paypal_client.PayPalAPIError as exc:
+        raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(exc)) from exc
+    captured = paypal_client.capture_from_order(order)
+    if captured is None or captured[2] != "INR":
+        raise HTTPException(status.HTTP_409_CONFLICT, "PayPal has not completed this payment")
+    payment_id, paid_paise, _currency = captured
+    if await wallet.credit_paid_order(
+        db,
+        order_id=topup.provider_order_id,
+        payment_id=payment_id,
+        paid_paise=paid_paise,
+        provider="paypal",
+    ):
+        await log_audit_event(
+            db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="wallet.topped_up",
+            resource_type="wallet_topup", resource_id=topup.id,
+            extra={"amount_paise": topup.amount_paise, "via": "paypal"},
         )
     tenant = await db.get(Tenant, ctx.tenant_id)
     out = await _summary(db, tenant)

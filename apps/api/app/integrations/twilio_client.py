@@ -78,7 +78,7 @@ TRANSFER_UNAVAILABLE_MESSAGE = (
 )
 
 
-def build_transfer_twiml(numbers: list[str] | None = None) -> str:
+def build_transfer_twiml(numbers: list[str] | None = None, *, time_limit: int | None = None) -> str:
     """TwiML for a transfer_call tool invocation. The handoff message was
     already spoken by the realtime gateway over the live media stream before
     the call is redirected (see app/api/v1/internal.py's /finalize), so
@@ -98,7 +98,10 @@ def build_transfer_twiml(numbers: list[str] | None = None) -> str:
         response.hangup()
         return str(response)
 
-    dial = Dial(timeout=TRANSFER_RING_TIMEOUT_SECONDS)
+    dial_kwargs: dict = {"timeout": TRANSFER_RING_TIMEOUT_SECONDS}
+    if time_limit:
+        dial_kwargs["time_limit"] = time_limit
+    dial = Dial(**dial_kwargs)
     for number in targets[:MAX_RING_TARGETS]:
         dial.number(number)
     response.append(dial)

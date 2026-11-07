@@ -18,6 +18,7 @@ from packages.database.models import (
     CallStatus,
     Customer,
     FollowUp,
+    MissedCall,
     PhoneNumber,
     Tenant,
 )
@@ -181,6 +182,65 @@ async def test_the_callback_is_placed_when_due_with_a_reason_and_retried_if_unan
     # Three attempts are the limit.
     calls[0].mission = {**calls[0].mission, "attempt": 3}
     assert await callbacks.retry_if_unanswered(db_session, calls[0]) is None
+
+
+async def test_an_indian_number_is_called_from_exotel_when_the_workspace_has_one(
+    db_session: AsyncSession,
+):
+    from app.services import exotel
+
+    tenant, _customer, _call = await _setup(db_session)
+    db_session.add(
+        PhoneNumber(tenant_id=tenant.id, e164_number="+912233445566", provider="exotel")
+    )
+    await db_session.commit()
+    assert (
+        await exotel.prefer_indian_cli(db_session, tenant.id, "+919800000001", "+919800011111")
+        == "+912233445566"
+    )
+    assert (
+        await exotel.prefer_indian_cli(db_session, tenant.id, "+14155550100", "+919800011111")
+        == "+919800011111"
+    )
+
+
+async def test_a_missed_inbound_is_called_back_once_and_a_voicemail_is_not(
+    db_session: AsyncSession, monkeypatch
+):
+    tenant, customer, call = await _setup(db_session)
+    missed = MissedCall(
+        tenant_id=tenant.id,
+        call_id=call.id,
+        customer_id=customer.id,
+        from_number=customer.phone,
+        to_number="+919800011111",
+        reason="no-answer",
+        created_at=datetime.now(UTC) - timedelta(minutes=2),
+    )
+    voicemail = MissedCall(
+        tenant_id=tenant.id,
+        from_number="+919800000099",
+        to_number="+919800011111",
+        reason="voicemail",
+        created_at=datetime.now(UTC) - timedelta(minutes=2),
+    )
+    db_session.add(missed)
+    db_session.add(voicemail)
+    await db_session.commit()
+
+    placed: list[dict] = []
+    monkeypatch.setattr(
+        outbound_call, "place_outbound_call", lambda **kw: placed.append(kw) or "CA-back"
+    )
+    monkeypatch.setattr(outbound_call, "get_twilio_credentials", _async(None))
+
+    assert await callbacks.recover_missed_calls(db_session) == 1
+    assert placed and placed[0]["to"] == customer.phone
+    await db_session.refresh(missed)
+    assert missed.callback_call_id is not None and missed.recovery_attempted_at is not None
+    assert await callbacks.recover_missed_calls(db_session) == 0
+    await db_session.refresh(voicemail)
+    assert voicemail.callback_call_id is None and voicemail.recovery_attempted_at is None
 
 
 def _async(value):

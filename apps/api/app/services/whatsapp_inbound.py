@@ -254,17 +254,23 @@ async def _conversation(
     return conversation
 
 
-async def _resolve_text(db: AsyncSession, account: WhatsAppAccount, message: InboundMessage) -> str:
+async def _resolve_text(
+    db: AsyncSession, account: WhatsAppAccount, message: InboundMessage
+) -> tuple[str, str | None]:
     if message.kind != "audio" or not message.media_id:
-        return message.text
+        return message.text, None
     try:
         audio, mime = await download_media(account, message.media_id)
         api_key = await get_sarvam_api_key(db, account.tenant_id)
-        transcript = await transcribe_audio(audio, message.mime_type or mime, api_key=api_key)
+        transcript, language = await transcribe_audio(
+            audio, message.mime_type or mime, api_key=api_key
+        )
     except (WhatsAppAPIError, SarvamAPIError, KeyError) as exc:
         logger.warning("voice note %s not transcribed: %s", message.message_id, exc)
-        return "[Voice note - could not be transcribed]"
-    return f"[Voice note] {transcript}" if transcript else "[Voice note - empty]"
+        return "[Voice note - could not be transcribed]", None
+    if not transcript:
+        return "[Voice note - empty]", None
+    return f"[Voice note] {transcript}", language
 
 
 async def process_message(message: InboundMessage) -> dict:
@@ -289,7 +295,7 @@ async def process_message(message: InboundMessage) -> dict:
         # No agent chosen = staff answer from the inbox (a deliberate setting, not a gap:
         # numbers get the business's agent automatically when they're connected).
         agent = None if svc.ai_paused(conversation) else await svc.resolve_agent(db, account.tenant_id, account.ai_agent_id)
-        text = await _resolve_text(db, account, message)
+        text, caller_language = await _resolve_text(db, account, message)
         outcome = await svc.process_inbound_text(
             db,
             tenant_id=account.tenant_id,
@@ -300,6 +306,7 @@ async def process_message(message: InboundMessage) -> dict:
             customer_created=created,
             source="whatsapp",
             media_url=f"whatsapp-media:{message.media_id}" if message.media_id else None,
+            caller_language=caller_language,
         )
         sent = await svc.send_ai_reply(db, outcome)
         return {"handled": True, "ai": agent is not None, **sent}

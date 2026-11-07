@@ -112,10 +112,10 @@ code they guard:**
   tenant_id still only ever comes from the `Call` row looked up by `call_id`
   — the token never grants a tenant scope by itself.
 
-**Not yet done**: Postgres Row-Level Security as defense-in-depth. Today the
-guarantee is "every ORM query goes through `TenantScopedRepository`" —
-correct as long as that convention holds. Worth adding RLS policies before
-this handles real customer data.
+Postgres row-level security is the second fence under those repositories.
+It is on for tenant-authenticated requests. The API has to connect as a
+role that is not a superuser, or Postgres ignores the policies. See
+[Human handoff, recording, roles, RLS](#human-handoff-recording-roles-rls).
 
 ## Realtime voice — how a call actually flows
 
@@ -169,19 +169,22 @@ This is a platform meant for many tenants, so nothing above should require
 you (the platform operator) to hand-hold every new signup through the
 Twilio console. Two independent things a tenant needs, both self-service:
 
-**Getting a phone number** — no Twilio account of their own required:
+**Getting a phone number** — the workspace connects its own account first.
+`GET /api/v1/integrations/setup` says what is still missing. An Indian number
+is an ExoPhone bought in that workspace's own Exotel account, then connected
+with `POST /api/v1/integrations/exotel` and added under Phone numbers. A
+Twilio number is bought only after `POST /api/v1/integrations/twilio`:
+
 ```
-GET  /api/v1/phone-numbers/available?country=US&area_code=415   # search, no cost
+GET  /api/v1/phone-numbers/available?country=US&area_code=415
 POST /api/v1/phone-numbers/provision  {"phone_number": "+1415...", "ai_agent_id": "..."}
 ```
-`provision` actually buys the number (a real, recurring Twilio charge) and
-points its voice webhook at this platform, then assigns it to the calling
-tenant. By default this runs on the **platform's own Twilio account**
-([app/integrations/twilio_client.py](apps/api/app/integrations/twilio_client.py)) —
-every tenant can get a number without ever touching Twilio, and the platform
-carries the Twilio bill (a business decision: you'd need to pass that cost
-through to tenants somehow, which is exactly the platform-billing piece
-listed as out of scope below).
+
+The search and the purchase use that workspace's Twilio account. They are
+refused while no account is connected, so a client is never billed to a
+shared Twilio account. The voice assistant uses the Sarvam key that workspace
+saved with `POST /api/v1/integrations/sarvam`, checked with Sarvam before it
+is stored. WhatsApp uses the number that workspace connected.
 
 **Bringing their own Twilio account or Sarvam key** (optional, e.g. an
 enterprise tenant that wants its own Twilio billing/data-residency):
@@ -444,10 +447,13 @@ prompts against the live model.
 Every workspace has a plan tier (`tenants.plan_tier`): **Free**, **Starter**, **Growth**,
 **Scale**, **Enterprise**, or **legacy** (unlimited; what workspaces that predate plans get).
 The free plan is **10 AI call minutes in total** (one-time), at most 5 minutes per call, 50 WhatsApp
-messages, 1 agent, 1 phone number, 2 seats, 5 knowledge documents, 1 API key, no campaigns and no
-recording. Limits are enforced where the money is spent: the call-time cap the voice gateway reads,
-outbound and inbound call admission, record creation, WhatsApp sends. A reached limit is an HTTP 402
-with `{detail, code, tier, upgrade_path}`.
+messages, 20 SMS segments, 30 customer emails, 50 Instagram or Messenger replies, 1 agent, 1 phone number, 2 seats, 5 knowledge documents,
+1 API key, no campaigns and no recording. A free workspace cannot buy a number on the platform Twilio
+account, and a number the platform bought is released on delete and after 14 idle days. Calls on that
+number, including a human queue, draw the same minute pool. Limits are enforced where the money is
+spent: the call-time cap, outbound and inbound admission, record creation, WhatsApp, SMS and email.
+A reached limit is an HTTP 402 with `{detail, code, tier, upgrade_path}`. An unverified owner on a
+non-legacy workspace gets 403 `email_unverified` before any of those spends.
 
 * The tiers, prices and every limit live in [`apps/api/app/services/plans.py`](apps/api/app/services/plans.py).
 * Why those numbers (provider costs, margins, free-tier worst case, what was wrong before):
@@ -455,16 +461,19 @@ with `{detail, code, tier, upgrade_path}`.
 * New sign-ups start on `SIGNUP_PLAN_TIER` (default `free`). A subscription moves a workspace up
   (Razorpay webhook); a platform admin can grant extras with
   `PUT /api/v1/platform/admin/tenants/{id}/plan`. `GET /api/v1/billing/entitlements` feeds the Billing page.
-* Allowances are hard caps; per-minute overage billing is not built (see the doc).
+* Allowances are hard caps. `allow_overage` (a platform-admin override) lets a workspace past the minute, WhatsApp, SMS, email and Instagram/Messenger caps and writes the extra onto a pending invoice. Collecting that invoice in Razorpay is still manual. Legacy workspaces stay unlimited until a person moves them.
 
 ## What's not here yet
 
-- **Semantic (vector) search** — the knowledge base (`/api/v1/knowledge`,
-  `search_knowledge_base` agent tool) uses Postgres full-text search with
-  any-term matching. Embeddings/pgvector re-ranking and PDF/DOCX ingestion
-  (today: txt/md/csv upload or pasted text) are not built.
-- **Business-hours / skill-based routing** for human handoff (today: ring all
-  active targets).
-- **Overage invoicing** — plan allowances are hard caps; charging per extra minute needs usage invoicing (see `docs/BILLING.md`).
+- **A real semantic embedding model.** Search already mixes Postgres full-text
+  with a local 384-number hash embedder and a small synonym list, and pgvector
+  storage is optional. PDF, DOCX, HTML and CSV upload already work. What is
+  missing is a hosted embedding model that understands meaning the words do
+  not share.
+- **Collecting an overage invoice automatically.** The invoice is written. Razorpay
+  does not charge the card for it yet.
+- **Live provider round-trips** in the automated suite. Twilio, Sarvam,
+  WhatsApp, Razorpay and Meta are mocked. A staging call is still the check
+  that a real number, a real voice and a real payment work together.
 - **Kafka, ClickHouse, Temporal** — later-phase scale infrastructure; Celery
   + Postgres is the right size for this stage.

@@ -154,6 +154,8 @@ async def test_approved_plan_is_scheduled_then_started_when_due(
         "audience": {"type": "all"},
         "scheduled_at": "2099-01-01T10:00:00+05:30",
     }
+    declared = await client.post("/api/v1/campaigns/a2p-declaration", headers=_auth(tokens))
+    assert declared.status_code == 200, declared.text
     resp = await client.post(
         "/api/v1/campaigns/from-plan", headers=_auth(tokens), json={"plan": plan}
     )
@@ -181,6 +183,8 @@ async def test_approved_plan_is_scheduled_then_started_when_due(
 
 async def test_plan_for_specific_numbers_creates_those_customers(client: AsyncClient, monkeypatch):
     tokens = await _workspace_with_number(client, "planco3")
+    declared = await client.post("/api/v1/campaigns/a2p-declaration", headers=_auth(tokens))
+    assert declared.status_code == 200, declared.text
     monkeypatch.setattr(campaigns_api.run_campaign_task, "delay", lambda cid: None)
     plan = {
         "name": "Two people",

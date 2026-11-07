@@ -8,9 +8,10 @@ import uuid
 from datetime import UTC, datetime
 
 from app.core.config import get_settings
+from app.integrations.credentials import SharedAccountError, require_own_twilio
 from app.integrations.twilio_client import TwilioClientError, place_outbound_call
 from app.integrations.whatsapp import WhatsAppAPIError, send_template_message
-from app.services import dialer, exotel, telephony_plus
+from app.services import dialer, exotel, privacy, telephony_plus
 from app.services.cost_controls import SpendGuardError, guard_outbound
 from app.services.voicemail_detection import amd_callback_for_agent
 from app.services.webhooks import enqueue_webhook_event
@@ -30,6 +31,7 @@ from packages.database.models import (
     CampaignStatus,
     Customer,
     PhoneNumber,
+    Tenant,
     WhatsAppAccount,
 )
 from packages.database.models.telephony_plus import CampaignContactState
@@ -156,6 +158,19 @@ def campaign_mission(campaign: Campaign) -> dict | None:
 async def _place_campaign_call(db, campaign: Campaign, phone_number, customer: Customer) -> Call:
     if phone_number is None:
         raise ValueError("no phone number assigned to this campaign's AI agent")
+    chosen = await exotel.prefer_indian_cli(
+        db, campaign.tenant_id, customer.phone, phone_number.e164_number
+    )
+    if chosen and chosen != phone_number.e164_number:
+        swapped = (
+            await db.execute(
+                select(PhoneNumber).where(
+                    PhoneNumber.tenant_id == campaign.tenant_id, PhoneNumber.e164_number == chosen
+                )
+            )
+        ).scalar_one_or_none()
+        if swapped is not None:
+            phone_number = swapped
     await guard_outbound(db, campaign.tenant_id)
 
     call = Call(
@@ -180,6 +195,7 @@ async def _place_campaign_call(db, campaign: Campaign, phone_number, customer: C
         if phone_number.provider == exotel.PROVIDER:
             call_sid = await exotel.place_outbound_call(db, call)
         else:
+            await require_own_twilio(db, campaign.tenant_id)
             call_sid = place_outbound_call(
                 to=customer.phone,
                 from_=phone_number.e164_number,
@@ -187,7 +203,7 @@ async def _place_campaign_call(db, campaign: Campaign, phone_number, customer: C
                 status_callback_url=status_callback_url,
                 amd_callback_url=await amd_callback_for_agent(db, campaign.ai_agent_id),
             )
-    except (TwilioClientError, TwilioException, exotel.ExotelError):
+    except (TwilioClientError, TwilioException, exotel.ExotelError, SharedAccountError):
         # Don't leave a phantom QUEUED row behind; a retry makes a fresh one.
         call.status = CallStatus.FAILED
         raise
@@ -257,6 +273,11 @@ async def _run_dialer_pass(db, campaign: Campaign, ds, phone_number) -> None:
                 contact.result = {"skipped": decision.reason}
                 contact.attempted_at = now
             continue  # outside the window: stays pending for a later pass
+        if not await privacy.has_outbound_consent(db, campaign.tenant_id, customer.phone):
+            contact.status = CampaignContactStatus.FAILED
+            contact.result = {"skipped": "no_consent"}
+            contact.attempted_at = now
+            continue
 
         state = await telephony_plus.get_or_create_state(db, campaign, contact)
         state.attempts += 1
@@ -275,7 +296,7 @@ async def _run_dialer_pass(db, campaign: Campaign, ds, phone_number) -> None:
             contact.status = CampaignContactStatus.FAILED
             contact.result = {"error": str(exc), "attempts": state.attempts}
             continue
-        except (TwilioClientError, TwilioException, exotel.ExotelError):
+        except (TwilioClientError, TwilioException, exotel.ExotelError, SharedAccountError):
             await telephony_plus.record_disposition(
                 db, campaign, contact, disposition="failed", settings_row=ds, source="auto"
             )
@@ -337,12 +358,10 @@ async def _send_campaign_whatsapp(db, campaign: Campaign, whatsapp_account, cust
         raise ValueError("no WhatsApp account connected for this tenant")
     if not campaign.whatsapp_template_name:
         raise ValueError("campaign has no whatsapp_template_name")
-    from app.services import plans
     from app.services import whatsapp_templates as tpl
 
-    # Raises PlanLimitError (a SpendGuardError), which pauses the campaign with its
-    # remaining contacts still pending, instead of failing each one.
-    await plans.ensure_whatsapp_available(db, campaign.tenant_id)
+    # The send claims the allowance and raises PlanLimitError (a SpendGuardError),
+    # which pauses the campaign with its remaining contacts still pending.
     template = await tpl.find_approved(db, campaign.tenant_id, name=campaign.whatsapp_template_name)
     if template is not None:  # the business's own template: fill {{name}} etc. per customer
         values = await tpl.context_values(db, campaign.tenant_id, customer)
@@ -372,6 +391,10 @@ async def _start_due_campaigns() -> int:
             )
         )
         for campaign in result.scalars().all():
+            if campaign.channel == CampaignChannel.VOICE:
+                tenant = await db.get(Tenant, campaign.tenant_id)
+                if tenant is None or tenant.a2p_declared_at is None:
+                    continue
             campaign.status = CampaignStatus.RUNNING
             started.append(str(campaign.id))
         await db.commit()

@@ -8,7 +8,7 @@ from app.core.config import get_settings
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
 from app.core.repository import TenantScopedRepository
-from app.integrations.credentials import get_twilio_credentials
+from app.integrations.credentials import SharedAccountError, get_twilio_credentials, require_own_twilio
 from app.integrations.twilio_client import TwilioClientError, place_outbound_call
 from app.schemas.call import CallCreate, CallRead
 from app.schemas.conversation import MessageRead
@@ -185,6 +185,7 @@ async def create_call(
             if await exotel.is_exotel_number(db, ctx.tenant_id, payload.from_number):
                 call_sid = await exotel.place_outbound_call(db, call)
             else:
+                await require_own_twilio(db, ctx.tenant_id)
                 credentials = await get_twilio_credentials(db, ctx.tenant_id)
                 call_sid = place_outbound_call(
                     to=payload.to_number,
@@ -194,7 +195,7 @@ async def create_call(
                     credentials=credentials,
                     amd_callback_url=await amd_callback_for_agent(db, call.ai_agent_id),
                 )
-        except (TwilioClientError, TwilioException, exotel.ExotelError) as exc:
+        except (TwilioClientError, TwilioException, exotel.ExotelError, SharedAccountError) as exc:
             await db.rollback()
             raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(exc)) from exc
         call.provider_call_sid = call_sid

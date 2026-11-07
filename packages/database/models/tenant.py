@@ -1,7 +1,8 @@
 import enum
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Enum, Integer, String
+from sqlalchemy import Boolean, DateTime, Enum, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -63,6 +64,9 @@ class Tenant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     plan_overrides: Mapped[dict] = mapped_column(
         JSONB, default=dict, server_default="{}", nullable=False
     )
+    # Set when the business tells its phone company which numbers place
+    # automated calls. A voice campaign will not start until this is set.
+    a2p_declared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     memberships: Mapped[list["TenantUser"]] = relationship(
         back_populates="tenant", cascade="all, delete-orphan"

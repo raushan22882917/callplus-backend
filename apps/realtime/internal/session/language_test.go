@@ -12,6 +12,12 @@ func TestTTSLanguage(t *testing.T) {
 		{"ਸਤ ਸ੍ਰੀ ਅਕਾਲ", "en-IN", "pa-IN"},
 		{"12345", "ta-IN", "ta-IN"},
 		{"", "", "en-IN"},
+		{"سلام", "ur-IN", "hi-IN"},
+		{"নমস্কার", "as-IN", "bn-IN"},
+		{"12345", "as-IN", "bn-IN"},
+		{"", "ne-IN", "hi-IN"},
+		{"ᱥᱟᱱᱛᱟᱲᱤ", "en-IN", "hi-IN"},
+		{"ꯃꯤꯇꯩ", "en-IN", "bn-IN"},
 	}
 	for _, c := range cases {
 		if got := ttsLanguage(c.text, c.agent); got != c.want {

@@ -44,6 +44,9 @@ GST_PERCENT = 18
 LOW_BALANCE_PAISE = 20_000
 WHATSAPP_MESSAGE_PAISE = 150
 SMS_PAISE = 75
+EMAIL_PAISE = 20
+# The workspace's own Meta token carries the message. This covers the platform, not Meta's fee.
+SOCIAL_PAISE = 20
 
 # (smallest top-up in paise, inbound paise per minute, outbound paise per minute)
 RATE_TIERS: tuple[tuple[int, int, int], ...] = (
@@ -240,7 +243,7 @@ async def settle(db: AsyncSession, tenant_id: uuid.UUID) -> int:
             select(UsageEvent)
             .where(
                 UsageEvent.tenant_id == tenant_id,
-                UsageEvent.metric.in_(("whatsapp_messages", "sms")),
+                UsageEvent.metric.in_(("whatsapp_messages", "sms", "email", "social")),
                 UsageEvent.occurred_at >= since,
                 UsageEvent.id.not_in(
                     select(WalletTransaction.reference_id).where(
@@ -254,14 +257,36 @@ async def settle(db: AsyncSession, tenant_id: uuid.UUID) -> int:
         )
     ).scalars().all()
     for event in events:
-        unit = WHATSAPP_MESSAGE_PAISE if event.metric == "whatsapp_messages" else SMS_PAISE
+        unit = {
+            "whatsapp_messages": WHATSAPP_MESSAGE_PAISE,
+            "sms": SMS_PAISE,
+            "email": EMAIL_PAISE,
+            "social": SOCIAL_PAISE,
+        }[event.metric]
         count = max(1, math.ceil(float(event.quantity)))
-        label = "WhatsApp message" if event.metric == "whatsapp_messages" else "SMS"
+        label = {
+            "whatsapp_messages": "WhatsApp message",
+            "sms": "SMS",
+            "email": "Email",
+            "social": "Instagram or Messenger message",
+        }[event.metric]
         _post(db, wallet, kind="message", amount_paise=-count * unit, reference_id=event.id,
               description=f"{label}{'s' if count > 1 else ''}" + (f" x{count}" if count > 1 else ""),
               detail={"channel": event.metric, "count": count})
     await db.flush()
     return before - wallet.balance_paise
+
+
+async def credit_paid_order(
+    db: AsyncSession, *, order_id: str, payment_id: str, paid_paise: int, provider: str
+) -> bool:
+    """Credits one top-up we created, for the exact amount we asked that provider for."""
+    topup = (
+        await db.execute(select(WalletTopup).where(WalletTopup.provider_order_id == order_id))
+    ).scalar_one_or_none()
+    if topup is None or topup.provider != provider or paid_paise != topup.total_paise or not payment_id:
+        return False
+    return await credit_topup(db, topup, payment_id)
 
 
 async def credit_topup(db: AsyncSession, topup: WalletTopup, payment_id: str) -> bool:

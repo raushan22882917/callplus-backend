@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime
 
 from app.integrations.email_client import send_email
-from app.services import cost_controls, csat
+from app.services import cost_controls, csat, plans
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -100,7 +100,7 @@ async def _send_customer_sms(
         await _finish(db, row_id, "skipped", "Monthly budget used up; paid messages are paused")
         return
     try:
-        await csat._send_sms(db, call.tenant_id, customer, text)
+        await csat._send_sms(db, call.tenant_id, customer, text, meter=False)
     except csat.SurveySendError as exc:
         await _finish(db, row_id, "failed", str(exc))
         return
@@ -129,9 +129,14 @@ async def _send_email_once(
     row_id = await _claim(db, call, channel="email", audience=audience, recipient=to)
     if row_id is None:
         return
+    reserved = None
     try:
+        reserved = await plans.reserve_email(db, call.tenant_id)
         await send_email(to_email=to, subject=subject, html_body=body)
     except Exception as exc:
+        if reserved is not None:
+            await db.delete(reserved)
+            await db.flush()
         logger.warning("post-call email for call %s failed", call.id, exc_info=True)
         await _finish(db, row_id, "failed", str(exc))
         return

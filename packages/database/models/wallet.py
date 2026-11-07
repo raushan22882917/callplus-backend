@@ -58,10 +58,13 @@ class WalletTransaction(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):
 
 
 class WalletTopup(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
-    """One recharge: the Razorpay order, what was paid, the GST split and the invoice."""
+    """One recharge: the Razorpay or PayPal order, what was paid, the GST split and the invoice."""
 
     __tablename__ = "wallet_topups"
 
+    provider: Mapped[str] = mapped_column(
+        String(16), default="razorpay", server_default="razorpay", nullable=False
+    )
     provider_order_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     provider_payment_id: Mapped[str | None] = mapped_column(String(64), unique=True)
     status: Mapped[str] = mapped_column(String(10), default="created", nullable=False)  # created|paid|failed

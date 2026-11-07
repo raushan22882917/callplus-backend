@@ -51,10 +51,31 @@ def stem(word: str) -> str:
 _STEMMED_GROUPS = tuple(frozenset(stem(w) for w in g) for g in SYNONYM_GROUPS)
 
 
+# Hindi words callers actually say, mapped onto the English synonym groups so a
+# Hindi question can find an English price list. This is a word list, not a
+# meaning model.
+_HINDI_TO_ENGLISH = {
+    "कीमत": "price",
+    "दाम": "price",
+    "भाव": "price",
+    "समय": "hours",
+    "टाइमिंग": "hours",
+    "पता": "address",
+    "डिलीवरी": "delivery",
+    "वापसी": "refund",
+    "रिफंड": "refund",
+    "अपॉइंटमेंट": "appointment",
+    "बुकिंग": "booking",
+}
+
+
 def terms(text: str) -> list[str]:
     """Distinct stemmed content words, in order."""
+    for hindi, english in _HINDI_TO_ENGLISH.items():
+        text = text.replace(hindi, f" {english} ")
     seen: dict[str, None] = {}
     for word in _WORD.findall(text.lower()):
+        word = _HINDI_TO_ENGLISH.get(word, word)
         if len(word) > 1 and word not in STOPWORDS:
             seen.setdefault(stem(word), None)
     return list(seen)

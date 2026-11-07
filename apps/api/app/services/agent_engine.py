@@ -24,6 +24,7 @@ from app.core.config import get_settings
 from app.integrations.credentials import get_sarvam_api_key
 from app.integrations.sarvam import (
     SARVAM_LANGUAGES,
+    SARVAM_TTS_LANGUAGES,
     SarvamAPIError,
     chat_completion,
     chat_completion_stream,
@@ -189,10 +190,17 @@ def gender_note(voice: str | None) -> str:
 # call another number"), invented an apology, and kept replying to every "thank you".
 CONVERSATION_RULES = (
     "\n\nConversation rules: "
-    f"Callers may speak any of these languages: {', '.join(SARVAM_LANGUAGES.values())}, or a mix such as Hinglish. "
-    "Reply in the language the caller used in their latest message, written in that language's own script "
-    "(Devanagari for Hindi and Marathi, Tamil script for Tamil, and so on; Latin letters for English), and for a "
-    "mix reply in the same mix. Do not switch language on your own: if the caller's latest message is in English, "
+    "Callers may speak any of these languages: "
+    f"{', '.join(SARVAM_LANGUAGES.values())}, or a mix such as Hinglish. "
+    "Reply in the language the caller used in their latest message. "
+    "The phone voice speaks only "
+    f"{', '.join(SARVAM_TTS_LANGUAGES.values())} aloud. "
+    "For those, use that language's own script "
+    "(Devanagari for Hindi and Marathi, Tamil script for Tamil, Latin for English). "
+    "For Assamese and Manipuri, use Bengali script. "
+    "For every other language, write the reply in Devanagari so the Hindi voice can say it. "
+    "For a mix, reply in the same mix. "
+    "Do not switch language on your own: if the caller's latest message is in English, "
     "reply only in English, even if earlier messages or the business name are Hindi. "
     "Greet only once, at the start; after that never say welcome, namaste or the business name again. "
     "Collect what you need in this order, one question per turn: what they want, the day and time, "
@@ -219,24 +227,66 @@ WHATSAPP_RULES = (
 
 
 
-# Unicode script name -> language a caller writing in it is speaking.
+# Unicode script name -> (Bulbul-or-Saaras code, name). Shared scripts are
+# narrowed by the agent's language or by the code Saaras detected.
 _SCRIPT_LANGUAGE = {
-    "DEVANAGARI": "Hindi",
-    "BENGALI": "Bengali",
-    "GUJARATI": "Gujarati",
-    "GURMUKHI": "Punjabi",
-    "ORIYA": "Odia",
-    "TAMIL": "Tamil",
-    "TELUGU": "Telugu",
-    "KANNADA": "Kannada",
-    "MALAYALAM": "Malayalam",
+    "DEVANAGARI": ("hi-IN", "Hindi"),
+    "BENGALI": ("bn-IN", "Bengali"),
+    "GUJARATI": ("gu-IN", "Gujarati"),
+    "GURMUKHI": ("pa-IN", "Punjabi"),
+    "ORIYA": ("od-IN", "Odia"),
+    "TAMIL": ("ta-IN", "Tamil"),
+    "TELUGU": ("te-IN", "Telugu"),
+    "KANNADA": ("kn-IN", "Kannada"),
+    "MALAYALAM": ("ml-IN", "Malayalam"),
+    "ARABIC": ("ur-IN", "Urdu"),
+    "OL": ("sat-IN", "Santali"),
+    "MEETEI": ("mni-IN", "Manipuri"),
 }
+_DEVANAGARI_AGENT = {
+    "mr-IN": "Marathi",
+    "ne-IN": "Nepali",
+    "kok-IN": "Konkani",
+    "sa-IN": "Sanskrit",
+    "mai-IN": "Maithili",
+    "doi-IN": "Dogri",
+    "brx-IN": "Bodo",
+    "ks-IN": "Kashmiri",
+}
+_BENGALI_AGENT = {"as-IN": "Assamese", "mni-IN": "Manipuri"}
+_ARABIC_AGENT = {"ur-IN": "Urdu", "ks-IN": "Kashmiri", "sd-IN": "Sindhi"}
 
 
-def reply_language_hint(text: str, agent_language: str | None = None) -> str:
+def _script_matches(code: str, script: str) -> bool:
+    """True when `code` is written in `script`. Kashmiri and Manipuri use two."""
+    if code == "mni-IN" and script in ("BENGALI", "MEETEI"):
+        return True
+    if code == "ks-IN" and script in ("DEVANAGARI", "ARABIC"):
+        return True
+    families = {
+        "DEVANAGARI": _DEVANAGARI_AGENT,
+        "BENGALI": _BENGALI_AGENT,
+        "ARABIC": _ARABIC_AGENT,
+    }
+    if code in families.get(script, {}):
+        return True
+    found = _SCRIPT_LANGUAGE.get(script)
+    return found is not None and found[0] == code
+
+
+def reply_language_hint(
+    text: str,
+    agent_language: str | None = None,
+    caller_language: str | None = None,
+    *,
+    spoken: bool = True,
+) -> str:
     """A note placed right after the caller's message: the fast model follows a
     reply-language instruction there far more reliably than one in the long prompt
-    (it answered an English caller in Hindi). Decided by the script they wrote in."""
+    (it answered an English caller in Hindi). Saaras's detected code wins when it
+    matches the script; otherwise the script, then the agent's language, decides."""
+    if caller_language not in SARVAM_LANGUAGES:
+        caller_language = None
     counts: dict[str, int] = {}
     latin = 0
     for ch in text:
@@ -255,13 +305,35 @@ def reply_language_hint(text: str, agent_language: str | None = None) -> str:
             "The caller's latest message is written in English letters. Reply in English letters only "
             "(plain English, or Hinglish in English letters if they mixed in Hindi words); do not use Devanagari."
         )
-    language = "Marathi" if script == "DEVANAGARI" and agent_language == "mr-IN" else _SCRIPT_LANGUAGE[script]
-    return f"The caller's latest message is in {language}. Reply in {language}, in its own script."
+    code, language = _SCRIPT_LANGUAGE[script]
+    if caller_language and _script_matches(caller_language, script):
+        code, language = caller_language, SARVAM_LANGUAGES[caller_language]
+    elif script == "DEVANAGARI" and agent_language in _DEVANAGARI_AGENT:
+        code, language = agent_language, _DEVANAGARI_AGENT[agent_language]
+    elif script == "BENGALI" and agent_language in _BENGALI_AGENT:
+        code, language = agent_language, _BENGALI_AGENT[agent_language]
+    elif script == "ARABIC" and agent_language in _ARABIC_AGENT:
+        code, language = agent_language, _ARABIC_AGENT[agent_language]
+    if not spoken or code in SARVAM_TTS_LANGUAGES:
+        how = "its own script"
+    elif code in _BENGALI_AGENT:
+        how = "Bengali script"
+    else:
+        how = "Devanagari, so the phone voice can say it"
+    return f"The caller's latest message is in {language}. Reply in {language}, in {how}."
 
 
-def with_language_hint(messages: list[dict], agent_language: str | None = None) -> list[dict]:
+def with_language_hint(
+    messages: list[dict],
+    agent_language: str | None = None,
+    caller_language: str | None = None,
+    *,
+    spoken: bool = True,
+) -> list[dict]:
     last = next((m for m in reversed(messages) if m.get("role") == "user"), None)
-    hint = reply_language_hint(str((last or {}).get("content") or ""), agent_language)
+    hint = reply_language_hint(
+        str((last or {}).get("content") or ""), agent_language, caller_language, spoken=spoken
+    )
     return [*messages, {"role": "system", "content": hint}] if hint else messages
 
 
@@ -631,6 +703,7 @@ async def _prepare_turn(
     conversation: Conversation,
     customer_text: str,
     extra_system: str = "",
+    caller_language: str | None = None,
 ) -> _TurnPrep:
     """Saves the customer's message and builds everything the LLM call needs."""
     await _persist_message(
@@ -664,8 +737,10 @@ async def _prepare_turn(
     system_prompt += guardrails.build_guardrail_prompt(guardrail_rules)
     system_prompt += extra_system
     messages: list[dict] = [{"role": "system", "content": system_prompt}, *history]
-    if is_voice:
-        messages = with_language_hint(messages, agent.language)
+    if is_voice or conversation.channel == ConversationChannel.WHATSAPP:
+        messages = with_language_hint(
+            messages, agent.language, caller_language, spoken=is_voice
+        )
 
     tool_ctx = ToolContext(
         db=db,
@@ -747,6 +822,7 @@ async def run_turn(
     conversation: Conversation,
     customer_text: str,
     extra_system: str = "",
+    caller_language: str | None = None,
 ) -> TurnResult:
     prep = await _prepare_turn(
         db=db,
@@ -755,6 +831,7 @@ async def run_turn(
         conversation=conversation,
         customer_text=customer_text,
         extra_system=extra_system,
+        caller_language=caller_language,
     )
     return await _finish_buffered(
         db=db,
@@ -859,6 +936,7 @@ async def run_turn_stream(
     agent: AIAgent,
     conversation: Conversation,
     customer_text: str,
+    caller_language: str | None = None,
 ) -> AsyncIterator[tuple]:
     """Voice-call turn that streams: yields ("sentence", text) as the reply is
     spoken-ready, then ("result", TurnResult). Agents with guardrail rules are
@@ -870,6 +948,7 @@ async def run_turn_stream(
         agent=agent,
         conversation=conversation,
         customer_text=customer_text,
+        caller_language=caller_language,
     )
     if prep.guardrail_rules or not prep.is_voice:
         result = await _finish_buffered(

@@ -1,11 +1,13 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class TopupCreate(BaseModel):
     amount_rupees: int = Field(ge=100, le=50_000)
+    provider: Literal["razorpay", "paypal"] = "razorpay"
 
 
 class TopupVerify(BaseModel):

@@ -75,8 +75,13 @@ async def send_template_message(
     """Sends an approved template with no variable substitution — enough for
     a simple campaign broadcast. Templates with parameters would need a
     `components` list built per-recipient; not needed for today's use case."""
+    claim_id = await _claim_or_stop(account.tenant_id, metered)
     settings = get_settings()
-    access_token = decrypt_secret(account.encrypted_access_token)
+    try:
+        access_token = decrypt_secret(account.encrypted_access_token)
+    except Exception:
+        await _release_claim(claim_id)
+        raise
     url = (
         f"https://graph.facebook.com/{settings.meta_graph_api_version}"
         f"/{account.phone_number_id}/messages"
@@ -88,22 +93,48 @@ async def send_template_message(
         "type": "template",
         "template": {"name": template_name, "language": {"code": language_code}},
     }
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.post(
-            url, headers={"Authorization": f"Bearer {access_token}"}, json=payload
-        )
-    if response.status_code >= 400:
-        raise WhatsAppAPIError(_error_from_response(response))
-    if metered:
-        await record_usage(account.tenant_id)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                url, headers={"Authorization": f"Bearer {access_token}"}, json=payload
+            )
+        if response.status_code >= 400:
+            raise WhatsAppAPIError(_error_from_response(response))
+    except Exception:
+        await _release_claim(claim_id)
+        raise
     return response.json()
+
+
+async def _claim_or_stop(tenant_id: uuid.UUID, metered: bool) -> uuid.UUID | None:
+    """Commits the usage row before the HTTP call when this send is not also
+    saved as a Message. A Message row is the meter for the other path, and
+    claiming both would count the send twice."""
+    if not metered:
+        return None
+    from app.services import plans
+
+    return await plans.claim_whatsapp_send(tenant_id)
+
+
+async def _release_claim(claim_id: uuid.UUID | None) -> None:
+    if claim_id is None:
+        return
+    from app.services import plans
+
+    await plans.release_whatsapp_claim(claim_id)
 
 
 async def send_text_message(
     account: WhatsAppAccount, *, to: str, body: str, metered: bool = True
 ) -> dict:
+    claim_id = await _claim_or_stop(account.tenant_id, metered)
     settings = get_settings()
-    access_token = decrypt_secret(account.encrypted_access_token)
+    try:
+        access_token = decrypt_secret(account.encrypted_access_token)
+    except Exception:
+        await _release_claim(claim_id)
+        raise
     url = (
         f"https://graph.facebook.com/{settings.meta_graph_api_version}"
         f"/{account.phone_number_id}/messages"
@@ -115,14 +146,16 @@ async def send_text_message(
         "type": "text",
         "text": {"body": body},
     }
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.post(
-            url, headers={"Authorization": f"Bearer {access_token}"}, json=payload
-        )
-    if response.status_code >= 400:
-        raise WhatsAppAPIError(_error_from_response(response))
-    if metered:
-        await record_usage(account.tenant_id)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                url, headers={"Authorization": f"Bearer {access_token}"}, json=payload
+            )
+        if response.status_code >= 400:
+            raise WhatsAppAPIError(_error_from_response(response))
+    except Exception:
+        await _release_claim(claim_id)
+        raise
     return response.json()
 
 

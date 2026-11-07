@@ -385,6 +385,7 @@ async def process_inbound_text(
     source: str,
     media_url: str | None = None,
     chat_options: dict | None = None,
+    caller_language: str | None = None,
 ) -> InboundOutcome:
     """Stores the customer's message, lets the AI agent answer (when one is
     attached) and commits. Sending the reply is the caller's job so each
@@ -464,6 +465,7 @@ async def process_inbound_text(
             conversation=conversation,
             customer_text=text,
             extra_system=extra_system,
+            caller_language=caller_language,
         )
         reply_text, reply_message_id = result.reply_text, result.reply_message_id
         if cited and reply_message_id and not result.transfer_requested:
@@ -598,6 +600,8 @@ async def deliver_reply(
             in_reply_to=in_reply_to,
             references=references,
             reply_to=(email_settings.config or {}).get("reply_to_address") if email_settings else None,
+            db=db,
+            tenant_id=tenant_id,
         )
 
     if channel in (ConversationChannel.INSTAGRAM, ConversationChannel.MESSENGER):
@@ -610,6 +614,8 @@ async def deliver_reply(
             recipient_id=thread.contact_address,
             text=text,
             channel=channel.value,
+            db=db,
+            tenant_id=tenant_id,
         )
 
     raise ChannelSendError(f"Replies are not supported on the {channel.value} channel")

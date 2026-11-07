@@ -108,6 +108,28 @@ async def list_campaign_contacts(
     return list(result.scalars().all())
 
 
+@router.post("/a2p-declaration", status_code=status.HTTP_200_OK)
+async def declare_calling_numbers(
+    ctx: RequestContext = Depends(require_permission(Permissions.CAMPAIGNS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """The business has told its phone company which numbers place automated calls."""
+    tenant = await db.get(Tenant, ctx.tenant_id)
+    if tenant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Workspace not found")
+    tenant.a2p_declared_at = datetime.now(UTC)
+    await log_audit_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_user_id=ctx.user_id,
+        action="campaign.a2p_declared",
+        resource_type="tenant",
+        resource_id=tenant.id,
+    )
+    await db.commit()
+    return {"a2p_declared_at": tenant.a2p_declared_at.isoformat()}
+
+
 @router.post("/{campaign_id}/launch", response_model=CampaignRead)
 async def launch_campaign(
     campaign_id: uuid.UUID,
@@ -121,6 +143,13 @@ async def launch_campaign(
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"Campaign is already {campaign.status.value}"
         )
+    if campaign.channel == CampaignChannel.VOICE:
+        tenant = await db.get(Tenant, ctx.tenant_id)
+        if tenant is None or tenant.a2p_declared_at is None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Declare your calling numbers for automated calls before a voice campaign can start.",
+            )
 
     scheduled_later = campaign.scheduled_at is not None and campaign.scheduled_at > datetime.now(UTC)
     campaign.status = CampaignStatus.SCHEDULED if scheduled_later else CampaignStatus.RUNNING
@@ -179,6 +208,13 @@ async def resume_campaign(
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"Campaign is {campaign.status.value}, not paused"
         )
+    if campaign.channel == CampaignChannel.VOICE:
+        tenant = await db.get(Tenant, ctx.tenant_id)
+        if tenant is None or tenant.a2p_declared_at is None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Declare your calling numbers for automated calls before a voice campaign can start.",
+            )
 
     campaign.status = CampaignStatus.RUNNING
     await log_audit_event(

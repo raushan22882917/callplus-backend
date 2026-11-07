@@ -62,6 +62,9 @@ async def finalize_call(
     elif duration_seconds is not None:
         call.duration_seconds = duration_seconds
 
+    from app.services.plans import sync_overage_invoice
+
+    await sync_overage_invoice(db, call.tenant_id)
     db.add(
         CallEvent(
             tenant_id=call.tenant_id,

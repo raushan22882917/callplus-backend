@@ -4,7 +4,12 @@ from app.core.config import get_settings
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
 from app.core.repository import TenantScopedRepository
-from app.integrations.credentials import get_sarvam_api_key, get_twilio_credentials
+from app.integrations.credentials import (
+    OWN_ACCOUNT_MESSAGE,
+    get_sarvam_api_key,
+    get_twilio_credentials,
+    uses_platform_twilio,
+)
 from app.integrations.sarvam import SarvamAPIError, chat_completion
 from app.integrations.twilio_client import (
     TwilioClientError,
@@ -28,7 +33,7 @@ from app.schemas.agent import (
     TestChatResponse,
 )
 from app.services import exotel as exotel_service
-from app.services import plans
+from app.services import number_lifecycle, plans
 from app.services.flow_compiler import compile_flow_to_system_prompt
 from app.tools.registry import TOOL_REGISTRY
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -327,9 +332,13 @@ async def unregister_phone_number(
     ctx: RequestContext = Depends(require_permission(Permissions.AGENTS_MANAGE)),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    """Stops this platform routing the number. It does NOT release the number
-    from Twilio — a purchased number keeps billing there until released in the
-    Twilio console."""
+    """Stops routing the number. A number this platform bought is released at
+    Twilio in the same step, so a deleted free number does not keep billing."""
+    number = await PhoneNumberRepository(db, ctx.tenant_id).get(number_id)
+    try:
+        await number_lifecycle.release_if_platform_owned(db, number)
+    except number_lifecycle.NumberReleaseError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     await PhoneNumberRepository(db, ctx.tenant_id).delete(number_id)
     await db.commit()
 
@@ -341,9 +350,9 @@ async def search_phone_numbers(
     ctx: RequestContext = Depends(require_permission(Permissions.AGENTS_MANAGE)),
     db: AsyncSession = Depends(get_db),
 ) -> list[AvailableNumber]:
-    """Numbers this tenant could buy right now — no Twilio account of their
-    own required, this searches on whichever account resolves for them (their
-    own BYO Twilio if connected, otherwise the platform's shared account)."""
+    """Numbers this workspace could buy on its own Twilio account."""
+    if await uses_platform_twilio(db, ctx.tenant_id):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, OWN_ACCOUNT_MESSAGE)
     try:
         credentials = await get_twilio_credentials(db, ctx.tenant_id)
         numbers = search_available_numbers(
@@ -362,11 +371,14 @@ async def provision_phone_number(
     ctx: RequestContext = Depends(require_permission(Permissions.AGENTS_MANAGE)),
     db: AsyncSession = Depends(get_db),
 ) -> PhoneNumber:
-    """Buys the number (a real, recurring cost on whichever Twilio account
-    resolves for this tenant — see search_phone_numbers above) and wires its
-    voice webhook to this platform, then assigns it to this tenant."""
+    """Buys the number on this workspace's own Twilio account and wires its
+    voice webhook here. An Indian number is added from Exotel, not bought here."""
     await plans.ensure_can_create(db, ctx.tenant_id, "phone_numbers")  # before spending money
     await _require_own_agent(db, ctx.tenant_id, payload.ai_agent_id)  # before spending money
+    on_platform = await uses_platform_twilio(db, ctx.tenant_id)
+    if on_platform:
+        await plans.ensure_platform_number_purchase(db, ctx.tenant_id)
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, OWN_ACCOUNT_MESSAGE)
     settings = get_settings()
     voice_webhook_url = f"{settings.public_base_url}/api/v1/webhooks/telephony/twilio/voice"
 
@@ -386,4 +398,5 @@ async def provision_phone_number(
         e164_number=payload.phone_number,
         provider_sid=provider_sid,
         ai_agent_id=payload.ai_agent_id,
+        platform_owned=on_platform,
     )

@@ -88,7 +88,12 @@ def build_stream_twiml(*, stream_url: str, call_id: str, tenant_id: str) -> str:
 
 
 def build_forward_twiml(
-    number: str, *, caller_id: str | None = None, timeout: int = 25, action_url: str | None = None
+    number: str,
+    *,
+    caller_id: str | None = None,
+    timeout: int = 25,
+    action_url: str | None = None,
+    time_limit: int | None = None,
 ) -> str:
     response = VoiceResponse()
     kwargs = {"timeout": timeout}
@@ -97,6 +102,8 @@ def build_forward_twiml(
     if action_url:
         kwargs["action"] = action_url
         kwargs["method"] = "POST"
+    if time_limit:
+        kwargs["time_limit"] = time_limit
     dial = Dial(**kwargs)
     dial.number(number)
     response.append(dial)
@@ -111,6 +118,7 @@ def build_ring_group_twiml(
     caller_id: str | None = None,
     next_url: str | None = None,
     index: int = 0,
+    time_limit: int | None = None,
 ) -> str:
     """simultaneous: <Dial> every member at once. sequential: dial members[index]
     only; the <Dial action> (next_url) re-enters with index+1 until exhausted."""
@@ -122,6 +130,8 @@ def build_ring_group_twiml(
     kwargs: dict = {"timeout": timeout}
     if caller_id:
         kwargs["caller_id"] = caller_id
+    if time_limit:
+        kwargs["time_limit"] = time_limit
     if strategy == "sequential":
         if next_url:
             kwargs["action"] = f"{next_url}{'&' if '?' in next_url else '?'}idx={index + 1}"
@@ -182,20 +192,27 @@ def build_queue_wait_twiml(
     message and play music; <Leave/> once the caller has waited too long."""
     response = VoiceResponse()
     if queue_time_seconds >= max_wait_seconds:
+        response.say(
+            "Everyone is still busy on other calls. Please try again in a few minutes.",
+            language=language,
+        )
         response.leave()
         return str(response)
     if position:
-        response.say(f"You are caller number {position} in the queue.", language=language)
+        response.say(
+            f"All our people are on other calls. You are number {position}.",
+            language=language,
+        )
     if hold_message:
         response.say(hold_message, language=language)
     response.play(music_url or DEFAULT_HOLD_MUSIC)
     return str(response)
 
 
-def build_queue_agent_twiml(queue_name: str) -> str:
+def build_queue_agent_twiml(queue_name: str, *, time_limit: int | None = None) -> str:
     """TwiML for an agent leg: connect to the longest-waiting caller."""
     response = VoiceResponse()
-    dial = Dial()
+    dial = Dial(**({"time_limit": time_limit} if time_limit else {}))
     dial.queue(queue_name)
     response.append(dial)
     return str(response)

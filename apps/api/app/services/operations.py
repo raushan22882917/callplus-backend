@@ -2,7 +2,6 @@
 follow-up execution and payment promises. Router, Celery tasks and AI tool
 handlers all call into this module so the rules live in one place."""
 
-import asyncio
 import html
 import logging
 import uuid
@@ -13,7 +12,6 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.config import get_settings
-from app.integrations.credentials import get_twilio_credentials
 from app.integrations.email_client import send_email
 from app.integrations.whatsapp import WhatsAppAPIError, send_text_message
 from app.services import calendar_sync, plans
@@ -656,7 +654,6 @@ async def send_due_reminders(
             if customer is None or not customer.phone:
                 raise AppointmentError("customer has no phone number")
             account = await _whatsapp_account(db, appointment.tenant_id)
-            await plans.ensure_whatsapp_available(db, appointment.tenant_id)
             # An approved reminder template reaches customers who haven't written in
             # 24h (plain text only works inside WhatsApp's 24-hour window).
             from app.services import whatsapp_templates as tpl
@@ -766,12 +763,8 @@ async def select_due_follow_ups(
 
 
 async def _send_sms(db: AsyncSession, tenant_id: uuid.UUID, to: str, body: str) -> None:
-    from twilio.base.exceptions import TwilioException
-    from twilio.rest import Client
+    from app.integrations.channel_senders import ChannelSendError, send_sms_message
 
-    credentials = await get_twilio_credentials(db, tenant_id)
-    if not credentials.account_sid or not credentials.auth_token:
-        raise FollowUpError("Twilio is not configured for SMS", permanent=True)
     number = (
         (await db.execute(select(PhoneNumber).where(PhoneNumber.tenant_id == tenant_id)))
         .scalars()
@@ -779,13 +772,10 @@ async def _send_sms(db: AsyncSession, tenant_id: uuid.UUID, to: str, body: str) 
     )
     if number is None:
         raise FollowUpError("no phone number to send SMS from", permanent=True)
-    client = Client(credentials.account_sid, credentials.auth_token)
     try:
-        await asyncio.to_thread(
-            client.messages.create, to=to, from_=number.e164_number, body=body
-        )
-    except TwilioException as exc:
-        raise FollowUpError(f"SMS failed: {exc}") from exc
+        await send_sms_message(db, tenant_id, to=to, from_=number.e164_number, body=body)
+    except ChannelSendError as exc:
+        raise FollowUpError(str(exc)) from exc
 
 
 async def _dispatch_follow_up(db: AsyncSession, follow_up: FollowUp, customer: Customer) -> None:
@@ -819,7 +809,6 @@ async def _dispatch_follow_up(db: AsyncSession, follow_up: FollowUp, customer: C
         except AppointmentError as exc:
             raise FollowUpError(str(exc), permanent=True) from exc
         try:
-            await plans.ensure_whatsapp_available(db, follow_up.tenant_id)
             if payload.get("template_name"):
                 from app.integrations.whatsapp import send_template_message
                 from app.services import whatsapp_templates as tpl
@@ -858,13 +847,18 @@ async def _dispatch_follow_up(db: AsyncSession, follow_up: FollowUp, customer: C
             raise FollowUpError("customer has no email address", permanent=True)
         if not message:
             raise FollowUpError("payload needs a message", permanent=True)
+        reserved = None
         try:
+            reserved = await plans.reserve_email(db, follow_up.tenant_id)
             await send_email(
                 to_email=customer.email,
                 subject=payload.get("subject") or "Following up",
                 html_body=html.escape(message).replace("\n", "<br>"),
             )
         except Exception as exc:
+            if reserved is not None:
+                await db.delete(reserved)
+                await db.flush()
             raise FollowUpError(f"email failed: {exc}") from exc
     else:
         raise FollowUpError(f"unsupported channel {channel!r}", permanent=True)

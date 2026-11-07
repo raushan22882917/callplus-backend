@@ -60,7 +60,10 @@ async def test_another_tenant_cannot_update_or_delete_customer(client: AsyncClie
     assert delete_resp.status_code == 404
 
 
-async def test_campaign_pause_and_resume_guard_status(client: AsyncClient) -> None:
+async def test_campaign_pause_and_resume_guard_status(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.api.v1.campaigns.run_campaign_task.delay", lambda _cid: None)
     tokens = await _signup(client, slug="pause-co", email="owner@pause-co.com")
 
     agent_resp = await client.post(
@@ -80,6 +83,12 @@ async def test_campaign_pause_and_resume_guard_status(client: AsyncClient) -> No
     early_pause = await client.post(f"/api/v1/campaigns/{campaign_id}/pause", headers=_auth(tokens))
     assert early_pause.status_code == 409
 
+    blocked = await client.post(
+        f"/api/v1/campaigns/{campaign_id}/launch", headers=_auth(tokens)
+    )
+    assert blocked.status_code == 409
+    declared = await client.post("/api/v1/campaigns/a2p-declaration", headers=_auth(tokens))
+    assert declared.status_code == 200, declared.text
     launch_resp = await client.post(
         f"/api/v1/campaigns/{campaign_id}/launch", headers=_auth(tokens)
     )

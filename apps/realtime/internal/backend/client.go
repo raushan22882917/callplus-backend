@@ -87,9 +87,17 @@ func (c *Client) GetCallConfig(callID string) (*CallConfig, error) {
 	return &result, err
 }
 
-func (c *Client) Turn(callID, transcript string) (*TurnResponse, error) {
+func turnBody(transcript, callerLanguage string) map[string]string {
+	body := map[string]string{"transcript": transcript}
+	if callerLanguage != "" {
+		body["caller_language"] = callerLanguage
+	}
+	return body
+}
+
+func (c *Client) Turn(callID, transcript, callerLanguage string) (*TurnResponse, error) {
 	var raw json.RawMessage
-	err := c.post(fmt.Sprintf("/%s/%s/turn", c.callsPath, callID), map[string]string{"transcript": transcript}, &raw)
+	err := c.post(fmt.Sprintf("/%s/%s/turn", c.callsPath, callID), turnBody(transcript, callerLanguage), &raw)
 	var result TurnResponse
 	if err == nil {
 		err = json.Unmarshal(raw, &result)
@@ -104,8 +112,8 @@ func (c *Client) Turn(callID, transcript string) (*TurnResponse, error) {
 // TurnResponse is the final "done" line, whose ReplyText is the full reply.
 // streamed counts the sentences delivered, so the caller knows whether anything
 // was already spoken when an error comes back.
-func (c *Client) TurnStream(callID, transcript string, onSentence func(string)) (result *TurnResponse, streamed int, err error) {
-	payload, err := json.Marshal(map[string]string{"transcript": transcript})
+func (c *Client) TurnStream(callID, transcript, callerLanguage string, onSentence func(string)) (result *TurnResponse, streamed int, err error) {
+	payload, err := json.Marshal(turnBody(transcript, callerLanguage))
 	if err != nil {
 		return nil, 0, fmt.Errorf("marshal request: %w", err)
 	}

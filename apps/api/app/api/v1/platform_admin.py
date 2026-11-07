@@ -388,6 +388,13 @@ def _setup_items() -> list[dict[str, Any]]:
             bool(s.razorpay_key_id and s.razorpay_key_secret and s.razorpay_webhook_secret),
         ),
         item(
+            "paypal",
+            "PayPal",
+            "Wallet top-ups paid with PayPal",
+            ["PAYPAL_CLIENT_ID", "PAYPAL_CLIENT_SECRET", "PAYPAL_WEBHOOK_ID"],
+            bool(s.paypal_client_id and s.paypal_client_secret and s.paypal_webhook_id),
+        ),
+        item(
             "gst",
             "GST invoices",
             "Tax invoices with your GSTIN",

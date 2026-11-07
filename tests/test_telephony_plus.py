@@ -21,6 +21,7 @@ from packages.database.models import (
     CampaignContact,
     CampaignContactStatus,
     CampaignStatus,
+    ConsentRecord,
     Customer,
     PhoneNumber,
     Ticket,
@@ -154,7 +155,8 @@ def test_enqueue_wait_and_agent_twiml() -> None:
             position=2, hold_message="Hold on", music_url=None, queue_time_seconds=10, max_wait_seconds=60
         )
     )
-    assert "caller number 2" in wait.find("Say").text
+    assert "number 2" in wait.find("Say").text
+    assert "on other calls" in wait.find("Say").text
     assert wait.find("Play") is not None and wait.find("Leave") is None
 
     expired = _root(
@@ -362,7 +364,7 @@ async def test_queue_wait_result_overflow_and_agent_webhooks(
     wait = _root(
         (await client.post(f"{BASE}/queues/{queue['id']}/wait", data={"QueuePosition": "3", "QueueTime": "5"})).text
     )
-    assert "caller number 3" in wait.find("Say").text
+    assert "number 3" in wait.find("Say").text
     left = _root(
         (await client.post(f"{BASE}/queues/{queue['id']}/wait", data={"QueuePosition": "3", "QueueTime": "31"})).text
     )
@@ -430,7 +432,8 @@ async def test_number_routing_to_queue(client: AsyncClient, db_session: AsyncSes
         "/api/v1/webhooks/telephony/twilio/voice",
         data={"To": "+15550003333", "From": "+15552223333", "CallSid": "CAroute1"},
     )
-    assert _root(voice.text).find("Enqueue") is not None
+    said = _root(voice.text).find("Say")
+    assert said is not None and "busy" in said.text
 
 
 async def test_unrouted_number_without_agent_still_rejected(
@@ -562,6 +565,17 @@ async def _campaign_with_contacts(
         await db.flush()
         contact = CampaignContact(tenant_id=tenant_id, campaign_id=campaign.id, customer_id=customer.id)
         db.add(contact)
+        db.add(
+            ConsentRecord(
+                tenant_id=tenant_id,
+                customer_id=customer.id,
+                subject_phone=phone,
+                purpose="marketing",
+                status="granted",
+                source="test",
+                granted_at=datetime.now(UTC),
+            )
+        )
         contacts.append(contact)
     await db.commit()
     return campaign, contacts
@@ -771,3 +785,35 @@ async def test_preview_next_skips_dnd_contacts(client: AsyncClient, db_session: 
     )  # fmt: skip
     nxt = (await client.get(f"{BASE}/campaigns/{campaign.id}/preview-next", headers=headers)).json()
     assert nxt["phone"] == "+919800000032"
+
+
+async def test_a_contact_who_never_agreed_is_not_dialed(
+    client: AsyncClient, db_session: AsyncSession, fake_dialer_io
+) -> None:
+    placed, _rescheduled = fake_dialer_io
+    await _signup(client, "consent-co")
+    campaign, contacts = await _campaign_with_contacts(db_session, "consent-co", ["+919800000041"])
+    consent = (
+        await db_session.execute(
+            select(ConsentRecord).where(ConsentRecord.tenant_id == campaign.tenant_id)
+        )
+    ).scalar_one()
+    await db_session.delete(consent)
+    ds = CampaignDialerSettings(
+        tenant_id=campaign.tenant_id,
+        campaign_id=campaign.id,
+        mode="progressive",
+        max_concurrent=2,
+        call_window_start="00:00",
+        call_window_end="00:00",
+        quiet_hours_start="00:00",
+        quiet_hours_end="00:00",
+    )
+    db_session.add(ds)
+    await db_session.commit()
+    await campaign_tasks._run_dialer_pass(
+        db_session, campaign, ds, PhoneNumber(e164_number="+15559990000")
+    )
+    assert placed == []
+    await db_session.refresh(contacts[0])
+    assert contacts[0].result == {"skipped": "no_consent"}

@@ -73,6 +73,7 @@ class InvoiceRead(BaseModel):
 
     id: uuid.UUID
     subscription_id: uuid.UUID | None
+    description: str | None = None
     amount_paise: int
     currency: str
     status: InvoiceStatus

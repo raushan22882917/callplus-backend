@@ -72,6 +72,7 @@ def test_terms_are_stemmed_content_words_and_synonyms_join_up():
     assert embeddings.synonyms_of("cost") >= {"price", "cost", "fee"}
     assert "refund" in embeddings.expand("how do I return it")
     assert embeddings.synonyms_of("zebra") == frozenset({"zebra"})
+    assert "price" in embeddings.terms("कीमत क्या है")
 
 
 # ---- search ---------------------------------------------------------------------------------

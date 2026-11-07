@@ -294,13 +294,17 @@ async def test_first_response_comment_and_resolution_stop_clock(db_session: Asyn
     ticket = Ticket(tenant_id=tenant_id, customer_id=customer_id, subject="Q")
     db_session.add(ticket)
     await db_session.flush()
-    await svc.apply_sla(db_session, tenant_id, ticket, now=utc(2026, 10, 5, 9))
+    # Resolving a ticket stamps updated_at with the database clock, and that
+    # stamp is when the SLA clock stops. Open the clock a few minutes ago so
+    # the stop is still inside the hour, whatever the wall clock is.
+    opened = datetime.now(UTC) - timedelta(minutes=10)
+    await svc.apply_sla(db_session, tenant_id, ticket, now=opened)
     await db_session.commit()
     # Agents (author_user_id set) count; we can't insert a real user cheaply, so
     # resolve the ticket instead and check the clock stops.
     ticket.status = TicketStatus.RESOLVED
     await db_session.commit()
-    assert await svc.refresh_sla(db_session, now=utc(2026, 10, 5, 9, 20)) == []
+    assert await svc.refresh_sla(db_session, now=datetime.now(UTC)) == []
     sla = (await db_session.execute(select(TicketSLA))).scalar_one()
     assert sla.resolved_at is not None and sla.first_responded_at is not None
     assert not sla.first_response_breached and not sla.resolution_breached

@@ -15,6 +15,7 @@ def test_every_scheduled_task_is_registered():
         "knowledge.sweep_sources",
         "wallet.settle_all",
         "calls.reap_stuck_calls",
+        "calls.release_idle_numbers",
         "campaigns.start_due",
     } <= scheduled
     missing = scheduled - set(celery_app.tasks)

@@ -6,6 +6,7 @@ places an AI call at that time, from the same business number, with the same age
 calling. A callback nobody answers is tried again a little later, up to three times.
 """
 
+import logging
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.database.models import Call, FollowUp
+
+logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 3
 RETRY_AFTER = timedelta(minutes=10)
@@ -216,3 +219,93 @@ async def retry_if_unanswered(db: AsyncSession, call: Call) -> FollowUp | None:
     db.add(follow_up)
     await db.flush()
     return follow_up
+
+
+async def _whatsapp_after_miss(
+    db: AsyncSession, tenant_id: uuid.UUID, phone: str, customer_id
+) -> None:
+    """Send the missed-call WhatsApp template when the callback cannot be placed."""
+    from app.services.whatsapp_templates import context_values, find_approved, send_template
+
+    from packages.database.models import Customer
+
+    template = await find_approved(db, tenant_id, purpose="missed_call")
+    if template is None:
+        return
+    customer = await db.get(Customer, customer_id) if customer_id else None
+    try:
+        values = await context_values(db, tenant_id, customer)
+        await send_template(db, tenant_id, to=phone, template=template, values=values)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("missed-call WhatsApp not sent: %s", exc)
+
+
+async def recover_missed_calls(db: AsyncSession) -> int:
+    """Call back an inbound call nobody answered, once, about a minute later.
+
+    A voicemail is left alone: they already left a message. A callback that
+    itself was missed is not called again. If the call cannot be placed, the
+    approved missed-call WhatsApp template is sent instead.
+    """
+    from app.services.outbound_call import OutboundCallError, place_ai_outbound_call
+
+    from packages.database.models import Call, MissedCall
+
+    now = datetime.now(UTC)
+    due = now - timedelta(seconds=45)
+    rows = list(
+        (
+            await db.execute(
+                select(MissedCall)
+                .where(
+                    MissedCall.handled.is_(False),
+                    MissedCall.callback_call_id.is_(None),
+                    MissedCall.recovery_attempted_at.is_(None),
+                    MissedCall.reason != "voicemail",
+                    MissedCall.created_at <= due,
+                    MissedCall.from_number.is_not(None),
+                )
+                .limit(20)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    recovered = 0
+    for missed in rows:
+        agent_id = None
+        if missed.call_id:
+            origin = await db.get(Call, missed.call_id)
+            if origin is not None and (origin.mission or {}).get("callback_of"):
+                missed.recovery_attempted_at = now
+                continue
+            if origin is not None and origin.ai_agent_id is not None:
+                agent_id = str(origin.ai_agent_id)
+        missed_id = missed.id
+        tenant_id = missed.tenant_id
+        phone = missed.from_number or ""
+        caller_id = missed.to_number
+        customer_id = missed.customer_id
+        missed.recovery_attempted_at = now
+        await db.commit()
+        try:
+            call = await place_ai_outbound_call(
+                db,
+                tenant_id,
+                to_number=phone,
+                from_number=caller_id,
+                ai_agent_id=agent_id,
+                mission={"callback_of": str(missed_id), "reason": "missed inbound"},
+            )
+        except OutboundCallError as exc:
+            logger.info("missed-call callback not placed: %s", exc)
+            await db.rollback()
+            await _whatsapp_after_miss(db, tenant_id, phone, customer_id)
+            continue
+        fresh = await db.get(MissedCall, missed_id)
+        if fresh is not None:
+            fresh.callback_call_id = call.id
+            await db.commit()
+            recovered += 1
+    await db.commit()
+    return recovered

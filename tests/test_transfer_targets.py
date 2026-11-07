@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 from app.api.v1 import internal as internal_module
 from app.integrations.twilio_client import (
@@ -8,7 +10,8 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import CallEvent
+from packages.database.models import CallEvent, Tenant, User
+from packages.database.session import session_scope
 from tests.test_call_control import (
     _auth,
     _internal_headers,
@@ -124,3 +127,56 @@ async def test_finalize_transfer_rings_active_targets_in_priority_order(
         await db_session.execute(select(CallEvent).where(CallEvent.type == "TRANSFER_REQUESTED"))
     ).scalars().all()
     assert len(events) == 1 and events[0].payload["targets"] == 2
+
+
+async def test_a_free_workspace_rings_one_person_on_transfer(
+    client: AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tokens = await _signup(client, slug="tt-free", email="owner@ttfree.com")
+    async with session_scope() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.slug == "tt-free"))).scalar_one()
+        tenant.plan_tier = "free"
+        owner = (
+            await db.execute(select(User).where(User.email == "owner@ttfree.com"))
+        ).scalar_one()
+        owner.email_verified_at = datetime.now(UTC)
+        await db.commit()
+    for phone in ("+911111111111", "+912222222222"):
+        resp = await client.post(
+            "/api/v1/transfer-targets",
+            headers=_auth(tokens),
+            json={"name": phone, "phone_number": phone, "priority": 10, "is_active": True},
+        )
+        assert resp.status_code == 201, resp.text
+    agent = await client.post("/api/v1/ai-agents", headers=_auth(tokens), json={"name": "Bot"})
+    call = await _make_in_progress_call(
+        db_session, tenant_slug="tt-free", agent_id=agent.json()["id"], started_seconds_ago=5
+    )
+    call.provider_call_sid = "CAFREE"
+    await db_session.commit()
+
+    redirected: dict = {}
+
+    async def fake_credentials(db, tenant_id):
+        return None
+
+    monkeypatch.setattr(internal_module, "get_twilio_credentials", fake_credentials)
+    monkeypatch.setattr(
+        internal_module,
+        "redirect_call",
+        lambda *, call_sid, twiml, credentials: redirected.update(twiml=twiml),
+    )
+    resp = await client.post(
+        f"/api/v1/internal/calls/{call.id}/finalize",
+        headers=_internal_headers(),
+        json={"action": "transfer", "reason": "human"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert "+911111111111" in redirected["twiml"]
+    assert "+912222222222" not in redirected["twiml"]
+    assert 'timeLimit="300"' in redirected["twiml"]
+
+    events = (
+        await db_session.execute(select(CallEvent).where(CallEvent.type == "TRANSFER_REQUESTED"))
+    ).scalars().all()
+    assert len(events) == 1 and events[0].payload["targets"] == 1

@@ -493,6 +493,8 @@ async def test_callers_hear_that_it_is_an_ai_and_that_calls_may_be_recorded(clie
             "officer_phone", "address", "purposes", "retention_summary", "extra_notice",
             "call_disclosure_text", "request_sla_days")}
     await client.put("/api/v1/privacy/profile", headers=_auth(tokens), json={**body, "call_disclosure_enabled": False})
+    assert (await greeting()).startswith("This call is with an AI assistant and may be recorded")
+    await client.patch("/api/v1/tenants/me", headers=_auth(tokens), json={"call_recording_enabled": False})
     assert await greeting() == "Hello, how can I help?"
 
 

@@ -81,13 +81,14 @@ type Session struct {
 	lastSpeakEnd  time.Time
 
 	// Turn-taking state, see turn.go.
-	turnMu       sync.Mutex
-	turnRunMu    sync.Mutex
-	turnGen      int
-	turnBusy     int
-	pending      string
-	pendingTimer *time.Timer
-	speakMu      sync.Mutex
+	turnMu        sync.Mutex
+	turnRunMu     sync.Mutex
+	turnGen       int
+	turnBusy      int
+	pending       string
+	heardLanguage string
+	pendingTimer  *time.Timer
+	speakMu       sync.Mutex
 
 	// Guards the no-response retry count, the idle-activity clock, and
 	// whether the call has already been finalized, so the watchdog
@@ -289,7 +290,7 @@ func (s *Session) readTranscripts() {
 			s.sendTestEvent("cb_transcript", map[string]any{"text": ev.Text, "final": true})
 			s.touchActivity()
 			s.resetNoResponseCount()
-			s.onFinalTranscript(ev.Text)
+			s.onFinalTranscript(ev.Text, ev.Language)
 		}
 	}
 }

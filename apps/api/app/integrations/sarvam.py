@@ -35,8 +35,10 @@ SARVAM_FAST_CHAT_MODEL = "sarvam-105b-conversations"
 FAST_MODEL_TIMEOUT = 12.0
 
 
-# Every language Sarvam's STT (saaras) and TTS (bulbul:v3) accept as language_code.
-SARVAM_LANGUAGES: dict[str, str] = {
+# Saaras hears all 23 (22 Indian languages plus English). Bulbul v3 speaks
+# only SARVAM_TTS_LANGUAGES. An agent may be any of the 23; speakable() is the
+# voice code sent to Bulbul.
+SARVAM_TTS_LANGUAGES: dict[str, str] = {
     "en-IN": "English",
     "hi-IN": "Hindi",
     "bn-IN": "Bengali",
@@ -49,10 +51,72 @@ SARVAM_LANGUAGES: dict[str, str] = {
     "ta-IN": "Tamil",
     "te-IN": "Telugu",
 }
+SARVAM_LANGUAGES: dict[str, str] = {
+    **SARVAM_TTS_LANGUAGES,
+    "as-IN": "Assamese",
+    "ur-IN": "Urdu",
+    "ne-IN": "Nepali",
+    "kok-IN": "Konkani",
+    "ks-IN": "Kashmiri",
+    "sd-IN": "Sindhi",
+    "sa-IN": "Sanskrit",
+    "sat-IN": "Santali",
+    "mni-IN": "Manipuri",
+    "brx-IN": "Bodo",
+    "mai-IN": "Maithili",
+    "doi-IN": "Dogri",
+}
+# Closest Bulbul voice. Assamese and Manipuri share the Bengali script.
+# The rest are said with the Hindi voice, written in a script it can read.
+_SPEAK_AS: dict[str, str] = {
+    "as-IN": "bn-IN",
+    "mni-IN": "bn-IN",
+    "ur-IN": "hi-IN",
+    "ne-IN": "hi-IN",
+    "kok-IN": "hi-IN",
+    "ks-IN": "hi-IN",
+    "sd-IN": "hi-IN",
+    "sa-IN": "hi-IN",
+    "sat-IN": "hi-IN",
+    "brx-IN": "hi-IN",
+    "mai-IN": "hi-IN",
+    "doi-IN": "hi-IN",
+}
+
+
+def speakable(code: str | None) -> str:
+    """The Bulbul language code to use when saying `code` aloud."""
+    if code in SARVAM_TTS_LANGUAGES:
+        return code
+    return _SPEAK_AS.get(code or "", "en-IN")
 
 
 class SarvamAPIError(Exception):
     pass
+
+
+async def check_api_key(api_key: str) -> None:
+    """Refuse a key Sarvam will not accept, before it is saved as connected."""
+    key = (api_key or "").strip()
+    if not key:
+        raise SarvamAPIError("Paste your Sarvam API key.")
+    try:
+        response = await _http().post(
+            SARVAM_CHAT_URL,
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "model": SARVAM_FAST_CHAT_MODEL,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+            },
+            timeout=15.0,
+        )
+    except httpx.HTTPError as exc:
+        raise SarvamAPIError("We could not reach Sarvam. Try again in a moment.") from exc
+    if response.status_code in (401, 403):
+        raise SarvamAPIError(
+            "Sarvam refused this API key. Copy it again from the Sarvam dashboard."
+        )
 
 
 def _has_answer(response: httpx.Response) -> bool:
@@ -101,7 +165,7 @@ async def chat_completion(
 ) -> dict:
     key = api_key if api_key is not None else get_settings().sarvam_api_key
     if not key:
-        raise SarvamAPIError("No Sarvam API key configured for this tenant or the platform")
+        raise SarvamAPIError("Connect your own Sarvam API key under Integrations.")
 
     payload: dict = {"model": SARVAM_CHAT_MODEL, "messages": messages, "temperature": temperature}
     if tools:
@@ -145,12 +209,15 @@ async def chat_completion(
 SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
 
 
-async def transcribe_audio(audio: bytes, mime_type: str, *, api_key: str | None = None) -> str:
+async def transcribe_audio(
+    audio: bytes, mime_type: str, *, api_key: str | None = None
+) -> tuple[str, str | None]:
     """Speech to text for a recorded clip (a WhatsApp voice note is OGG/Opus).
-    The language is detected automatically. Checked live: ~0.4s for a short note."""
+    Saaras detects which of the 23 languages was spoken. Returns the transcript
+    and that language code, when Sarvam sent one."""
     key = api_key if api_key is not None else get_settings().sarvam_api_key
     if not key:
-        raise SarvamAPIError("No Sarvam API key configured for this tenant or the platform")
+        raise SarvamAPIError("Connect your own Sarvam API key under Integrations.")
     extension = {"audio/ogg": "ogg", "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/aac": "aac", "audio/amr": "amr", "audio/wav": "wav"}
     name = "voice." + extension.get(mime_type.split(";")[0].strip(), "ogg")
     try:
@@ -158,14 +225,17 @@ async def transcribe_audio(audio: bytes, mime_type: str, *, api_key: str | None 
             SARVAM_STT_URL,
             headers={"api-subscription-key": key},
             files={"file": (name, audio, mime_type.split(";")[0].strip() or "audio/ogg")},
-            data={"model": "saarika:v2.5", "language_code": "unknown"},
+            data={"model": "saaras:v3", "language_code": "unknown", "mode": "transcribe"},
             timeout=60.0,
         )
     except httpx.HTTPError as exc:
         raise SarvamAPIError(f"Sarvam speech-to-text failed: {exc}") from exc
     if response.status_code >= 400:
         raise SarvamAPIError(f"Sarvam speech-to-text failed ({response.status_code}): {response.text[:300]}")
-    return str(response.json().get("transcript") or "").strip()
+    body = response.json()
+    text = str(body.get("transcript") or "").strip()
+    code = str(body.get("language_code") or "").strip()
+    return text, code if code in SARVAM_LANGUAGES else None
 
 
 async def chat_completion_stream(
@@ -191,7 +261,7 @@ async def chat_completion_stream(
     raised as SarvamAPIError, since those words were already spoken."""
     key = api_key if api_key is not None else get_settings().sarvam_api_key
     if not key:
-        raise SarvamAPIError("No Sarvam API key configured for this tenant or the platform")
+        raise SarvamAPIError("Connect your own Sarvam API key under Integrations.")
 
     fast = reasoning_effort == "low"
     payload: dict = {

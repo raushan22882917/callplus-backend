@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.core.deps import get_db
 from app.core.internal_auth import require_internal_service
 from app.integrations.credentials import get_sarvam_api_key, get_twilio_credentials
+from app.integrations.sarvam import speakable
 from app.integrations.twilio_client import (
     MAX_RING_TARGETS,
     CallNotLiveError,
@@ -162,7 +163,7 @@ async def call_config(call_id: uuid.UUID, db: AsyncSession = Depends(get_db)) ->
 
     return CallConfigResponse(
         sarvam_api_key=sarvam_api_key,
-        language=agent.language,
+        language=speakable(agent.language),
         voice=agent.voice or "priya",
         greeting=" ".join(
             part
@@ -290,6 +291,7 @@ async def call_turn(
         agent=agent,
         conversation=conversation,
         customer_text=payload.transcript,
+        caller_language=payload.caller_language,
     )
     await db.commit()
     return _finish_call_turn(call, conversation, payload, result)
@@ -323,6 +325,7 @@ async def call_turn_stream(call_id: uuid.UUID, payload: CallTurnRequest) -> Stre
                     agent=agent,
                     conversation=conversation,
                     customer_text=payload.transcript,
+                    caller_language=payload.caller_language,
                 ):
                     if kind == "sentence":
                         yield _line({"type": "sentence", "text": rest[0]})
@@ -399,6 +402,21 @@ async def call_finalize(
             )
         else:
             targets = []
+        # A free workspace rings one person. Each number we actually dial is
+        # one outbound leg. If today's allowance is gone, nobody is rung.
+        tenant = await db.get(Tenant, call.tenant_id)
+        tier = plans.effective(tenant) if tenant is not None else None
+        cap = 1 if tier is not None and tier.code == "free" else MAX_RING_TARGETS
+        time_limit = tier.max_call_seconds if tier is not None else None
+        chosen: list[str] = []
+        try:
+            for number in list(targets)[:cap]:
+                if not await plans.claim_ring_leg(db, call.tenant_id):
+                    break
+                chosen.append(number)
+        except plans.PlanLimitError:
+            chosen = []
+        targets = chosen
         db.add(
             CallEvent(
                 tenant_id=call.tenant_id,
@@ -420,7 +438,7 @@ async def call_finalize(
         elif decision.action == "callback":
             twiml = build_callback_twiml(decision.message)
         else:
-            twiml = build_transfer_twiml(list(targets))
+            twiml = build_transfer_twiml(list(targets), time_limit=time_limit)
         await _redirect_or_log(db, call, twiml)
         return CallFinalizeResponse(call_id=call.id, status=call.status)
 

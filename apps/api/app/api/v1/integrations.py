@@ -6,11 +6,15 @@ app/integrations/credentials.py for where that's resolved."""
 import asyncio
 import uuid
 
-from app.core.config import get_settings
 from app.core.crypto import encrypt_secret
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
-from app.integrations.credentials import TwilioCredentials, get_twilio_credentials
+from app.integrations.credentials import (
+    OWN_ACCOUNT_MESSAGE,
+    TwilioCredentials,
+    get_twilio_credentials,
+)
+from app.integrations.sarvam import SarvamAPIError, check_api_key
 from app.integrations.twilio_client import check_account
 from app.schemas.integration import (
     ConnectExotelRequest,
@@ -25,7 +29,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import Integration, IntegrationCredential, IntegrationStatus
+from packages.database.models import (
+    Integration,
+    IntegrationCredential,
+    IntegrationStatus,
+    WhatsAppAccount,
+)
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -86,13 +95,79 @@ async def list_integrations(
     return list(result.scalars().all())
 
 
+async def _owns(db: AsyncSession, tenant_id: uuid.UUID, provider: str) -> bool:
+    row = await db.execute(
+        select(Integration.id).where(
+            Integration.tenant_id == tenant_id,
+            Integration.provider == provider,
+            Integration.status == IntegrationStatus.CONNECTED,
+        )
+    )
+    return row.first() is not None
+
+
 @router.get("/included")
 async def included_services(
     ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_READ)),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, bool]:
-    """What every workspace gets without connecting anything: the platform's Sarvam AI key is used
-    for a workspace that has not saved its own."""
-    return {"sarvam": bool(get_settings().sarvam_api_key)}
+    """Which of its own accounts this workspace has connected. Nothing here is covered by a
+    shared platform key."""
+    whatsapp = await db.execute(
+        select(WhatsAppAccount.id).where(WhatsAppAccount.tenant_id == ctx.tenant_id).limit(1)
+    )
+    return {
+        "exotel": await _owns(db, ctx.tenant_id, "exotel"),
+        "twilio": await _owns(db, ctx.tenant_id, "twilio"),
+        "sarvam": await _owns(db, ctx.tenant_id, "sarvam"),
+        "whatsapp": whatsapp.first() is not None,
+    }
+
+
+@router.get("/setup")
+async def setup_status(
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_READ)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """What this workspace still has to connect before it can call and answer on its own accounts."""
+    connected = await included_services(ctx, db)
+    items = [
+        {
+            "id": "exotel",
+            "connected": connected["exotel"],
+            "title": "Indian phone number",
+            "detail": (
+                "Buy an ExoPhone in your own Exotel account, then connect Exotel here and add "
+                "that number under Phone numbers."
+            ),
+        },
+        {
+            "id": "twilio",
+            "connected": connected["twilio"],
+            "title": "Twilio",
+            "detail": "Connect your own Twilio account if you call from a Twilio number or send SMS.",
+        },
+        {
+            "id": "sarvam",
+            "connected": connected["sarvam"],
+            "title": "Sarvam voice",
+            "detail": "Paste your own Sarvam API key. The assistant speaks and listens on your account.",
+        },
+        {
+            "id": "whatsapp",
+            "connected": connected["whatsapp"],
+            "title": "WhatsApp",
+            "detail": "Connect your own WhatsApp Business number.",
+        },
+    ]
+    calls_ready = connected["exotel"] or connected["twilio"]
+    return {
+        "ready_for_calls": calls_ready and connected["sarvam"],
+        "message": None
+        if calls_ready and connected["sarvam"]
+        else OWN_ACCOUNT_MESSAGE,
+        "items": items,
+    }
 
 
 @router.post("/twilio", response_model=IntegrationRead, status_code=status.HTTP_201_CREATED)
@@ -137,6 +212,10 @@ async def connect_sarvam(
     ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
     db: AsyncSession = Depends(get_db),
 ) -> Integration:
+    try:
+        await check_api_key(payload.api_key)
+    except SarvamAPIError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     integration = await _upsert_integration(
         db, tenant_id=ctx.tenant_id, provider="sarvam", config={}, secret=payload.api_key
     )

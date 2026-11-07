@@ -10,5 +10,6 @@ fernet() {
 echo "POSTGRES_PASSWORD=$(rand 24)"
 echo "REDIS_PASSWORD=$(rand 24)"
 echo "JWT_SECRET_KEY=$(rand 48)"
+echo "EXOTEL_WEBHOOK_SECRET=$(rand 32)"
 echo "INTERNAL_SERVICE_TOKEN=$(rand 32)"
 echo "ENCRYPTION_KEY=$(fernet)"

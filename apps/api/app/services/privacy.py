@@ -152,16 +152,40 @@ async def public_notice(db: AsyncSession, tenant_id: uuid.UUID, business: str) -
 
 async def call_disclosure(db: AsyncSession, tenant_id: uuid.UUID) -> str:
     """What the caller hears first: that they are talking to an AI and, if calls
-    are recorded, that they may be recorded. Empty if the business turned it off."""
+    are recorded, that they may be recorded.
+
+    Turning the sentence off is allowed only while recording is off. A recorded
+    call always says so, because the recording is the caller's personal data.
+    """
     profile = await get_profile(db, tenant_id, create=False)  # read-only: this runs mid-call
-    if profile is not None and not profile.call_disclosure_enabled:
+    tenant = await db.get(Tenant, tenant_id)
+    recording = bool(tenant and tenant.call_recording_enabled)
+    if profile is not None and not profile.call_disclosure_enabled and not recording:
         return ""
+    if recording and (profile is None or not profile.call_disclosure_enabled):
+        return DEFAULT_CALL_DISCLOSURE
     text = (profile.call_disclosure_text if profile else DEFAULT_CALL_DISCLOSURE).strip()
-    if text == DEFAULT_CALL_DISCLOSURE:
-        tenant = await db.get(Tenant, tenant_id)
-        if not (tenant and tenant.call_recording_enabled):
-            return "This call is with an AI assistant."
+    if text == DEFAULT_CALL_DISCLOSURE and not recording:
+        return "This call is with an AI assistant."
     return text
+
+
+async def has_outbound_consent(db: AsyncSession, tenant_id: uuid.UUID, phone: str | None) -> bool:
+    """True when this number agreed to a marketing or callback call and has not taken it back."""
+    phone = _clean_phone(phone)
+    if not phone:
+        return False
+    row = await db.execute(
+        select(ConsentRecord.id)
+        .where(
+            ConsentRecord.tenant_id == tenant_id,
+            ConsentRecord.subject_phone == phone,
+            ConsentRecord.purpose.in_(("marketing", "call_back")),
+            ConsentRecord.status == "granted",
+        )
+        .limit(1)
+    )
+    return row.first() is not None
 
 
 # ---- consent ledger -------------------------------------------------------------------------

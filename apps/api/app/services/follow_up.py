@@ -349,6 +349,8 @@ async def _send_email(db, tenant_id, customer, text, subject):
             reply_to=(email_settings.config or {}).get("reply_to_address")
             if email_settings
             else None,
+            db=db,
+            tenant_id=tenant_id,
         )
     except ChannelSendError as exc:
         raise FollowUpError(str(exc)) from exc

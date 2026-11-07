@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from app.core.config import get_settings
 from app.integrations.credentials import get_twilio_credentials
 from app.integrations.twilio_client import TwilioClientError, place_outbound_call
-from app.services import dialer, ivr
+from app.services import dialer, ivr, plans
 from sqlalchemy import func, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from twilio.base.exceptions import TwilioException
@@ -27,6 +27,7 @@ from packages.database.models import (
     CampaignContact,
     CampaignContactStatus,
     Customer,
+    Tenant,
     Ticket,
     TicketPriority,
 )
@@ -166,6 +167,112 @@ class InboundRoute:
     open_now: bool = True
 
 
+def _action_is_ai(action: object) -> bool:
+    return isinstance(action, dict) and action.get("action") == "ai_agent"
+
+
+def route_can_reach_ai(route: InboundRoute | None) -> bool:
+    """True when this route's own actions hand the caller to an AI agent.
+    A nested submenu is not loaded here; `route_reaches_ai` walks those."""
+    if route is None:
+        return False
+    if route.kind == "ai_agent" and route.ai_agent_id is not None:
+        return True
+    if route.kind == "ivr" and route.menu is not None:
+        menu = route.menu
+        if _action_is_ai(menu.after_hours_action):
+            return True
+        if any(_action_is_ai(option) for option in (menu.options or {}).values()):
+            return True
+    if route.kind == "queue" and route.queue is not None:
+        if _action_is_ai(route.queue.overflow_action):
+            return True
+    return False
+
+
+def _menu_actions(menu: IvrMenu) -> list:
+    actions = list((menu.options or {}).values())
+    if menu.after_hours_action:
+        actions.append(menu.after_hours_action)
+    return actions
+
+
+async def route_reaches_ai(
+    db: AsyncSession, route: InboundRoute | None, *, _depth: int = 0, _seen: set | None = None
+) -> bool:
+    """True when any path from this route can reach an AI agent, including a
+    submenu or a queue overflow several steps in."""
+    if route_can_reach_ai(route):
+        return True
+    if route is None or _depth > 5:
+        return False
+    seen = _seen if _seen is not None else set()
+    if route.kind == "ivr" and route.menu is not None:
+        if route.menu.id in seen:
+            return False
+        seen.add(route.menu.id)
+        return await _actions_reach_ai(
+            db, route.menu.tenant_id, _menu_actions(route.menu), _depth, seen
+        )
+    if route.kind == "queue" and route.queue is not None:
+        if route.queue.id in seen:
+            return False
+        seen.add(route.queue.id)
+        return await _actions_reach_ai(
+            db, route.queue.tenant_id, [route.queue.overflow_action], _depth, seen
+        )
+    return False
+
+
+async def _actions_reach_ai(db: AsyncSession, tenant_id, actions, depth: int, seen: set) -> bool:
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        kind = action.get("action")
+        if kind == "ai_agent":
+            return True
+        if kind == "submenu" and depth < 5:
+            menu = await _get_scoped(db, IvrMenu, tenant_id, action.get("target_id"))
+            if menu is None or not menu.is_active or menu.id in seen:
+                continue
+            seen.add(menu.id)
+            if await _actions_reach_ai(db, tenant_id, _menu_actions(menu), depth + 1, seen):
+                return True
+        if kind == "queue" and depth < 5:
+            queue = await _get_scoped(db, CallQueue, tenant_id, action.get("target_id"))
+            if queue is None or queue.id in seen:
+                continue
+            seen.add(queue.id)
+            if _action_is_ai(queue.overflow_action):
+                return True
+            if await _actions_reach_ai(db, tenant_id, [queue.overflow_action], depth + 1, seen):
+                return True
+    return False
+
+
+async def plan_call_time_limit(db: AsyncSession, tenant_id: uuid.UUID) -> int | None:
+    """How long one call on this plan may stay connected, in seconds."""
+    tenant = await db.get(Tenant, tenant_id)
+    if tenant is None:
+        return None
+    return plans.effective(tenant).max_call_seconds
+
+
+async def _claim_or_stop(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
+    try:
+        return await plans.claim_ring_leg(db, tenant_id)
+    except plans.PlanLimitError:
+        logger.info("ring leg refused for tenant %s", tenant_id)
+        return False
+
+
+async def _capped_members(db: AsyncSession, tenant_id: uuid.UUID, members: list) -> list:
+    """Free workspaces ring one person. Everyone else rings up to the hard cap."""
+    tenant = await db.get(Tenant, tenant_id)
+    free = tenant is not None and plans.effective(tenant).code == "free"
+    return list(members or [])[: 1 if free else ivr.MAX_RING_MEMBERS]
+
+
 async def _get_scoped(db: AsyncSession, model, tenant_id: uuid.UUID, obj_id):
     try:
         obj_uuid = obj_id if isinstance(obj_id, uuid.UUID) else uuid.UUID(str(obj_id))
@@ -271,7 +378,11 @@ def _menu_twiml(menu: IvrMenu, call: Call, *, attempt: int = 0, prefix: str = ""
 
 async def twiml_for_route(db: AsyncSession, route: InboundRoute, call: Call) -> str:
     if route.kind == "forward":
-        return ivr.build_forward_twiml(route.forward_to or "", caller_id=call.to_number)
+        return ivr.build_forward_twiml(
+            route.forward_to or "",
+            caller_id=call.to_number,
+            time_limit=await plan_call_time_limit(db, call.tenant_id),
+        )
     if route.kind == "ivr" and route.menu is not None:
         menu = route.menu
         if not route.open_now:
@@ -285,7 +396,7 @@ async def twiml_for_route(db: AsyncSession, route: InboundRoute, call: Call) -> 
     if route.kind == "queue" and route.queue is not None:
         return await _queue_twiml(db, route.queue, call)
     if route.kind == "ring_group" and route.ring_group is not None:
-        return _ring_group_twiml(route.ring_group, call)
+        return await _ring_group_twiml(db, route.ring_group, call)
     if route.kind == "ai_agent" and route.ai_agent_id is not None:
         return await action_twiml(
             db, {"action": "ai_agent", "target_id": str(route.ai_agent_id)}, call=call
@@ -293,22 +404,38 @@ async def twiml_for_route(db: AsyncSession, route: InboundRoute, call: Call) -> 
     return ivr.build_say_hangup_twiml()
 
 
-def _ring_group_twiml(group: RingGroup, call: Call, index: int = 0) -> str:
+async def _ring_group_twiml(db: AsyncSession, group: RingGroup, call: Call, index: int = 0) -> str:
+    members = await _capped_members(db, call.tenant_id, group.members)
+    if index >= len(members):
+        return ivr.build_say_hangup_twiml("Sorry, nobody is available to take your call. Goodbye.")
+    legs = len(members) if group.strategy != "sequential" else 1
+    claimed = 0
+    for _ in range(legs):
+        if not await _claim_or_stop(db, call.tenant_id):
+            break
+        claimed += 1
+    if claimed == 0:
+        return ivr.build_say_hangup_twiml(plans.CALLER_UNAVAILABLE)
+    if group.strategy != "sequential":
+        members = members[:claimed]
     return ivr.build_ring_group_twiml(
-        list(group.members or []),
+        members,
         strategy=group.strategy,
         timeout=group.timeout_seconds,
         caller_id=call.to_number,
         next_url=f"{base_url()}/ring-groups/{group.id}/next?call_id={call.id}",
         index=index,
+        time_limit=await plan_call_time_limit(db, call.tenant_id),
     )
 
 
 async def ring_queue_members(db: AsyncSession, queue: CallQueue, call: Call) -> int:
     """Rings the queue's member numbers (via Twilio REST) so one of them can
     dequeue the caller. Returns the number of legs started; failures are
-    logged, never raised into the caller's webhook."""
-    if not queue.members:
+    logged, never raised into the caller's webhook. Each leg is reserved
+    against the plan first, and a free workspace rings at most one person."""
+    members = await _capped_members(db, call.tenant_id, queue.members)
+    if not members:
         return 0
     settings = get_settings()
     agent_url = f"{base_url()}/queues/{queue.id}/agent?call_id={call.id}"
@@ -318,7 +445,9 @@ async def ring_queue_members(db: AsyncSession, queue: CallQueue, call: Call) -> 
     except Exception:  # noqa: BLE001
         logger.exception("could not load twilio credentials for queue ring")
         return 0
-    for member in list(queue.members)[: ivr.MAX_RING_MEMBERS]:
+    for member in members:
+        if not await _claim_or_stop(db, call.tenant_id):
+            break
         try:
             place_outbound_call(
                 to=member,
@@ -332,7 +461,12 @@ async def ring_queue_members(db: AsyncSession, queue: CallQueue, call: Call) -> 
     return started
 
 
+_QUEUE_BUSY = "Everyone is busy on another call right now. Please try again in a few minutes."
+
+
 async def _queue_twiml(db: AsyncSession, queue: CallQueue, call: Call) -> str:
+    if not (queue.members or []):
+        return ivr.build_say_hangup_twiml(_QUEUE_BUSY)
     await ring_queue_members(db, queue, call)
     name = ivr.twilio_queue_name(str(call.tenant_id), str(queue.id))
     return ivr.build_enqueue_twiml(
@@ -350,6 +484,11 @@ async def action_twiml(
     tenant_id = call.tenant_id
 
     if kind == "ai_agent":
+        try:
+            await plans.ensure_inbound_allowed(db, tenant_id, exclude_call_id=call.id)
+        except plans.PlanLimitError as exc:
+            logger.info("ivr ai handoff refused for tenant %s: %s", tenant_id, exc.code)
+            return ivr.build_say_hangup_twiml(plans.CALLER_UNAVAILABLE, language)
         agent = await _get_scoped(db, AIAgent, tenant_id, action.get("target_id"))
         if agent is None:
             return ivr.build_say_hangup_twiml(
@@ -371,9 +510,13 @@ async def action_twiml(
         group = await _get_scoped(db, RingGroup, tenant_id, action.get("target_id"))
         if group is None:
             return ivr.build_say_hangup_twiml("Sorry, nobody is available.", language)
-        return _ring_group_twiml(group, call)
+        return await _ring_group_twiml(db, group, call)
     if kind == "forward":
-        return ivr.build_forward_twiml(str(action.get("number", "")), caller_id=call.to_number)
+        return ivr.build_forward_twiml(
+            str(action.get("number", "")),
+            caller_id=call.to_number,
+            time_limit=await plan_call_time_limit(db, tenant_id),
+        )
     if kind == "voicemail":
         return ivr.build_voicemail_twiml(
             message=action.get("message")

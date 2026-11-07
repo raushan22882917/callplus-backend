@@ -20,7 +20,7 @@ from app.services.channels_voice import (
     voicemail_twiml_for_unassigned_number,
 )
 from app.services.customer_lookup import find_or_create_customer_by_phone
-from app.services.telephony_plus import resolve_inbound_route, twiml_for_route
+from app.services.telephony_plus import resolve_inbound_route, route_reaches_ai, twiml_for_route
 from app.services.voicemail_detection import handle_answered_by
 from app.workflows.dispatch import enqueue_workflow_trigger
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -59,7 +59,7 @@ _REJECT_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Resp
 # the caller is the business's customer and should not hear about billing.
 _UNAVAILABLE_TWIML = (
     '<?xml version="1.0" encoding="UTF-8"?><Response>'
-    "<Say>Sorry, we can't take your call right now. Please try again later.</Say>"
+    f"<Say>{plans.CALLER_UNAVAILABLE}</Say>"
     "<Hangup/></Response>"
 )
 
@@ -209,9 +209,12 @@ async def voice(request: Request, db: AsyncSession = Depends(get_db)) -> Respons
         if await _check_and_apply_spam_protection(db, tenant, from_number):
             return _reject_response()
 
-        if phone_number.ai_agent_id is not None:
-            # An AI-answered call costs money to carry: once the plan's allowance
-            # is spent, the caller hears a short message instead of the agent.
+        reaches_ai = phone_number.ai_agent_id is not None or await route_reaches_ai(db, route)
+        # A number on our Twilio account costs us for a human call too.
+        if reaches_ai or phone_number.platform_owned:
+            # An AI-answered call costs money to carry, including one that reaches
+            # the agent through a menu. Once the allowance is spent, or the owner
+            # has not verified their email, the caller hears a short message.
             try:
                 await plans.ensure_inbound_allowed(db, phone_number.tenant_id)
             except plans.PlanLimitError as exc:

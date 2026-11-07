@@ -24,6 +24,8 @@ from packages.database.models import (
     Call,
     CallDirection,
     CallStatus,
+    Invoice,
+    InvoiceStatus,
     PhoneNumber,
     Plan,
     Subscription,
@@ -89,6 +91,9 @@ async def _on_tier(db: AsyncSession, slug: str, tier: str) -> uuid.UUID:
 def test_free_tier_is_ten_minutes_in_total_with_a_short_call_cap() -> None:
     free = plans.TIERS["free"]
     assert free.ai_minutes == 10 and free.ai_minutes_period == "lifetime"
+    assert free.sms_messages == 20 and free.sms_period == "lifetime"
+    assert free.email_messages == 30 and free.email_period == "lifetime"
+    assert free.social_messages == 50 and free.social_period == "lifetime"
     assert free.max_call_seconds == 300
     assert free.campaigns is False and free.recording is False
     assert (free.agents, free.phone_numbers, free.knowledge_documents) == (1, 1, 5)
@@ -430,11 +435,17 @@ async def test_ai_tool_stops_sending_whatsapp_when_the_allowance_is_gone(
 
     sent: list = []
 
-    async def fake_send(*args, **kwargs):
-        sent.append(kwargs)
-        return {"messages": [{"id": "wamid"}]}
+    async def fake_post(self, url, headers=None, json=None):
+        sent.append(json)
+        class _Response:
+            status_code = 200
 
-    monkeypatch.setattr("app.tools.handlers.send_text_message", fake_send)
+            def json(self):
+                return {"messages": [{"id": "wamid"}]}
+
+        return _Response()
+
+    monkeypatch.setattr("httpx.AsyncClient.post", fake_post)
     ctx = ToolContext(
         db=db_session,
         tenant_id=tenant.id,
@@ -493,6 +504,73 @@ async def test_subscription_events_move_the_tenant_between_tiers(db_session: Asy
     assert tenant.plan_tier == "growth"
 
     await _event(db_session, sub, "subscription.cancelled")
+    await db_session.refresh(tenant)
+    assert tenant.plan_tier == "free"
+
+
+async def test_allow_overage_lifts_the_minute_cap(db_session: AsyncSession) -> None:
+    tenant = await _tenant(db_session, "over", "free", allow_overage=True)
+    agent = await _agent(db_session, tenant)
+    await _call(db_session, tenant, agent, 10 * 60)
+    await plans.ensure_minutes_available(db_session, tenant.id)
+    assert await plans.sync_overage_invoice(db_session, tenant.id) == 0
+
+
+async def test_allow_overage_invoices_minutes_past_the_allowance(db_session: AsyncSession) -> None:
+    tenant = await _tenant(db_session, "over-bill", "starter", allow_overage=True)
+    agent = await _agent(db_session, tenant)
+    await _call(db_session, tenant, agent, 301 * 60)
+
+    assert await plans.sync_overage_invoice(db_session, tenant.id) == 1000
+    await db_session.commit()
+    assert await plans.sync_overage_invoice(db_session, tenant.id) == 1000
+    rows = (
+        await db_session.execute(select(Invoice).where(Invoice.tenant_id == tenant.id))
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status == InvoiceStatus.PENDING
+    assert rows[0].amount_paise == 1000
+    assert "1 AI min" in (rows[0].description or "")
+
+    rows[0].status = InvoiceStatus.PAID
+    await db_session.commit()
+    await _call(db_session, tenant, agent, 60)
+    assert await plans.sync_overage_invoice(db_session, tenant.id) == 1000
+    rows = (
+        await db_session.execute(select(Invoice).where(Invoice.tenant_id == tenant.id))
+    ).scalars().all()
+    assert len(rows) == 2
+    assert sum(row.amount_paise for row in rows if row.status == InvoiceStatus.PAID) == 1000
+    assert sum(row.amount_paise for row in rows if row.status == InvoiceStatus.PENDING) == 1000
+
+
+async def test_immediate_cancel_downgrades_without_waiting_for_the_webhook(
+    client: AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tokens = await _signup(client, slug="cancel-now", email="owner@cancel-now.com")
+    tenant_id = await _on_tier(db_session, "cancel-now", "growth")
+    tenant = await db_session.get(Tenant, tenant_id)
+    await _subscribe(db_session, tenant, "growth")
+
+    async def cancelled(*_a, **_k):
+        return {}
+
+    monkeypatch.setattr("app.api.v1.billing.razorpay_cancel_subscription", cancelled)
+    kept = await client.post(
+        "/api/v1/billing/subscription/cancel",
+        headers=_auth(tokens),
+        json={"at_period_end": True},
+    )
+    assert kept.status_code == 200, kept.text
+    await db_session.refresh(tenant)
+    assert tenant.plan_tier == "growth"
+
+    gone = await client.post(
+        "/api/v1/billing/subscription/cancel",
+        headers=_auth(tokens),
+        json={"at_period_end": False},
+    )
+    assert gone.status_code == 200, gone.text
     await db_session.refresh(tenant)
     assert tenant.plan_tier == "free"
 

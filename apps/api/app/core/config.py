@@ -20,6 +20,10 @@ class Settings(BaseSettings):
 
     jwt_secret_key: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
+    # Signs Exotel status callbacks. Separate from the login key so a leaked
+    # callback secret cannot mint session tokens. Local and test fall back to
+    # the JWT secret when this is empty; production must set its own.
+    exotel_webhook_secret: str = ""
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 14
 
@@ -169,6 +173,14 @@ class Settings(BaseSettings):
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
     razorpay_webhook_secret: str = ""
+    # PayPal Checkout for wallet top-ups (developer.paypal.com > Apps & Credentials).
+    # Webhook URL: {PUBLIC_BASE_URL}/api/v1/webhooks/payment/paypal
+    # Events: CHECKOUT.ORDER.APPROVED, PAYMENT.CAPTURE.COMPLETED.
+    # paypal_mode is "sandbox" or "live". The client id is public; the secret is not.
+    paypal_client_id: str = ""
+    paypal_client_secret: str = ""
+    paypal_webhook_id: str = ""
+    paypal_mode: str = "sandbox"
     # Who the GST invoice for a wallet top-up is issued by. The state code (GST numeric,
     # e.g. "08" Rajasthan) decides CGST+SGST (same state) versus IGST (another state).
     seller_legal_name: str = "CallPulse"
@@ -226,6 +238,13 @@ class Settings(BaseSettings):
         problems: list[str] = []
         if self.jwt_secret_key in _INSECURE_JWT or len(self.jwt_secret_key) < 32:
             problems.append("JWT_SECRET_KEY must be a random value of at least 32 characters")
+        if self.exotel_webhook_secret in _INSECURE_JWT or len(self.exotel_webhook_secret) < 24:
+            problems.append(
+                "EXOTEL_WEBHOOK_SECRET must be a random value of at least 24 characters, "
+                "different from JWT_SECRET_KEY"
+            )
+        if self.exotel_webhook_secret and self.exotel_webhook_secret == self.jwt_secret_key:
+            problems.append("EXOTEL_WEBHOOK_SECRET must not be the same value as JWT_SECRET_KEY")
         if self.encryption_key == _PUBLIC_ENCRYPTION_KEY:
             problems.append("ENCRYPTION_KEY is the public dev key; generate a real Fernet key")
         if self.internal_service_token in _INSECURE_JWT or len(self.internal_service_token) < 24:

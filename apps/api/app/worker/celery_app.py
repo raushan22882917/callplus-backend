@@ -105,6 +105,14 @@ celery_app.conf.beat_schedule = {
         "task": "calls.reap_stuck_calls",
         "schedule": 2 * 60.0,
     },
+    "calls-release-idle-numbers": {
+        "task": "calls.release_idle_numbers",
+        "schedule": 24 * 60 * 60.0,
+    },
+    "calls-recover-missed": {
+        "task": "calls.recover_missed",
+        "schedule": 30.0,
+    },
     "operations-no-show-followups": {
         "task": "operations.no_show_followups",
         "schedule": 10 * 60.0,

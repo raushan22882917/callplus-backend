@@ -99,7 +99,27 @@ async def test_a_call_twilio_says_finished_is_closed_with_twilios_duration(clien
     assert row.status == CallStatus.COMPLETED and row.ended_at is not None
 
 
-async def test_recent_calls_are_left_alone(client: AsyncClient, twilio):
+def test_exotel_callback_token_does_not_follow_the_login_key(monkeypatch):
+    from app.core.config import get_settings
+    from app.services import exotel
+
+    monkeypatch.setattr(get_settings(), "exotel_webhook_secret", "exotel-callback-secret-value")
+    monkeypatch.setattr(get_settings(), "jwt_secret_key", "a-different-login-secret-value-32")
+    call_id = uuid.uuid4()
+    token = exotel._status_token(call_id)
+    monkeypatch.setattr(get_settings(), "jwt_secret_key", "changed-login-secret-value-here")
+    assert exotel.status_token_ok(call_id, token)
+    monkeypatch.setattr(get_settings(), "exotel_webhook_secret", "other-exotel-secret-value-xx")
+    assert exotel.status_token_ok(call_id, token) is False
+
+
+async def test_an_exotel_call_is_not_closed_without_exotel_saying_so(client: AsyncClient, twilio):
+    tenant_id = await _tenant(client, "reap-exotel")
+    call = await _call(
+        tenant_id, status=CallStatus.IN_PROGRESS, age_minutes=60, sid="exotel-sid-1", started=True
+    )
+    assert (await _reap()).finalized == 0
+    assert (await _status(call.id)).status == CallStatus.IN_PROGRESS
     tenant_id = await _tenant(client, "reap-recent")
     live = await _call(tenant_id, status=CallStatus.IN_PROGRESS, age_minutes=4)
     ringing = await _call(tenant_id, status=CallStatus.RINGING, age_minutes=1, sid="CA2", started=False)

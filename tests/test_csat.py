@@ -45,7 +45,7 @@ def sent(monkeypatch):
     async def wa(db, tenant_id, customer, body):
         log.append(("whatsapp", body))
 
-    async def sms(db, tenant_id, customer, body):
+    async def sms(db, tenant_id, customer, body, *, meter=True):
         log.append(("sms", body))
 
     monkeypatch.setattr(csat, "_send_whatsapp", wa)
@@ -132,7 +132,7 @@ async def test_due_surveys_are_sent_and_old_ones_expire(sent):
 async def test_send_failure_is_recorded(monkeypatch):
     tenant_id, customer_id = await _tenant(channel="sms", delay_minutes=0)
 
-    async def boom(db, tenant_id, customer, body):
+    async def boom(db, tenant_id, customer, body, *, meter=True):
         raise csat.SurveySendError("The SMS channel is not enabled")
 
     monkeypatch.setattr(csat, "_send_sms", boom)

@@ -25,7 +25,7 @@ from app.integrations import twilio_plus
 from app.integrations.credentials import get_twilio_credentials
 from app.integrations.twilio_client import CallNotLiveError, TwilioClientError, place_outbound_call
 from app.schemas import telephony_plus as schemas
-from app.services import dialer, ivr
+from app.services import dialer, ivr, plans, privacy
 from app.services import telephony_plus as svc
 from app.services.cost_controls import SpendGuardError, guard_outbound
 from app.services.customer_lookup import find_or_create_customer_by_phone
@@ -557,7 +557,12 @@ async def queue_agent_leg(
     """Answered agent leg: bridge to the longest-waiting caller."""
     queue = await _queue_or_404(db, queue_id)
     await _signed_form(request, db, queue.tenant_id)
-    return _xml(ivr.build_queue_agent_twiml(ivr.twilio_queue_name(str(queue.tenant_id), str(queue.id))))
+    limit = await svc.plan_call_time_limit(db, queue.tenant_id)
+    return _xml(
+        ivr.build_queue_agent_twiml(
+            ivr.twilio_queue_name(str(queue.tenant_id), str(queue.id)), time_limit=limit
+        )
+    )
 
 
 @router.post("/ring-groups/{group_id}/next")
@@ -578,7 +583,7 @@ async def ring_group_next(
     if group.strategy == "sequential" and idx_raw is not None and idx_raw.isdigit():
         idx = int(idx_raw)
         if idx < len(group.members or []):
-            return _xml(svc._ring_group_twiml(group, call, index=idx))
+            return _xml(await svc._ring_group_twiml(db, group, call, index=idx))
     return _xml(ivr.build_say_hangup_twiml("Sorry, nobody is available to take your call. Goodbye."))
 
 
@@ -689,6 +694,13 @@ async def retrieve_parked_call(
     credentials = await get_twilio_credentials(db, ctx.tenant_id)
     _twilio_credentials_or_400(credentials)
     try:
+        if not await plans.claim_ring_leg(db, ctx.tenant_id):
+            raise plans.PlanLimitError(
+                "plan_daily_outbound",
+                "Your plan's outbound call allowance for today is used up.",
+                tier="",
+                http_status=429,
+            )
         place_outbound_call(
             to=payload.agent_number,
             from_=caller_id,
@@ -958,7 +970,9 @@ async def preview_next(
                 else ("21:00", "09:00")
             ),
         )
-        if decision.allowed:
+        if decision.allowed and await privacy.has_outbound_consent(
+            db, ctx.tenant_id, customer.phone
+        ):
             return schemas.PreviewContact(
                 contact_id=contact.id,
                 customer_id=customer.id,

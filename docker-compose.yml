@@ -32,7 +32,11 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://callcenter:callcenter@postgres:5432/callcenter
+      # callcenter (POSTGRES_USER) is a superuser, so row-level security would
+      # not apply. The API connects as callcenter_app; migrations use the owner.
+      DATABASE_URL: postgresql+asyncpg://callcenter_app:callcenter_app_dev@postgres:5432/callcenter
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://callcenter:callcenter@postgres:5432/callcenter
+      APP_DB_PASSWORD: callcenter_app_dev
       REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
@@ -41,6 +45,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=4).status == 200 else 1)\""]
+      interval: 15s
+      timeout: 6s
+      retries: 5
+      start_period: 40s
     volumes:
       - ./apps:/app/apps
       - ./packages:/app/packages
@@ -60,9 +70,11 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://callcenter:callcenter@postgres:5432/callcenter
+      DATABASE_URL: postgresql+asyncpg://callcenter_app:callcenter_app_dev@postgres:5432/callcenter
       REDIS_URL: redis://redis:6379/0
     depends_on:
+      api:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:

@@ -35,10 +35,11 @@ type sttAudioInput struct {
 // config.updated, pong, and error. Fields not relevant to a given event are
 // simply left zero-valued.
 type sttServerEvent struct {
-	Event   string `json:"event"`
-	Text    string `json:"text"`
-	Message string `json:"message"`
-	Code    string `json:"code"`
+	Event    string `json:"event"`
+	Text     string `json:"text"`
+	Message  string `json:"message"`
+	Code     string `json:"code"`
+	Language string `json:"language"`
 }
 
 // DialSTT opens Sarvam's realtime STT stream for one call. silenceDurationMs
@@ -91,10 +92,12 @@ const (
 )
 
 // Event is one meaningful message from the STT stream. Text is set for
-// partial/final transcripts only.
+// partial/final transcripts only. Language is the BCP-47 code Saaras detected
+// when the socket was opened with language_code=auto (all 23 languages).
 type Event struct {
-	Kind EventKind
-	Text string
+	Kind     EventKind
+	Text     string
+	Language string
 }
 
 // Next blocks for the next server message. Session/pong/config events come
@@ -114,7 +117,7 @@ func (s *STTStream) Next() (Event, error) {
 	}
 	switch event.Event {
 	case "transcript.final":
-		return Event{Kind: EventFinal, Text: event.Text}, nil
+		return Event{Kind: EventFinal, Text: event.Text, Language: event.Language}, nil
 	case "transcript.partial":
 		return Event{Kind: EventPartial, Text: event.Text}, nil
 	case "vad.speech_start":

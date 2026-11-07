@@ -45,7 +45,7 @@ const (
 	echoMinWords = 4
 )
 
-func (s *Session) onFinalTranscript(text string) {
+func (s *Session) onFinalTranscript(text, language string) {
 	if s.isEcho(text) {
 		log.Printf("[session %s] ignoring echo of agent speech: %q", s.callID, text)
 		return
@@ -59,6 +59,9 @@ func (s *Session) onFinalTranscript(text string) {
 		s.pending += " "
 	}
 	s.pending += text
+	if language != "" {
+		s.heardLanguage = language
+	}
 	if s.pendingTimer != nil {
 		s.pendingTimer.Stop()
 	}
@@ -94,7 +97,9 @@ func (s *Session) runTurn(gen int) {
 		return
 	}
 	text := s.pending
+	language := s.heardLanguage
 	s.pending = ""
+	s.heardLanguage = ""
 	s.turnBusy++
 	s.turnMu.Unlock()
 	defer func() {
@@ -134,13 +139,17 @@ func (s *Session) runTurn(gen int) {
 	)
 	if s.cfg.StreamReplies && s.tts != nil && s.backendClient.CanStream() {
 		// A hung-up caller cancels synthesis too: there is nobody left to hear it.
-		result, streamed, firstAudio, err = s.streamingTurn(text, func() bool { return s.turnIsStale(gen) || s.isEnded() }, endFiller)
+		result, streamed, firstAudio, err = s.streamingTurn(
+			text, language,
+			func() bool { return s.turnIsStale(gen) || s.isEnded() },
+			endFiller,
+		)
 		if err != nil && streamed == 0 {
 			log.Printf("[session %s] streaming turn failed before any speech, retrying normally: %v", s.callID, err)
-			result, err = s.backendClient.Turn(s.callID, text)
+			result, err = s.backendClient.Turn(s.callID, text, language)
 		}
 	} else {
-		result, err = s.backendClient.Turn(s.callID, text)
+		result, err = s.backendClient.Turn(s.callID, text, language)
 	}
 	replyMs = time.Since(started).Milliseconds()
 	endFiller()

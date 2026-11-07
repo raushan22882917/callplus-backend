@@ -134,7 +134,7 @@ func (s *Session) speakStream(sentences <-chan string, stale func() bool) time.T
 // as it arrives. streamed is how many sentences were spoken; with streamed == 0
 // and an error nothing reached the caller and the ordinary Turn call is safe.
 func (s *Session) streamingTurn(
-	text string, stale func() bool, stopFiller func(),
+	text, callerLanguage string, stale func() bool, stopFiller func(),
 ) (resp *backend.TurnResponse, streamed int, firstAudio time.Time, err error) {
 	sentences := make(chan string, 32)
 	var once sync.Once
@@ -147,7 +147,7 @@ func (s *Session) streamingTurn(
 		sentences <- sentence
 	}
 
-	resp, streamed, err = s.backendClient.TurnStream(s.callID, text, onSentence)
+	resp, streamed, err = s.backendClient.TurnStream(s.callID, text, callerLanguage, onSentence)
 	if streamed > 0 {
 		close(sentences)
 		firstAudio = <-spoke

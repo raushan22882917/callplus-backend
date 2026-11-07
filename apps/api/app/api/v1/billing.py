@@ -44,7 +44,9 @@ async def get_entitlements(
     """The workspace's plan and how much of each allowance is used. Minutes are
     billable minutes, rounded up per call the way the carrier bills."""
     tenant = await db.get(Tenant, ctx.tenant_id)
-    return await plans_service.entitlements(db, tenant)
+    snapshot = await plans_service.entitlements(db, tenant)
+    await db.commit()
+    return snapshot
 
 
 @router.get("/catalogue")
@@ -167,6 +169,11 @@ async def cancel_subscription(
         subscription.cancel_at_period_end = True
     else:
         subscription.status = SubscriptionStatus.CANCELLED
+        # The webhook would do this later. Doing it here means a missed webhook
+        # cannot leave a cancelled workspace on the paid tier.
+        from app.api.v1.payments import _sync_tenant_tier
+
+        await _sync_tenant_tier(db, subscription, "subscription.cancelled")
 
     await log_audit_event(
         db,

@@ -19,6 +19,9 @@ var scriptLanguages = []struct {
 	{unicode.Telugu, "te-IN"},
 	{unicode.Kannada, "kn-IN"},
 	{unicode.Malayalam, "ml-IN"},
+	{unicode.Arabic, "hi-IN"},
+	{unicode.Ol_Chiki, "hi-IN"},
+	{unicode.Meetei_Mayek, "bn-IN"},
 }
 
 // ttsLanguage picks the voice language for one chunk of reply text. The agent
@@ -64,12 +67,28 @@ func ttsLanguage(text, agentLanguage string) string {
 	if latin > bestN*2 {
 		return "en-IN"
 	}
-	return best
+	return speakable(best)
+}
+
+// speakable is the Bulbul v3 code for a language. Saaras hears 23; Bulbul
+// speaks 11. Assamese and Manipuri are read with the Bengali voice, and the
+// other heard-only languages with the Hindi voice.
+func speakable(code string) string {
+	switch code {
+	case "en-IN", "hi-IN", "bn-IN", "gu-IN", "kn-IN", "ml-IN", "mr-IN", "od-IN", "pa-IN", "ta-IN", "te-IN":
+		return code
+	case "as-IN", "mni-IN":
+		return "bn-IN"
+	case "ur-IN", "ne-IN", "kok-IN", "ks-IN", "sd-IN", "sa-IN", "sat-IN", "brx-IN", "mai-IN", "doi-IN":
+		return "hi-IN"
+	default:
+		return "en-IN"
+	}
 }
 
 func fallbackLanguage(agentLanguage string) string {
 	if agentLanguage == "" {
 		return "en-IN"
 	}
-	return agentLanguage
+	return speakable(agentLanguage)
 }

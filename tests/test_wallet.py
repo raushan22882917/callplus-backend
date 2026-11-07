@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from app.api.v1 import wallet as wallet_api
 from app.core.config import get_settings
-from app.integrations import razorpay_client
+from app.integrations import paypal_client, razorpay_client
 from app.services import plans, wallet
 from app.worker import wallet_tasks
 from httpx import AsyncClient
@@ -28,6 +28,7 @@ from packages.database.models import (
     MessageSender,
     Tenant,
     UsageEvent,
+    User,
     Wallet,
     WalletTopup,
     WalletTransaction,
@@ -95,6 +96,10 @@ async def _workspace(client: AsyncClient, slug: str, tier: str = "free") -> tupl
     async with session_scope() as db:
         tenant = (await db.execute(select(Tenant).where(Tenant.slug == slug))).scalar_one()
         tenant.plan_tier = tier
+        # Signup leaves the owner unverified. A non-legacy workspace cannot
+        # spend until that email is confirmed, so these billing tests confirm it.
+        owner = (await db.execute(select(User).where(User.email == f"o@{slug}.com"))).scalar_one()
+        owner.email_verified_at = datetime.now(UTC)
         await db.commit()
         tenant_id = tenant.id
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}, tenant_id
@@ -252,6 +257,163 @@ async def test_the_webhook_credits_a_payment_the_browser_never_confirmed(client:
     assert (await client.get("/api/v1/wallet", headers=auth)).json()["balance_paise"] == 50_000
 
 
+def test_paypal_amounts_reject_anything_that_is_not_rupees_and_paise() -> None:
+    assert paypal_client.paise_from_amount({"value": "118.00"}) == 11800
+    assert paypal_client.paise_from_amount({"value": "0.5"}) == 50
+    assert paypal_client.paise_from_amount({"value": "10"}) == 1000
+    assert paypal_client.paise_from_amount({"value": "1.234"}) is None
+    assert paypal_client.paise_from_amount({"value": "-1.00"}) is None
+
+
+async def test_a_paypal_top_up_is_captured_and_a_webhook_cannot_credit_it_twice(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "paypal_client_id", "paypal-client")
+    monkeypatch.setattr(get_settings(), "paypal_client_secret", "paypal-secret")
+    asked: dict = {}
+
+    async def create_order(*, amount_paise, receipt, custom_id):
+        asked["paise"] = amount_paise
+        return {"id": "PAYORDER1", "approve_url": "https://www.sandbox.paypal.com/checkoutnow?token=PAYORDER1"}
+
+    def _order(order_id: str) -> dict:
+        return {
+            "id": order_id,
+            "status": "COMPLETED",
+            "purchase_units": [{
+                "payments": {"captures": [{
+                    "id": "CAP1",
+                    "status": "COMPLETED",
+                    "amount": {"currency_code": "INR", "value": f"{asked['paise'] / 100:.2f}"},
+                }]},
+            }],
+        }
+
+    async def capture_order(order_id):
+        return _order(order_id)
+
+    async def verify_webhook(headers, event):
+        return headers.get("paypal-transmission-id") == "good"
+
+    monkeypatch.setattr(paypal_client, "create_order", create_order)
+    monkeypatch.setattr(paypal_client, "capture_order", capture_order)
+    monkeypatch.setattr(paypal_client, "verify_webhook", verify_webhook)
+
+    auth, _tenant = await _workspace(client, "w-paypal")
+    await _profile(client, auth)
+    missing = await client.post(
+        "/api/v1/wallet/topups", headers=auth, json={"amount_rupees": 100, "provider": "nope"}
+    )
+    assert missing.status_code == 422
+
+    created = await client.post(
+        "/api/v1/wallet/topups", headers=auth, json={"amount_rupees": 100, "provider": "paypal"}
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["provider"] == "paypal"
+    assert body["client_id"] == "paypal-client"
+    assert body["order_id"] == "PAYORDER1"
+    assert body["approve_url"].startswith("https://www.sandbox.paypal.com/")
+    assert (await client.get("/api/v1/wallet", headers=auth)).json()["balance_paise"] == 0
+    razorpay_confirm = await client.post(
+        f"/api/v1/wallet/topups/{body['topup_id']}/verify",
+        headers=auth,
+        json={"payment_id": "pay_paypalxx", "signature": "0" * 16},
+    )
+    assert razorpay_confirm.status_code == 400
+
+    captured = await client.post(f"/api/v1/wallet/topups/{body['topup_id']}/capture", headers=auth)
+    assert captured.status_code == 200, captured.text
+    assert captured.json()["balance_paise"] == 10_000
+    again = await client.post(f"/api/v1/wallet/topups/{body['topup_id']}/capture", headers=auth)
+    assert again.json()["balance_paise"] == 10_000
+
+    event = {
+        "event_type": "PAYMENT.CAPTURE.COMPLETED",
+        "resource": {
+            "id": "CAP1",
+            "amount": {"currency_code": "INR", "value": f"{body['amount_paise'] / 100:.2f}"},
+            "supplementary_data": {"related_ids": {"order_id": "PAYORDER1"}},
+        },
+    }
+    forged = await client.post("/api/v1/webhooks/payment/paypal", json=event)
+    assert forged.status_code == 403
+    assert (await client.get("/api/v1/wallet", headers=auth)).json()["balance_paise"] == 10_000
+    short = json.loads(json.dumps(event))
+    short["resource"]["amount"]["value"] = "1.00"
+    short["resource"]["id"] = "CAPSHORT"
+    refused = await client.post(
+        "/api/v1/webhooks/payment/paypal",
+        content=json.dumps(short),
+        headers={"paypal-transmission-id": "good", "Content-Type": "application/json"},
+    )
+    assert refused.status_code == 200
+    assert (await client.get("/api/v1/wallet", headers=auth)).json()["balance_paise"] == 10_000
+    replay = await client.post(
+        "/api/v1/webhooks/payment/paypal",
+        content=json.dumps(event),
+        headers={"paypal-transmission-id": "good", "Content-Type": "application/json"},
+    )
+    assert replay.status_code == 200
+    assert (await client.get("/api/v1/wallet", headers=auth)).json()["balance_paise"] == 10_000
+
+
+async def test_an_approved_paypal_order_is_captured_by_the_webhook(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "paypal_client_id", "paypal-client")
+    monkeypatch.setattr(get_settings(), "paypal_client_secret", "paypal-secret")
+    asked: dict = {}
+
+    async def create_order(*, amount_paise, receipt, custom_id):
+        asked["paise"] = amount_paise
+        return {"id": "PAYORDER2", "approve_url": "https://www.sandbox.paypal.com/checkoutnow?token=PAYORDER2"}
+
+    async def capture_order(order_id):
+        return {
+            "id": order_id,
+            "status": "COMPLETED",
+            "purchase_units": [{
+                "payments": {"captures": [{
+                    "id": "CAP2",
+                    "status": "COMPLETED",
+                    "amount": {"currency_code": "INR", "value": f"{asked['paise'] / 100:.2f}"},
+                }]},
+            }],
+        }
+
+    async def verify_webhook(headers, event):
+        return True
+
+    monkeypatch.setattr(paypal_client, "create_order", create_order)
+    monkeypatch.setattr(paypal_client, "capture_order", capture_order)
+    monkeypatch.setattr(paypal_client, "verify_webhook", verify_webhook)
+    auth, _tenant = await _workspace(client, "w-paypal-hook")
+    await _profile(client, auth)
+    created = await client.post(
+        "/api/v1/wallet/topups", headers=auth, json={"amount_rupees": 100, "provider": "paypal"}
+    )
+    assert created.status_code == 201, created.text
+    approved = await client.post(
+        "/api/v1/webhooks/payment/paypal",
+        json={"event_type": "CHECKOUT.ORDER.APPROVED", "resource": {"id": "PAYORDER2"}},
+        headers={"paypal-transmission-id": "good"},
+    )
+    assert approved.status_code == 200, approved.text
+    assert (await client.get("/api/v1/wallet", headers=auth)).json()["balance_paise"] == 10_000
+
+
+async def test_paypal_without_credentials_is_refused(client: AsyncClient) -> None:
+    auth, _tenant = await _workspace(client, "w-paypal-off")
+    await _profile(client, auth)
+    refused = await client.post(
+        "/api/v1/wallet/topups", headers=auth, json={"amount_rupees": 100, "provider": "paypal"}
+    )
+    assert refused.status_code == 424
+    assert "PAYPAL_CLIENT_ID" in refused.json()["detail"]
+
+
 async def test_only_free_and_pay_as_you_go_workspaces_can_top_up_and_nobody_else_can_see_a_top_up(client: AsyncClient, razorpay):
     legacy, _ = await _workspace(client, "w-legacy", tier="legacy")
     growth, _ = await _workspace(client, "w-growth", tier="growth")
@@ -334,9 +496,15 @@ async def test_messages_are_charged_from_message_rows_and_usage_events(client: A
                            text="hi"))
         db.add(UsageEvent(tenant_id=tenant_id, metric="whatsapp_messages", quantity=1, occurred_at=datetime.now(UTC)))
         db.add(UsageEvent(tenant_id=tenant_id, metric="sms", quantity=3, occurred_at=datetime.now(UTC)))
+        db.add(UsageEvent(tenant_id=tenant_id, metric="social", quantity=2, occurred_at=datetime.now(UTC)))
         db.add(UsageEvent(tenant_id=tenant_id, metric="storage_bytes", quantity=999, occurred_at=datetime.now(UTC)))
         await db.commit()
-    spent = 3 * wallet.WHATSAPP_MESSAGE_PAISE + 3 * wallet.SMS_PAISE  # 2 sent rows + 1 event, 3 texts
+    # 2 WhatsApp rows + 1 WhatsApp event, 3 SMS, 2 Instagram/Messenger. Storage is not a charge.
+    spent = (
+        3 * wallet.WHATSAPP_MESSAGE_PAISE
+        + 3 * wallet.SMS_PAISE
+        + 2 * wallet.SOCIAL_PAISE
+    )
     assert (await client.get("/api/v1/wallet", headers=auth)).json()["balance_paise"] == 50_000 - spent
     assert (await client.get("/api/v1/wallet", headers=auth)).json()["balance_paise"] == 50_000 - spent
 

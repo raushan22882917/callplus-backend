@@ -15,7 +15,8 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from app.core.config import get_settings
 from app.core.crypto import decrypt_secret
-from app.integrations.whatsapp import WhatsAppAPIError, friendly_error, record_usage
+from app.integrations.whatsapp import WhatsAppAPIError, friendly_error
+from app.services.plans import PlanLimitError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -426,12 +427,19 @@ async def send_template(
         "type": "template",
         "template": {"name": template.name, "language": {"code": template.language}, "components": components},
     }
-    async with httpx.AsyncClient(timeout=15.0) as http:
-        response = await http.post(_graph(f"{account.phone_number_id}/messages"), headers=_headers(account), json=payload)
-    if response.status_code >= 400:
-        raise WhatsAppAPIError(_meta_error(response))
-    if metered:
-        await record_usage(tenant_id)
+    from app.integrations.whatsapp import _claim_or_stop, _release_claim
+
+    claim_id = await _claim_or_stop(tenant_id, metered)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            response = await http.post(
+                _graph(f"{account.phone_number_id}/messages"), headers=_headers(account), json=payload
+            )
+        if response.status_code >= 400:
+            raise WhatsAppAPIError(_meta_error(response))
+    except Exception:
+        await _release_claim(claim_id)
+        raise
     return ((response.json().get("messages") or [{}])[0]).get("id")
 
 
@@ -454,7 +462,7 @@ async def notify_booking(db: AsyncSession, tenant_id: uuid.UUID, appointment, pu
     try:
         values = await context_values(db, tenant_id, customer, appointment=appointment)
         await send_template(db, tenant_id, to=customer.phone, template=template, values=values)
-    except (TemplateError, WhatsAppAPIError, httpx.HTTPError) as exc:
+    except (TemplateError, WhatsAppAPIError, httpx.HTTPError, PlanLimitError) as exc:
         logger.warning("booking %s: %s template not sent: %s", appointment.id, purpose, exc)
         return False
     return True

@@ -384,7 +384,7 @@ async def test_meta_webhook_handshake_signature_and_reply(
 
     sent = []
 
-    async def fake_meta_send(*, page_access_token, recipient_id, text, channel):
+    async def fake_meta_send(*, page_access_token, recipient_id, text, channel, **_ignored):
         sent.append((page_access_token, recipient_id, text, channel))
         return "mid.out"
 

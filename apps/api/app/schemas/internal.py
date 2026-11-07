@@ -8,6 +8,9 @@ from packages.database.models import CallStatus
 
 class CallTurnRequest(BaseModel):
     transcript: str
+    # BCP-47 code Saaras detected on this utterance (hi-IN, ne-IN, …). Empty
+    # when the gateway did not hear one; the reply language then follows the script.
+    caller_language: str | None = None
 
 
 class CallTurnResponse(BaseModel):

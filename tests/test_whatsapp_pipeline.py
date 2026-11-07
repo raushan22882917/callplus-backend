@@ -162,7 +162,7 @@ async def test_voice_note_is_transcribed_and_answered(client: AsyncClient, db_se
         return b"OggS...", "audio/ogg"
 
     async def fake_transcribe(audio, mime, *, api_key=None):
-        return "kal do baje haircut book kar do"
+        return "kal do baje haircut book kar do", None
 
     monkeypatch.setattr("app.services.whatsapp_inbound.download_media", fake_download)
     monkeypatch.setattr("app.services.whatsapp_inbound.transcribe_audio", fake_transcribe)

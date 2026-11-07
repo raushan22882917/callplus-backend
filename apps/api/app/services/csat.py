@@ -194,7 +194,6 @@ async def _send_whatsapp(db: AsyncSession, tenant_id: uuid.UUID, customer: Custo
     from app.services import plans
 
     try:
-        await plans.ensure_whatsapp_available(db, tenant_id)
         await send_text_message(account, to=customer.phone.lstrip("+"), body=body)
     except plans.PlanLimitError as exc:
         raise SurveySendError(exc.message) from exc
@@ -202,7 +201,9 @@ async def _send_whatsapp(db: AsyncSession, tenant_id: uuid.UUID, customer: Custo
         raise SurveySendError(f"WhatsApp: {exc}") from exc
 
 
-async def _send_sms(db: AsyncSession, tenant_id: uuid.UUID, customer: Customer, body: str) -> None:
+async def _send_sms(
+    db: AsyncSession, tenant_id: uuid.UUID, customer: Customer, body: str, *, meter: bool = True
+) -> None:
     from app.integrations.channel_senders import ChannelSendError, send_sms_message
     from app.services.channels import get_channel_settings
 
@@ -221,7 +222,9 @@ async def _send_sms(db: AsyncSession, tenant_id: uuid.UUID, customer: Customer, 
     if not from_:
         raise SurveySendError("No sending phone number is configured")
     try:
-        await send_sms_message(db, tenant_id, to=customer.phone, from_=from_, body=body)
+        await send_sms_message(
+            db, tenant_id, to=customer.phone, from_=from_, body=body, meter=meter
+        )
     except ChannelSendError as exc:
         raise SurveySendError(str(exc)) from exc
 

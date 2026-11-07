@@ -95,21 +95,26 @@ The most one sign-up can cost us, in rupees:
 | One phone number, first month | 176 |
 | **Worst case in total** | **about 286** |
 
-The 10-minute pool is lifetime, so abandoned accounts stop costing minutes. The phone
-number is the part that recurs: a free account that provisions a platform number keeps
-costing about ₹176 a month. If free sign-ups pile up, release numbers on inactive free
-accounts, or require a verified phone number before provisioning.
+The 10-minute pool is lifetime, so abandoned accounts stop costing minutes. A free
+workspace cannot buy a number on the platform Twilio account. A number the platform
+did buy is released when the workspace deletes it, and a daily job releases one that
+has had no call for 14 days. Calls on a platform number, including a person answering,
+draw the same minute pool, and the plan's per-call cap hangs up the dial.
 
 ## How the limits are enforced
 
 | Limit | Where |
 |---|---|
 | Minutes pool and per-call cap | `effective_max_call_seconds` clamps the call to the smallest of the agent's cap, the plan's per-call cap and the minutes left. Used by the call config the voice gateway reads and by both turn endpoints, so a free call ends at the pool, not past it |
-| No new calls once minutes are gone | Outbound: `guard_outbound` (the one choke point all five outbound paths use). Inbound: the Twilio voice webhook plays a short neutral message and hangs up; the caller never hears about plans |
-| One call at a time, 5 outbound a day | `ensure_outbound_allowed` / `ensure_inbound_allowed` |
-| Agents, numbers, seats, documents, API keys | `ensure_can_create`, called before the record is created (and before a number is bought) |
+| No new calls once minutes are gone | Outbound: `guard_outbound` (the one choke point all five outbound paths use). Inbound: the Twilio voice webhook plays a short neutral message and hangs up, including when the agent is reached through a menu or a nested submenu. A platform-owned number is gated the same way when a person answers |
+| One call at a time, 5 outbound a day | `ensure_outbound_allowed` / `ensure_inbound_allowed`. A free queue, ring group or AI transfer dials one person, and that dial counts as one of the five. The dial also stops at the plan's per-call cap |
+| Agents, numbers, seats, documents, API keys | `ensure_can_create`, called before the record is created (and before a number is bought). Free cannot buy on the platform account |
 | Campaigns, recording | `ensure_feature` |
-| WhatsApp messages | `ensure_whatsapp_available` before each send; a campaign pauses instead of failing each contact |
+| WhatsApp messages | claimed in its own transaction before the Meta call, so two sends cannot share the last message. A campaign pauses instead of failing each contact. A reply saved as a message is counted from that row |
+| SMS segments | `reserve_sms` under the tenant lock |
+| Customer email | `reserve_email`. Verification and password mail is not counted |
+| Instagram and Messenger | `reserve_social`, one count per reply even when the text is split. These use the workspace's own page token |
+| Unverified owner | `ensure_owner_verified` on every spend, except legacy workspaces |
 
 Errors come back as HTTP **402** (HTTP **429** for rate-style limits) with
 `{"detail", "code", "tier", "upgrade_path": "/billing"}`.
@@ -124,6 +129,8 @@ Only the Razorpay webhook and a platform admin
 * Subscription **activated or charged** moves the tenant to the plan's tier.
 * Subscription **cancelled or completed** moves it back to Free, but only if it is
   still on that plan's tier, so a hand-granted Enterprise deal is not downgraded.
+  Cancelling immediately in the API does this in the same request. Cancelling at
+  the end of the period waits for the webhook.
 * Payment **halted** keeps the tier while Razorpay retries.
 * Existing tenants were set to **`legacy`** (unlimited) by the migration so nothing
   changes under them. New sign-ups start on `SIGNUP_PLAN_TIER` (default `free`).
@@ -131,9 +138,14 @@ Only the Razorpay webhook and a platform admin
 ## Overage
 
 Allowances are hard caps. A workspace that reaches its monthly minutes is stopped, and
-the 402 tells it to upgrade. The per-minute overage rates in `plans.py` (₹10 / 9 / 8) are
-reference prices for when usage invoicing exists. Until then, a platform admin can grant
-bonus minutes or `allow_overage` per workspace:
+the 402 tells it to upgrade. A platform admin can grant bonus minutes, or `allow_overage`.
+`allow_overage` lets the workspace keep going past the minute, WhatsApp, SMS, email and
+Instagram/Messenger caps, and `sync_overage_invoice` writes the extra onto a pending
+invoice. Minutes use the plan rate (Starter ₹10, Growth ₹9, Scale ₹8 per minute). Messages
+use the wallet rates below. Free has no minute rate, so its minutes are not invoiced.
+Pay-as-you-go is charged from the wallet instead. Opening Billing, ending a call, and the
+minute wallet job all refresh the open invoice. A paid invoice is not rewritten; further
+usage becomes a new one.
 
 ```json
 {"tier": "starter", "overrides": {"bonus_minutes": 100}}
@@ -146,10 +158,15 @@ bonus minutes or `allow_overage` per workspace:
    linked to Razorpay keeps its price there and must be re-created by hand.
 2. **Confirm the assumptions** marked above in the Twilio and Meta consoles, and replace
    the conversation-shape guesses (characters and turns per minute) with numbers from real calls.
-3. **Decide what to do with `legacy` tenants.** They stay unlimited until you move them.
-4. **Free sign-ups need friction** (email verification, a phone check) before this is open to
-   the internet, or the free pool is a free-calls machine.
-5. **Overage invoicing** is the next build if you want to sell beyond the allowance.
+3. **Legacy tenants stay unlimited** until you move them. That is deliberate: they
+   predate plans. New sign-ups start on Free. The test suite signs up onto legacy so
+   older tests are not plan tests.
+4. **An unverified owner cannot spend** (calls, messages, a platform number, a ring)
+   on any tier except legacy. Signup still returns a token so they can open the
+   verification link.
+5. **Collect the pending overage invoice.** The row is written when `allow_overage`
+   is on. Charging it through Razorpay is still a manual step: nothing here captures
+   a card for that invoice.
 6. **Exchange rate.** The model uses ₹88 per US dollar; carrier costs move with it.
 
 ## Wallet (pay as you go)
@@ -171,11 +188,14 @@ minutes and messages they use.
   | ₹5,000 – ₹19,999 | ₹4.00 | ₹7.50 |
   | ₹20,000 and up | ₹3.50 | ₹7.00 |
 
-  WhatsApp messages ₹1.50, SMS ₹0.75. These leave a margin over today's cost (about ₹2.94
+  WhatsApp messages ₹1.50, SMS ₹0.75, customer email ₹0.20, Instagram or Messenger ₹0.20.
+  Instagram and Messenger use the workspace's own Meta token, so that charge is for the platform.
+  These leave a margin over today's cost (about ₹2.94
   inbound, ₹6.64 outbound per minute, table above). **Lower them as the cost per minute falls**
   (an Indian carrier, silence-gated speech-to-text); at today's cost, ₹2–4 per minute would lose money.
-- **Charging.** Calls are charged per started minute when they finish, WhatsApp and SMS per
-  message, from what already exists (calls, outbound WhatsApp messages, usage events). Every
+- **Charging.** Calls are charged per started minute when they finish, and WhatsApp, SMS,
+  email and Instagram/Messenger per message, from what already exists (calls, outbound
+  WhatsApp messages, usage events). Every
   charge is one ledger row with a unique reference, so a retry or a second worker cannot charge
   twice. A Celery job settles every wallet each minute, and a wallet is settled whenever it is read
   or checked. Usage before the first top-up is never charged.
@@ -186,12 +206,20 @@ minutes and messages they use.
 - **Who can use it.** Free workspaces switch to pay-as-you-go on their first top-up. Workspaces on a
   monthly plan have their own minutes, and `legacy` (unlimited) workspaces are not changed.
 - **Payment confirmation.** The browser confirms with Razorpay's signature right after Checkout;
-  the `payment.captured` / `order.paid` webhook does the same if the browser never returns. Both go
-  through one idempotent function, and the webhook only credits an order we created, for exactly the
-  amount we asked for.
+  the `payment.captured` / `order.paid` webhook does the same if the browser never returns. PayPal
+  is the same wallet: `POST /wallet/topups` with `"provider": "paypal"` creates an order in INR
+  (credit plus GST). The browser approves it, then `POST /wallet/topups/{id}/capture` captures it
+  with our secret and credits the wallet. The webhook
+  `{PUBLIC_BASE_URL}/api/v1/webhooks/payment/paypal` (events `CHECKOUT.ORDER.APPROVED` and
+  `PAYMENT.CAPTURE.COMPLETED`) captures and credits if the browser never returns. Both providers
+  credit an order only when the paid amount is exactly the one we asked for.
 - **API:** `GET /wallet`, `PUT /wallet/billing-profile`, `POST /wallet/topups`,
-  `POST /wallet/topups/{id}/verify`, `GET /wallet/transactions`, `GET /wallet/topups`,
-  `GET /wallet/topups/{id}/invoice`. Dashboard: Billing → Wallet.
+  `POST /wallet/topups/{id}/verify`, `POST /wallet/topups/{id}/capture`, `GET /wallet/transactions`,
+  `GET /wallet/topups`, `GET /wallet/topups/{id}/invoice`. Dashboard: Billing → Wallet.
+  PayPal needs `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID`, and
+  `PAYPAL_MODE` (`sandbox` or `live`). The PayPal account must be able to receive INR.
 - **Before launch:** set `SELLER_LEGAL_NAME`, `SELLER_GSTIN`, `SELLER_STATE_CODE`,
   `SELLER_ADDRESS`; point the Razorpay webhook at `/api/v1/webhooks/payment/razorpay` and enable
-  `payment.captured` and `order.paid`; check the invoice wording with your accountant.
+  `payment.captured` and `order.paid`; for PayPal, point the webhook at `/api/v1/webhooks/payment/paypal`
+  and enable `CHECKOUT.ORDER.APPROVED` and `PAYMENT.CAPTURE.COMPLETED`; check the invoice wording
+  with your accountant.

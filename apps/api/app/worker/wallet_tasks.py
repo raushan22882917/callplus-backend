@@ -19,7 +19,28 @@ async def _settle_all() -> int:
         async with session_scope() as db:
             charged += await settle(db, tenant_id)
             await db.commit()
+    await _sync_overage()
     return charged
+
+
+async def _sync_overage() -> None:
+    """Refreshes the pending overage invoice for every workspace allowed past its plan."""
+    from app.services.plans import sync_overage_invoice
+
+    from packages.database.models import Tenant
+
+    async with session_scope() as db:
+        tenant_ids = list(
+            (
+                await db.execute(
+                    select(Tenant.id).where(Tenant.plan_overrides["allow_overage"].astext == "true")
+                )
+            ).scalars().all()
+        )
+    for tenant_id in tenant_ids:
+        async with session_scope() as db:
+            await sync_overage_invoice(db, tenant_id)
+            await db.commit()
 
 
 @celery_app.task(name="wallet.settle_all")

@@ -67,5 +67,32 @@ def test_reply_language_follows_the_callers_script():
     assert "in Marathi" in reply_language_hint("उद्या दोन वाजता", "mr-IN")
     assert "in Tamil" in reply_language_hint("நாளை இரண்டு மணிக்கு")
     assert reply_language_hint("123 ...") == ""
+    assamese = reply_language_hint("মই অহা কালিলৈ আহিম", "as-IN")
+    assert "in Assamese" in assamese and "Bengali script" in assamese
+    nepali = reply_language_hint("भोलि आउँछु", "en-IN", "ne-IN")
+    assert "in Nepali" in nepali and "Devanagari" in nepali
+    urdu = reply_language_hint("کل آؤں گا", "en-IN", "ur-IN")
+    assert "in Urdu" in urdu and "Devanagari" in urdu
+    chat = reply_language_hint("کل آؤں گا", "en-IN", "ur-IN", spoken=False)
+    assert "in Urdu" in chat and "own script" in chat
+    assert "in Santali" in reply_language_hint("ᱥᱟᱱᱛᱟᱲᱤ", "en-IN", "sat-IN")
+    manipuri = reply_language_hint("ꯃꯤꯇꯩ", "en-IN", "mni-IN")
+    assert "in Manipuri" in manipuri and "Bengali script" in manipuri
     msgs = with_language_hint([{"role": "system", "content": "x"}, {"role": "user", "content": "Hello"}])
     assert msgs[-1]["role"] == "system" and "English" in msgs[-1]["content"]
+
+
+def test_every_heard_language_has_a_voice_sarvam_can_speak():
+    from app.integrations.sarvam import SARVAM_LANGUAGES, SARVAM_TTS_LANGUAGES, speakable
+    from app.schemas.agent import AIAgentCreate
+    from pydantic import ValidationError
+
+    assert len(SARVAM_LANGUAGES) == 23
+    assert len(SARVAM_TTS_LANGUAGES) == 11
+    assert speakable("as-IN") == "bn-IN"
+    assert speakable("ne-IN") == "hi-IN"
+    assert speakable("mr-IN") == "mr-IN"
+    assert speakable("not-a-language") == "en-IN"
+    AIAgentCreate(name="A", language="ne-IN")
+    with pytest.raises(ValidationError):
+        AIAgentCreate(name="A", language="xx-IN")

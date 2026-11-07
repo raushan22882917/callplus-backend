@@ -227,14 +227,49 @@ async def is_exotel_number(db: AsyncSession, tenant_id: uuid.UUID, e164: str | N
     return result.first() is not None
 
 
+async def prefer_indian_cli(
+    db: AsyncSession, tenant_id: uuid.UUID, to_number: str | None, from_number: str | None
+) -> str | None:
+    """An Indian mobile hears fewer spam warnings when the caller ID is an Indian
+    Exotel number. Used only when this workspace already has one."""
+    if not (to_number or "").startswith("+91") or not from_number:
+        return from_number
+    if await is_exotel_number(db, tenant_id, from_number):
+        return from_number
+    alt = (
+        await db.execute(
+            select(PhoneNumber.e164_number)
+            .where(PhoneNumber.tenant_id == tenant_id, PhoneNumber.provider == PROVIDER)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return alt or from_number
+
+
+def _status_key() -> bytes | None:
+    """Key for Exotel callback URLs. Never the login key outside local development."""
+    settings = get_settings()
+    secret = (settings.exotel_webhook_secret or "").strip()
+    if not secret and settings.is_local:
+        secret = settings.jwt_secret_key
+    if not secret:
+        return None
+    return secret.encode()
+
+
 def _status_token(call_id: uuid.UUID) -> str:
     # Exotel does not sign its callbacks, so the URL carries proof that we issued it for this call.
-    key = get_settings().jwt_secret_key.encode()
+    key = _status_key()
+    if key is None:
+        return ""
     return hmac.new(key, f"exotel-status:{call_id}".encode(), hashlib.sha256).hexdigest()[:32]
 
 
 def status_token_ok(call_id: uuid.UUID, token: str) -> bool:
-    return hmac.compare_digest(_status_token(call_id), token or "")
+    expected = _status_token(call_id)
+    if not expected or not token:
+        return False
+    return hmac.compare_digest(expected, token)
 
 
 def status_callback_url(call_id: uuid.UUID) -> str:

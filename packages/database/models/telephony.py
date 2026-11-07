@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -20,6 +20,12 @@ class PhoneNumber(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     e164_number: Mapped[str] = mapped_column(String(20), unique=True, nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(20), default="twilio", nullable=False)
     provider_sid: Mapped[str | None] = mapped_column(String(64))
+    # True when this platform bought the number on its own Twilio account.
+    # Deleting the row then releases it at Twilio. A number the tenant brought
+    # themselves stays False, so unregistering it does not delete their number.
+    platform_owned: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     ai_agent_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("ai_agents.id", ondelete="SET NULL")
     )

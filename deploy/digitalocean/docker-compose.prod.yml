@@ -8,7 +8,11 @@ x-app-env: &app-env
   environment: &app-environment
     ENV: production
     DEBUG: "false"
-    DATABASE_URL: postgresql+asyncpg://callcenter:${POSTGRES_PASSWORD}@postgres:5432/callcenter
+    # The API and workers connect as callcenter_app. That role is not a superuser,
+    # so Postgres row-level security applies. Migrations use the owner URL.
+    DATABASE_URL: postgresql+asyncpg://callcenter_app:${APP_DB_PASSWORD}@postgres:5432/callcenter
+    MIGRATION_DATABASE_URL: postgresql+asyncpg://callcenter:${POSTGRES_PASSWORD}@postgres:5432/callcenter
+    APP_DB_PASSWORD: ${APP_DB_PASSWORD}
     REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
     PUBLIC_BASE_URL: https://${API_DOMAIN}
     FRONTEND_BASE_URL: ${FRONTEND_URL}  # where people open the dashboard (links in emails, privacy page)
@@ -122,6 +126,7 @@ services:
       args:
         NEXT_PUBLIC_API_BASE_URL: https://${API_DOMAIN}/api/v1
         NEXT_PUBLIC_RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+        NEXT_PUBLIC_PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
     restart: unless-stopped
     mem_limit: 768m
     networks: [internal]

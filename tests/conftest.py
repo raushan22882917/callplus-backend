@@ -16,6 +16,9 @@ for _key in (
     "SARVAM_API_KEY",
     "RAZORPAY_KEY_ID",
     "RAZORPAY_KEY_SECRET",
+    "PAYPAL_CLIENT_ID",
+    "PAYPAL_CLIENT_SECRET",
+    "PAYPAL_WEBHOOK_ID",
     "SMTP_HOST",
 ):
     os.environ[_key] = ""
@@ -88,6 +91,16 @@ def _meta_accepts_details(monkeypatch):
 def _twilio_accepts_details(monkeypatch):
     """Tests save made-up Twilio details; the live Twilio check has its own tests."""
     monkeypatch.setattr("app.api.v1.integrations.check_account", lambda *_a, **_k: (True, "ok"))
+
+
+@pytest.fixture(autouse=True)
+def _sarvam_accepts_key(monkeypatch):
+    """Tests save a made-up Sarvam key; the live check has its own test."""
+
+    async def ok(_key: str) -> None:
+        return None
+
+    monkeypatch.setattr("app.api.v1.integrations.check_api_key", ok)
 
 
 @pytest.fixture(autouse=True)
