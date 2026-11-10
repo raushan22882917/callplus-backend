@@ -5,7 +5,7 @@ from typing import Literal
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
 from app.core.rate_limit_ip import ip_rate_limit
-from app.integrations.credentials import get_sarvam_api_key
+from app.integrations.credentials import get_llm_key
 from app.services import ai_writer
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
@@ -62,7 +62,7 @@ async def write_text(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "Tell the AI what to write, or type a few words first.",
         )
-    api_key = await get_sarvam_api_key(db, ctx.tenant_id)
+    api_key = await get_llm_key(db, ctx.tenant_id)
     try:
         text = await ai_writer.write(
             api_key=api_key,

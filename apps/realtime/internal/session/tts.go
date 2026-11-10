@@ -70,6 +70,12 @@ func (s *Session) closeTTSSockets() {
 // WebSocket the pieces arrive while the sentence is still being generated, so
 // playback starts on the first; if the socket can't deliver anything, REST does.
 func (s *Session) synthesize(chunk string) <-chan ttsResult {
+	if s.eleven != nil {
+		return s.synthesizeEleven(chunk)
+	}
+	if s.cloneTTS != nil {
+		return s.synthesizeClone(chunk)
+	}
 	language := ttsLanguage(chunk, s.language)
 	out := make(chan ttsResult, 64)
 	go func() {
@@ -101,5 +107,34 @@ func uniqueStrings(values ...string) []string {
 			out = append(out, v)
 		}
 	}
+	return out
+}
+
+// synthesizeEleven speaks a chunk with ElevenLabs. The audio is streamed, so the first part plays while the rest is
+// still being made. ElevenLabs reads the text in whatever language it is written, so no language code is sent.
+func (s *Session) synthesizeEleven(chunk string) <-chan ttsResult {
+	out := make(chan ttsResult, 64)
+	go func() {
+		defer close(out)
+		if _, err := s.eleven.Stream(chunk, s.voice, func(audio string) { out <- ttsResult{audio: audio} }); err != nil {
+			log.Printf("[session %s] elevenlabs tts failed: %v", s.callID, err)
+			out <- ttsResult{err: err}
+		}
+	}()
+	return out
+}
+
+// synthesizeClone speaks a chunk in a Sarvam cloned voice. The audio is streamed, so the first part plays while the
+// rest is still being made. The language follows the script of the text, as it does for Sarvam's named voices.
+func (s *Session) synthesizeClone(chunk string) <-chan ttsResult {
+	language := ttsLanguage(chunk, s.language)
+	out := make(chan ttsResult, 64)
+	go func() {
+		defer close(out)
+		if _, err := s.cloneTTS.Stream(chunk, s.voice, language, func(audio string) { out <- ttsResult{audio: audio} }); err != nil {
+			log.Printf("[session %s] sarvam cloned-voice tts failed: %v", s.callID, err)
+			out <- ttsResult{err: err}
+		}
+	}()
 	return out
 }

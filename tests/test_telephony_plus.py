@@ -817,3 +817,69 @@ async def test_a_contact_who_never_agreed_is_not_dialed(
     assert placed == []
     await db_session.refresh(contacts[0])
     assert contacts[0].result == {"skipped": "no_consent"}
+
+
+# --- per-customer call caps ----------------------------------------------------------------------
+
+
+async def _earlier_calls(db: AsyncSession, tenant_id: uuid.UUID, phone: str, ages: list[timedelta]) -> None:
+    for age in ages:
+        call = Call(
+            tenant_id=tenant_id,
+            direction=CallDirection.OUTBOUND,
+            status=CallStatus.COMPLETED,
+            from_number="+15559990000",
+            to_number=phone,
+        )
+        db.add(call)
+        await db.flush()
+        call.created_at = datetime.now(UTC) - age
+    await db.commit()
+
+
+async def test_per_customer_caps_count_calls_across_campaigns(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _signup(client, "cap-co")
+    tenant_id = await _tenant_id(db_session, "cap-co")
+    phone = "+919855555555"
+    # two calls today, one three days ago, one nine days ago (outside both spans)
+    await _earlier_calls(
+        db_session, tenant_id, phone,
+        [timedelta(hours=1), timedelta(hours=5), timedelta(days=3), timedelta(days=9)],
+    )  # fmt: skip
+
+    assert (await svc.check_outbound_allowed(db_session, tenant_id, phone)).allowed  # no caps given
+    assert (await svc.check_outbound_allowed(db_session, tenant_id, phone, max_per_day=3)).allowed
+    day = await svc.check_outbound_allowed(db_session, tenant_id, phone, max_per_day=2)
+    assert (day.allowed, day.reason) == (False, "daily_cap")
+    week = await svc.check_outbound_allowed(db_session, tenant_id, phone, max_per_day=5, max_per_week=3)
+    assert (week.allowed, week.reason) == (False, "weekly_cap")
+    assert (await svc.check_outbound_allowed(db_session, tenant_id, phone, max_per_week=4)).allowed
+    assert (await svc.check_outbound_allowed(db_session, tenant_id, "+919866666666", max_per_day=1)).allowed
+    assert "daily_cap" in svc.DEFER_REASONS and "weekly_cap" in svc.DEFER_REASONS
+
+
+async def test_dialer_defers_a_contact_who_reached_the_daily_cap(
+    client: AsyncClient, db_session: AsyncSession, fake_dialer_io
+) -> None:
+    placed, _ = fake_dialer_io
+    await _signup(client, "cap-dial-co")
+    phones = ["+919877000001", "+919877000002"]
+    campaign, contacts = await _campaign_with_contacts(db_session, "cap-dial-co", phones)
+    await _earlier_calls(db_session, campaign.tenant_id, phones[0], [timedelta(hours=2)])
+    ds = CampaignDialerSettings(
+        tenant_id=campaign.tenant_id, campaign_id=campaign.id, mode="progressive",
+        max_concurrent=5, call_window_start="00:00", call_window_end="00:00",
+        quiet_hours_start="00:00", quiet_hours_end="00:00", per_customer_daily_cap=1,
+    )  # fmt: skip
+    db_session.add(ds)
+    await db_session.commit()
+
+    await campaign_tasks._run_dialer_pass(db_session, campaign, ds, PhoneNumber(e164_number="+15559990000"))
+
+    assert placed == [phones[1]]  # the capped contact was not called...
+    await db_session.refresh(contacts[0])
+    # ...and stays queued for a later day
+    assert contacts[0].status == CampaignContactStatus.PENDING
+    assert contacts[0].result in (None, {})

@@ -118,7 +118,7 @@ async def test_it_connects_to_the_address_it_checked_and_keeps_the_name():
     out = await safe_get("https://shop.test/page", resolver=resolver({"shop.test": [PUBLIC]}), transport=site(handler))
     assert out.status == 200 and out.body == b"<p>hi</p>" and out.content_type == "text/html"
     assert seen["host"] == PUBLIC and seen["header"] == "shop.test" and seen["sni"] == "shop.test"
-    assert seen["method"] == "GET" and "CallPulseBot" in seen["agent"]
+    assert seen["method"] == "GET" and "CallPlusBot" in seen["agent"]
 
 
 async def test_a_public_site_cannot_redirect_us_into_the_private_network():
@@ -260,7 +260,7 @@ async def test_a_site_that_bans_crawlers_or_errors_on_robots_is_left_alone():
     assert result.pages == [] and "https://shop.test/" not in fake.asked
     with pytest.raises(FetchError, match="robots.txt"):
         await crawler.crawl("https://shop.test/", fetch=Site({"https://shop.test/robots.txt": (503, "text/plain", b"")}), delay=0)
-    named = {"https://shop.test/robots.txt": ok(b"User-agent: CallPulseBot\nDisallow: /\n", "text/plain"),
+    named = {"https://shop.test/robots.txt": ok(b"User-agent: CallPlusBot\nDisallow: /\n", "text/plain"),
              "https://shop.test/": ok(html("Home", LONG))}
     assert (await run(named))[0].pages == []
 

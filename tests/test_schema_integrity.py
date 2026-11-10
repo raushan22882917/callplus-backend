@@ -119,7 +119,7 @@ async def test_the_migrated_database_matches_the_models_and_isolates_every_tenan
 PUBLIC = re.compile(
     r"^/api/v1/("
     r"auth/(signup|login|refresh|forgot-password|reset-password|verify-email|resend-verification|sso|oauth)"
-    r"|channels/(sms/webhook|email/webhook|meta/webhook|forms|webchat|voicemail|click-to-call/bridge)"
+    r"|channels/(sms/webhook|email/webhook|meta/webhook|forms|webchat|webcall|voicemail|click-to-call/bridge)"
     r"|webhooks/"
     r"|privacy/public/"
     r"|payments/(webhook|razorpay)"

@@ -202,16 +202,33 @@ async def settle(db: AsyncSession, tenant_id: uuid.UUID) -> int:
     ).scalars().all()
     for call in calls:
         minutes = math.ceil(call.duration_seconds / 60)
+        # 0 is a real price (the workspace's own AI key). Missing means one plan minute.
+        raw = call.cost_multiplier
+        multiplier = float(raw) if raw is not None else 1.0
         inbound = call.direction == CallDirection.INBOUND
         rate = wallet.inbound_rate_paise if inbound else wallet.outbound_rate_paise
+        if multiplier == 0:
+            amount = 0
+            who = "Inbound" if inbound else "Outbound"
+            description = f"{who} call, {minutes} min, own AI key, not charged"
+        else:
+            amount = -round(minutes * rate * multiplier)
+            description = f"{'Inbound' if inbound else 'Outbound'} call, {minutes} min" + (
+                f" x {multiplier:g} (premium voice)" if multiplier != 1 else ""
+            )
         _post(
             db,
             wallet,
             kind="call",
-            amount_paise=-minutes * rate,
+            amount_paise=amount,
             reference_id=call.id,
-            description=f"{'Inbound' if inbound else 'Outbound'} call, {minutes} min",
-            detail={"minutes": minutes, "rate_paise": rate, "direction": call.direction.value},
+            description=description,
+            detail={
+                "minutes": minutes,
+                "rate_paise": rate,
+                "direction": call.direction.value,
+                **({"multiplier": multiplier} if multiplier != 1 else {}),
+            },
         )
 
     messages = (

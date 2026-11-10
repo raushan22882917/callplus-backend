@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # calls) — required for Twilio request-signature validation, which
     # signs the exact URL Twilio was told to hit.
     public_base_url: str = "http://localhost:8000"
+    # Public key of a web chat channel (with voice calls on) that the marketing site's "Talk to the AI" button
+    # calls. Empty hides the button.
+    web_call_demo_key: str = ""
     # Where a transfer_call tool invocation redirects the live call to. If
     # unset, a transfer just speaks the handoff message and hangs up rather
     # than dialing anywhere — there's no human queue configured by default.
@@ -69,6 +72,31 @@ class Settings(BaseSettings):
     campaign_retry_backoff_seconds: float = 2.0
 
     sarvam_api_key: str = ""
+    # Optional real embeddings. Empty keeps the built-in word hasher. The API must return 384 numbers
+    # per text (OpenAI-compatible, with a dimensions field). A wrong size is refused, not stored.
+    embeddings_api_url: str = ""
+    embeddings_api_key: str = ""
+    embeddings_model: str = "text-embedding-3-small"
+    # ---- "CallPlus" (managed) providers, offered next to a workspace's own account.
+    # Sarvam is offered whenever SARVAM_API_KEY is set (included minutes). Deepgram, ElevenLabs
+    # and a separate language model are offered only when listed below and their key is set.
+    deepgram_api_key: str = ""
+    elevenlabs_api_key: str = ""
+    elevenlabs_model: str = "eleven_flash_v2_5"
+    managed_llm_api_key: str = ""
+    managed_llm_url: str = ""  # an OpenAI-compatible chat-completions address; empty = use Sarvam's model
+    managed_llm_model: str = ""
+    managed_llm_label: str = "CallPlus AI"
+    # Comma list among: deepgram, elevenlabs, llm. Sarvam does not need to be listed.
+    managed_providers: str = ""
+    # What a minute costs us more than a minute on Sarvam, as extra minutes counted against the workspace's plan
+    # or wallet when a call uses that managed provider ("elevenlabs:2" = a call counts three minutes per minute).
+    # Starting points: check them against your providers' invoices.
+    managed_minute_extras: str = "deepgram:0.2,elevenlabs:1.0,llm:0"
+    # How many cloned voices one workspace may keep. A clone takes a voice slot on the account it is made on, and
+    # slots are limited by that account's plan, so CallPlus's own account is rationed more tightly.
+    voice_clones_managed_cap: int = 2
+    voice_clones_own_cap: int = 25
     # Text channels (web chat, WhatsApp, SMS, email, Instagram, Messenger) answer with Sarvam's fast
     # conversational model, ~0.4s per reply instead of 8-10s on the reasoning model. Set to false to
     # roll back to the reasoning model for text.
@@ -183,7 +211,7 @@ class Settings(BaseSettings):
     paypal_mode: str = "sandbox"
     # Who the GST invoice for a wallet top-up is issued by. The state code (GST numeric,
     # e.g. "08" Rajasthan) decides CGST+SGST (same state) versus IGST (another state).
-    seller_legal_name: str = "CallPulse"
+    seller_legal_name: str = "CallPlus"
     seller_gstin: str = ""
     seller_state_code: str = ""
     seller_address: str = ""

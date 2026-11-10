@@ -11,7 +11,7 @@ from app.schemas.campaign import (
     CampaignCreate,
     CampaignRead,
 )
-from app.integrations.credentials import get_sarvam_api_key
+from app.integrations.credentials import get_llm_key
 from app.integrations.sarvam import SarvamAPIError
 from app.schemas.campaign import PlanRequest, PlanResponse, FromPlanRequest
 from app.services import campaign_planner, plans
@@ -256,7 +256,7 @@ async def plan_campaign(
             timezone=tenant.timezone if tenant else "Asia/Kolkata",
             tags=[t for (t,) in tag_rows.all()],
             customer_count=count,
-            api_key=await get_sarvam_api_key(db, ctx.tenant_id),
+            api_key=await get_llm_key(db, ctx.tenant_id),
         )
     except SarvamAPIError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "The AI helper is busy. Please try again.") from exc

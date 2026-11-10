@@ -445,11 +445,11 @@ async def test_the_invoice_escapes_what_the_customer_typed(client: AsyncClient, 
 # ---- charging usage -------------------------------------------------------------------------
 
 
-async def _call(tenant_id, agent_id, *, seconds: int, direction=CALL_OUTBOUND, when=None, with_agent=True) -> uuid.UUID:
+async def _call(tenant_id, agent_id, *, seconds: int, direction=CALL_OUTBOUND, when=None, with_agent=True, multiplier=1) -> uuid.UUID:
     async with session_scope() as db:
         call = Call(tenant_id=tenant_id, direction=direction, status=CallStatus.COMPLETED,
                     ai_agent_id=uuid.UUID(agent_id) if with_agent else None, duration_seconds=seconds,
-                    started_at=when or datetime.now(UTC))
+                    started_at=when or datetime.now(UTC), cost_multiplier=multiplier)
         db.add(call)
         await db.commit()
         return call.id
@@ -480,6 +480,18 @@ async def test_calls_are_charged_by_whole_minutes_at_the_rate_for_their_directio
     assert sorted(t["amount_paise"] for t in txs if t["kind"] == "call") == [-900, -800]
     assert {t["description"] for t in txs if t["kind"] == "call"} == {"Inbound call, 2 min", "Outbound call, 1 min"}
     assert min(t["balance_after_paise"] for t in txs) == 98_300
+
+
+async def test_a_call_on_a_premium_provider_of_the_platform_costs_extra_minutes(client: AsyncClient, razorpay):
+    auth, tenant_id = await _workspace(client, "w-premium")
+    await _profile(client, auth)
+    await _top_up(client, auth, 1_000, razorpay)  # 450 in per minute
+    agent = await _agent(client, auth)
+    await _call(tenant_id, agent, seconds=61, direction=CALL_INBOUND, multiplier=2.5)  # 2 min x 450 x 2.5 = 2250
+    txs = (await client.get("/api/v1/wallet/transactions", headers=auth)).json()
+    call_tx = [t for t in txs if t["kind"] == "call"]
+    assert [t["amount_paise"] for t in call_tx] == [-2_250]
+    assert "x 2.5" in call_tx[0]["description"]
 
 
 async def test_messages_are_charged_from_message_rows_and_usage_events(client: AsyncClient, razorpay):

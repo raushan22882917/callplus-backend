@@ -21,6 +21,7 @@ from app.api.v1 import (
     guardrails,
     insights,
     integrations,
+    voice_clones,
     internal,
     internal_exotel,
     internal_flowtest,
@@ -68,6 +69,7 @@ api_router.include_router(payments.router)
 api_router.include_router(workflows.router)
 api_router.include_router(campaigns.router)
 api_router.include_router(integrations.router)
+api_router.include_router(voice_clones.router)
 api_router.include_router(internal.router)
 api_router.include_router(internal_exotel.router)
 api_router.include_router(internal_flowtest.router)

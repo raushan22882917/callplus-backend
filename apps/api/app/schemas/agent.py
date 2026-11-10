@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from app.integrations.sarvam import SARVAM_LANGUAGES
+from app.integrations.providers import ALL_LANGUAGES
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from packages.database.models import AgentStatus
@@ -13,6 +13,8 @@ class AIAgentCreate(BaseModel):
     description: str | None = None
     language: str = "en-IN"
     voice: str | None = None
+    stt_provider: Literal["sarvam", "deepgram"] = "sarvam"
+    tts_provider: Literal["sarvam", "elevenlabs"] = "sarvam"
     greeting: str | None = None
     system_prompt: str = (
         "You are a helpful AI assistant for this business. Use the available "
@@ -33,8 +35,8 @@ class AIAgentCreate(BaseModel):
     @field_validator("language")
     @classmethod
     def _supported_language(cls, value: str | None) -> str | None:
-        if value is not None and value not in SARVAM_LANGUAGES:
-            raise ValueError(f"language must be one of: {', '.join(SARVAM_LANGUAGES)}")
+        if value is not None and value not in ALL_LANGUAGES:
+            raise ValueError(f"language must be one of: {', '.join(ALL_LANGUAGES)}")
         return value
 
 
@@ -44,6 +46,8 @@ class AIAgentUpdate(BaseModel):
     status: AgentStatus | None = None
     language: str | None = None
     voice: str | None = None
+    stt_provider: Literal["sarvam", "deepgram"] | None = None
+    tts_provider: Literal["sarvam", "elevenlabs"] | None = None
     greeting: str | None = None
     system_prompt: str | None = None
     max_call_duration_seconds: int | None = Field(default=None, ge=10, le=3600)
@@ -58,8 +62,8 @@ class AIAgentUpdate(BaseModel):
     @field_validator("language")
     @classmethod
     def _supported_language(cls, value: str | None) -> str | None:
-        if value is not None and value not in SARVAM_LANGUAGES:
-            raise ValueError(f"language must be one of: {', '.join(SARVAM_LANGUAGES)}")
+        if value is not None and value not in ALL_LANGUAGES:
+            raise ValueError(f"language must be one of: {', '.join(ALL_LANGUAGES)}")
         return value
 
 
@@ -72,6 +76,8 @@ class AIAgentRead(BaseModel):
     status: AgentStatus
     language: str
     voice: str | None
+    stt_provider: str
+    tts_provider: str
     greeting: str | None
     system_prompt: str
     max_call_duration_seconds: int

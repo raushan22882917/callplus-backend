@@ -25,6 +25,7 @@ from packages.database.models import (
     Tenant,
     Ticket,
     TicketPriority,
+    TicketStatus,
     WhatsAppAccount,
 )
 
@@ -83,6 +84,52 @@ async def get_customer(ctx: ToolContext, *, phone: str | None = None) -> dict:
         "phone": customer.phone,
         "email": customer.email,
         "tags": customer.tags,
+    }
+
+
+def _ticket_limit(limit: int) -> int:
+    try:
+        return min(max(int(limit), 1), 20)
+    except (TypeError, ValueError):
+        return 10
+
+
+async def list_open_tickets(
+    ctx: ToolContext, *, priority: str | None = None, limit: int = 10
+) -> dict:
+    """Open and pending tickets for the whole workspace, with the customer on each one.
+    Staff Ask AI uses this. A phone agent does not: it only sees one caller's tickets."""
+    stmt = (
+        select(Ticket, Customer.name, Customer.phone)
+        .join(Customer, Customer.id == Ticket.customer_id)
+        .where(
+            Ticket.tenant_id == ctx.tenant_id,
+            Customer.tenant_id == ctx.tenant_id,
+            Ticket.status.in_((TicketStatus.OPEN, TicketStatus.PENDING)),
+        )
+        .order_by(Ticket.created_at.desc())
+        .limit(_ticket_limit(limit))
+    )
+    if priority:
+        try:
+            stmt = stmt.where(Ticket.priority == TicketPriority(str(priority).lower()))
+        except ValueError:
+            return {"error": "priority must be low, medium, high, or urgent"}
+    rows = (await ctx.db.execute(stmt)).all()
+    return {
+        "tickets": [
+            {
+                "id": str(ticket.id),
+                "subject": ticket.subject,
+                "status": ticket.status.value,
+                "priority": ticket.priority.value,
+                "customer_id": str(ticket.customer_id),
+                "customer_name": name,
+                "customer_phone": phone,
+                "created_at": ticket.created_at.isoformat(),
+            }
+            for ticket, name, phone in rows
+        ]
     }
 
 

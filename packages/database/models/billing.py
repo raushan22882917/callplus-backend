@@ -84,6 +84,9 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("subscriptions.id", ondelete="SET NULL")
     )
     provider_payment_id: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    # The Razorpay or PayPal id of a payment the workspace chose to make. Overage rows keep
+    # their own key in provider_payment_id so a paid invoice is not billed a second time.
+    external_payment_id: Mapped[str | None] = mapped_column(String(64), unique=True)
     description: Mapped[str | None] = mapped_column(String(255))
     amount_paise: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), default="INR", nullable=False)

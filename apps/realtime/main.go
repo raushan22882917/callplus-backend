@@ -8,7 +8,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -89,6 +91,25 @@ func main() {
 			return
 		}
 		sess := session.NewBrowserTest(conn, cfg, sessionID, token)
+		go sess.Run()
+	})
+
+	// A visitor calling from a web page. The API created the call and signed this address for a few
+	// minutes; anything else is turned away before the WebSocket opens.
+	http.HandleFunc("/ws/web-call", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		callID := q.Get("call")
+		exp, err := strconv.ParseInt(q.Get("exp"), 10, 64)
+		if err != nil || !session.VerifyWebCall(cfg.InternalToken, callID, exp, q.Get("sig"), time.Now()) {
+			http.Error(w, "this call address is invalid or has expired", http.StatusForbidden)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("websocket upgrade failed: %v", err)
+			return
+		}
+		sess := session.NewWebCall(conn, cfg, callID)
 		go sess.Run()
 	})
 

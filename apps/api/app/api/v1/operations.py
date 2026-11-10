@@ -8,7 +8,7 @@ from app.core.exceptions import AppError, ConflictError, NotFoundError
 from app.core.permissions import Permissions
 from app.core.repository import TenantScopedRepository
 from app.schemas import operations as s
-from app.services import operations as svc
+from app.services import callbacks, operations as svc
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -497,6 +497,19 @@ async def list_appointments(
         query = query.where(Appointment.status == status_filter)
     rows = await db.execute(query.order_by(Appointment.start_at).limit(limit))
     return await _enrich_appointments(db, ctx.tenant_id, list(rows.scalars().all()))
+
+
+@router.get("/calendar-callbacks", response_model=s.CalendarCallbacksRead)
+async def calendar_callbacks(
+    start: datetime | None = Query(default=None, alias="from"),
+    end: datetime | None = Query(default=None, alias="to"),
+    ctx: RequestContext = Depends(require_permission(CUSTOMER_READ)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Callback requests and scheduled call-backs, placed at the time the customer asked for."""
+    if start is None or end is None:
+        raise BadRequest("from and to are required")
+    return await callbacks.calendar_callbacks(db, ctx.tenant_id, start, end)
 
 
 @router.post("/appointments", response_model=s.AppointmentRead, status_code=201)

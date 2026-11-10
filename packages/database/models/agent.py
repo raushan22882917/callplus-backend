@@ -26,6 +26,14 @@ class AIAgent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     )
     language: Mapped[str] = mapped_column(String(10), default="en-IN", nullable=False)
     voice: Mapped[str | None] = mapped_column(String(100))
+    # Who hears and who speaks for this agent: "sarvam" (India) or, with the workspace's own key,
+    # "deepgram" to hear and "elevenlabs" to speak (the rest of the world). See app/integrations/providers.py.
+    stt_provider: Mapped[str] = mapped_column(
+        String(20), default="sarvam", server_default="sarvam", nullable=False
+    )
+    tts_provider: Mapped[str] = mapped_column(
+        String(20), default="sarvam", server_default="sarvam", nullable=False
+    )
     greeting: Mapped[str | None] = mapped_column(String(1000))
     # Free-form system prompt / behaviour config for the active version. Full
     # history lives in AIAgentVersion; this is a denormalized "current" copy

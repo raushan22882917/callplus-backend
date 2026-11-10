@@ -11,7 +11,7 @@ import uuid
 
 from app.core.deps import get_db
 from app.core.internal_auth import require_internal_service
-from app.integrations.credentials import get_sarvam_api_key
+from app.integrations.credentials import get_sarvam_api_key, speech_settings
 from app.integrations.sarvam import SarvamAPIError
 from app.services import test_sessions
 from app.services.test_engine import TestVariables, actions_from_events, opening_line, run_test_turn
@@ -47,10 +47,15 @@ async def test_call_config(sid: str, token: str = "", db: AsyncSession = Depends
     if not token or token != data.get("token"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Bad test session token")
     agent = await _agent(db, data)
+    speech = await speech_settings(db, agent.tenant_id, agent)
+    speech.pop("cost_multiplier", None)  # a test call is not billed
+    voice = speech.pop("voice")
     return {
         "sarvam_api_key": await get_sarvam_api_key(db, agent.tenant_id) or "",
+        **speech,
+        "stt_language": agent.language or "",
         "language": agent.language or "en-IN",
-        "voice": agent.voice or "",
+        "voice": voice,
         "greeting": opening_line(agent),
         "max_call_duration_seconds": agent.max_call_duration_seconds,
         "max_duration_message": agent.max_duration_message,
@@ -86,14 +91,24 @@ async def test_call_turn(sid: str, payload: TurnIn, db: AsyncSession = Depends(g
             track=False,  # live-call speed; the browser asks for the node separately
             prior_actions=data.get("actions") or [],
         )
-    except SarvamAPIError:
+    except SarvamAPIError as exc:
         r = None
+        failure = str(exc)
+    else:
+        failure = None
     if r is None:
-        reply = "Sorry, I'm having trouble right now."
+        reply = "I could not reach the language model."
         history.append({"role": "assistant", "content": reply, "id": uuid.uuid4().hex})
         data["history"] = history
         await test_sessions.save(sid, data)
-        return {"reply_text": reply, "action": "none", "reason": None, "reply_message_id": history[-1]["id"], "events": [], "error": "model unavailable"}
+        return {
+            "reply_text": reply,
+            "action": "none",
+            "reason": None,
+            "reply_message_id": history[-1]["id"],
+            "events": [],
+            "error": failure or "model unavailable",
+        }
     message_id = uuid.uuid4().hex
     history.append({"role": "assistant", "content": r.reply, "id": message_id})
     data["history"] = history

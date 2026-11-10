@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from app.integrations.credentials import get_sarvam_api_key
+from app.integrations.credentials import get_llm_key
 from app.integrations.sarvam import SarvamAPIError, chat_completion
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -355,7 +355,7 @@ async def score_call(
                 {"role": "system", "content": scorecard_prompt(scorecard)},
                 {"role": "user", "content": transcript[-12000:]},
             ],
-            api_key=await get_sarvam_api_key(db, call.tenant_id),
+            api_key=await get_llm_key(db, call.tenant_id),
             temperature=0,
             max_tokens=4096,
             timeout=60.0,

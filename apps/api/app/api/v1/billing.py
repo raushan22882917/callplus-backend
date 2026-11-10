@@ -1,16 +1,25 @@
 import uuid
+from datetime import UTC, datetime
 
 from app.core.audit import log_audit_event
 from app.core.deps import RequestContext, get_db, require_permission, require_platform_admin
 from app.core.exceptions import NotFoundError
 from app.core.permissions import Permissions
 from app.core.repository import TenantScopedRepository
+from app.core.config import get_settings
+from app.integrations import paypal_client
 from app.integrations.razorpay_client import RazorpayAPIError
 from app.integrations.razorpay_client import cancel_subscription as razorpay_cancel_subscription
+from app.integrations.razorpay_client import create_order as razorpay_create_order
 from app.integrations.razorpay_client import create_subscription as razorpay_create_subscription
+from app.integrations.razorpay_client import fetch_payment as razorpay_fetch_payment
+from app.integrations.razorpay_client import verify_checkout_signature
 from app.schemas.billing import (
     CancelSubscriptionRequest,
     CreateSubscriptionRequest,
+    InvoiceCheckout,
+    InvoiceConfirm,
+    InvoicePayPalConfirm,
     InvoiceRead,
     PlanAdminRead,
     PlanCreate,
@@ -23,7 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import Invoice, Plan, Subscription, SubscriptionStatus, Tenant
+from packages.database.models import Invoice, InvoiceStatus, Plan, Subscription, SubscriptionStatus, Tenant
 
 router = APIRouter(prefix="/billing", tags=["billing"])
 
@@ -197,6 +206,138 @@ async def list_invoices(
     db: AsyncSession = Depends(get_db),
 ) -> list[Invoice]:
     return await InvoiceRepository(db, ctx.tenant_id).list(limit=limit, offset=offset)
+
+
+@router.post("/invoices/{invoice_id}/checkout", response_model=InvoiceCheckout)
+async def checkout_invoice(
+    invoice_id: uuid.UUID,
+    ctx: RequestContext = Depends(require_permission(Permissions.BILLING_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> InvoiceCheckout:
+    """Opens a payment for one pending invoice. The card is charged only after the workspace pays."""
+    invoice = await InvoiceRepository(db, ctx.tenant_id).get(invoice_id)
+    if invoice.status != InvoiceStatus.PENDING or invoice.amount_paise <= 0:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This invoice is not waiting for a payment.")
+    description = (invoice.description or "CallPlus invoice")[:255]
+    try:
+        order = await razorpay_create_order(
+            amount_paise=invoice.amount_paise,
+            receipt=str(invoice.id),
+            notes={"invoice_id": str(invoice.id), "tenant_id": str(ctx.tenant_id)},
+        )
+    except RazorpayAPIError as exc:
+        raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(exc)) from exc
+    paypal_id = None
+    paypal_url = None
+    settings = get_settings()
+    if settings.paypal_client_id and settings.paypal_client_secret:
+        try:
+            paypal = await paypal_client.create_order(
+                amount_paise=invoice.amount_paise, receipt=str(invoice.id), custom_id=str(invoice.id)
+            )
+        except paypal_client.PayPalAPIError as exc:
+            raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(exc)) from exc
+        paypal_id, paypal_url = paypal["id"], paypal.get("approve_url")
+    return InvoiceCheckout(
+        key_id=settings.razorpay_key_id,
+        order_id=order["id"],
+        amount_paise=invoice.amount_paise,
+        currency=invoice.currency,
+        description=description,
+        paypal_order_id=paypal_id,
+        paypal_approve_url=paypal_url,
+    )
+
+
+@router.post("/invoices/{invoice_id}/confirm", response_model=InvoiceRead)
+async def confirm_invoice(
+    invoice_id: uuid.UUID,
+    payload: InvoiceConfirm,
+    ctx: RequestContext = Depends(require_permission(Permissions.BILLING_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> Invoice:
+    """Marks the invoice paid after Razorpay's signature and the captured amount both match."""
+    invoice = await InvoiceRepository(db, ctx.tenant_id).get(invoice_id)
+    if invoice.status == InvoiceStatus.PAID:
+        return invoice
+    if invoice.status != InvoiceStatus.PENDING:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This invoice is not waiting for a payment.")
+    try:
+        if not verify_checkout_signature(
+            order_id=payload.order_id, payment_id=payload.payment_id, signature=payload.signature
+        ):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "The payment could not be verified.")
+        payment = await razorpay_fetch_payment(payload.payment_id)
+    except RazorpayAPIError as exc:
+        raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(exc)) from exc
+    notes = payment.get("notes") or {}
+    if str(notes.get("invoice_id") or "") != str(invoice.id):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This payment is for a different invoice.")
+    if payment.get("status") != "captured" or int(payment.get("amount") or 0) != invoice.amount_paise:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Razorpay has not captured this amount.")
+    taken = await db.execute(select(Invoice.id).where(Invoice.external_payment_id == payload.payment_id))
+    if taken.scalar_one_or_none() is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This payment was already used.")
+    invoice.status = InvoiceStatus.PAID
+    invoice.paid_at = datetime.now(UTC)
+    invoice.external_payment_id = payload.payment_id
+    await log_audit_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_user_id=ctx.user_id,
+        action="invoice.paid",
+        resource_type="invoice",
+        resource_id=invoice.id,
+        extra={"amount_paise": invoice.amount_paise, "via": "razorpay"},
+    )
+    await db.commit()
+    await db.refresh(invoice)
+    return invoice
+
+
+@router.post("/invoices/{invoice_id}/paypal", response_model=InvoiceRead)
+async def confirm_invoice_paypal(
+    invoice_id: uuid.UUID,
+    payload: InvoicePayPalConfirm,
+    ctx: RequestContext = Depends(require_permission(Permissions.BILLING_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> Invoice:
+    """Captures a PayPal order the workspace approved, and marks the invoice paid when the amount matches."""
+    order_id = payload.order_id
+    invoice = await InvoiceRepository(db, ctx.tenant_id).get(invoice_id)
+    if invoice.status == InvoiceStatus.PAID:
+        return invoice
+    if invoice.status != InvoiceStatus.PENDING:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This invoice is not waiting for a payment.")
+    try:
+        order = await paypal_client.capture_order(order_id)
+    except paypal_client.PayPalAPIError as exc:
+        raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(exc)) from exc
+    captured = paypal_client.capture_from_order(order)
+    if captured is None or captured[2] != invoice.currency:
+        raise HTTPException(status.HTTP_409_CONFLICT, "PayPal has not completed this payment.")
+    payment_id, paid_paise, _currency = captured
+    if paid_paise != invoice.amount_paise:
+        raise HTTPException(status.HTTP_409_CONFLICT, "PayPal captured a different amount.")
+    units = (order.get("purchase_units") or [{}])
+    custom = str((units[0] or {}).get("custom_id") or "")
+    if custom != str(invoice.id):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This PayPal order is for a different invoice.")
+    invoice.status = InvoiceStatus.PAID
+    invoice.paid_at = datetime.now(UTC)
+    invoice.external_payment_id = payment_id[:64]
+    await log_audit_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_user_id=ctx.user_id,
+        action="invoice.paid",
+        resource_type="invoice",
+        resource_id=invoice.id,
+        extra={"amount_paise": invoice.amount_paise, "via": "paypal"},
+    )
+    await db.commit()
+    await db.refresh(invoice)
+    return invoice
 
 
 # --- Platform-admin plan catalog management ---

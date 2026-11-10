@@ -23,6 +23,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 from app.core.config import get_settings
+from app.integrations.llm import LlmEndpoint
 
 logger = logging.getLogger(__name__)
 
@@ -153,16 +154,46 @@ async def warm_connection() -> None:
         logger.debug("sarvam warm-up request failed", exc_info=True)
 
 
+async def _endpoint_completion(
+    endpoint: LlmEndpoint,
+    *,
+    messages: list[dict],
+    tools: list[dict] | None,
+    temperature: float,
+    max_tokens: int | None,
+    timeout: float,
+) -> dict:
+    """One chat-completions request to the workspace's own OpenAI-compatible model."""
+    payload: dict = {"model": endpoint.model, "messages": messages, "temperature": temperature}
+    if tools:
+        payload["tools"] = tools
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+    try:
+        response = await _http().post(
+            endpoint.url, headers={"Authorization": f"Bearer {endpoint.api_key}"}, json=payload, timeout=timeout
+        )
+    except httpx.HTTPError as exc:
+        raise SarvamAPIError(f"{endpoint.label} request failed: {exc}") from exc
+    if response.status_code >= 400:
+        raise SarvamAPIError(f"{endpoint.label} request failed ({response.status_code}): {response.text[:300]}")
+    return response.json()
+
+
 async def chat_completion(
     *,
     messages: list[dict],
     tools: list[dict] | None = None,
     temperature: float = 0.3,
-    api_key: str | None = None,
+    api_key: "str | LlmEndpoint | None" = None,
     max_tokens: int | None = None,
     timeout: float = 30.0,
     reasoning_effort: str | None = None,
 ) -> dict:
+    if isinstance(api_key, LlmEndpoint):
+        return await _endpoint_completion(
+            api_key, messages=messages, tools=tools, temperature=temperature, max_tokens=max_tokens, timeout=timeout
+        )
     key = api_key if api_key is not None else get_settings().sarvam_api_key
     if not key:
         raise SarvamAPIError("Connect your own Sarvam API key under Integrations.")
@@ -243,7 +274,7 @@ async def chat_completion_stream(
     messages: list[dict],
     tools: list[dict] | None = None,
     temperature: float = 0.3,
-    api_key: str | None = None,
+    api_key: "str | LlmEndpoint | None" = None,
     reasoning_effort: str | None = None,
     timeout: float = 30.0,
 ) -> AsyncIterator[dict]:
@@ -259,13 +290,16 @@ async def chat_completion_stream(
     token, it falls back to one ordinary request, so a streaming problem never
     costs the caller their reply. A failure after tokens were delivered is
     raised as SarvamAPIError, since those words were already spoken."""
-    key = api_key if api_key is not None else get_settings().sarvam_api_key
+    endpoint = api_key if isinstance(api_key, LlmEndpoint) else None
+    key = endpoint.api_key if endpoint else (api_key if api_key is not None else get_settings().sarvam_api_key)
     if not key:
         raise SarvamAPIError("Connect your own Sarvam API key under Integrations.")
+    label = endpoint.label if endpoint else "Sarvam"
+    url = endpoint.url if endpoint else SARVAM_CHAT_URL
 
-    fast = reasoning_effort == "low"
+    fast = reasoning_effort == "low" and endpoint is None
     payload: dict = {
-        "model": SARVAM_FAST_CHAT_MODEL if fast else SARVAM_CHAT_MODEL,
+        "model": endpoint.model if endpoint else (SARVAM_FAST_CHAT_MODEL if fast else SARVAM_CHAT_MODEL),
         "messages": messages,
         "temperature": temperature,
         "stream": True,
@@ -281,7 +315,7 @@ async def chat_completion_stream(
     try:
         async with _http().stream(
             "POST",
-            SARVAM_CHAT_URL,
+            url,
             headers={"Authorization": f"Bearer {key}"},
             json=payload,
             timeout=httpx.Timeout(timeout, read=wait),
@@ -289,7 +323,7 @@ async def chat_completion_stream(
             if response.status_code >= 400:
                 body = (await response.aread()).decode("utf-8", "replace")
                 if response.status_code in (401, 403):
-                    raise SarvamAPIError(f"Sarvam chat completion failed ({response.status_code}): {body}")
+                    raise SarvamAPIError(f"{label} chat completion failed ({response.status_code}): {body}")
                 raise _StreamUnavailable(f"HTTP {response.status_code}: {body[:200]}")
             async for line in response.aiter_lines():
                 if not line.startswith("data:"):
@@ -327,13 +361,13 @@ async def chat_completion_stream(
         raise
     except (httpx.HTTPError, _StreamUnavailable) as exc:
         if delivered:
-            raise SarvamAPIError(f"Sarvam stream interrupted: {exc}") from exc
-        logger.warning("Sarvam stream unavailable (%s); using a normal request", exc)
+            raise SarvamAPIError(f"{label} stream interrupted: {exc}") from exc
+        logger.warning("%s stream unavailable (%s); using a normal request", label, exc)
         completion = await chat_completion(
             messages=messages,
             tools=tools,
             temperature=temperature,
-            api_key=key,
+            api_key=endpoint or key,
             reasoning_effort=reasoning_effort,
             timeout=timeout,
         )

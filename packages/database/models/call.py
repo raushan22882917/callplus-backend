@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -73,6 +73,11 @@ class Call(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # {question: answer} extracted from the transcript afterwards.
     mission: Mapped[dict | None] = mapped_column(JSONB)
     answers: Mapped[dict | None] = mapped_column(JSONB)
+    # Minutes counted per call minute: 1 normally, more when the call used a premium provider on the platform's own
+    # account (see app/integrations/managed.py). Plans and the wallet multiply a call's minutes by this.
+    cost_multiplier: Mapped[float] = mapped_column(
+        Numeric(6, 2), default=1, server_default="1", nullable=False
+    )
 
     __table_args__ = (
         Index("ix_calls_tenant_status", "tenant_id", "status"),

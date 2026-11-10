@@ -21,6 +21,7 @@ from packages.database.models import (
     MissedCall,
     PhoneNumber,
     Tenant,
+    Ticket,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -57,6 +58,25 @@ def test_nonsense_and_far_future_are_refused_and_the_past_means_now():
     assert callbacks.parse_when("in 90 days", now=NOW, tz=IST) is None
     soon = callbacks.parse_when(None, minutes_from_now=-5, now=NOW, tz=IST)
     assert soon is not None and soon - NOW.astimezone(UTC) <= timedelta(seconds=30)
+
+
+def test_a_callback_ticket_keeps_the_day_the_customer_meant():
+    created = datetime(2026, 10, 20, 13, 19, tzinfo=IST)
+    parsed = callbacks.when_from_callback_subject(
+        "Callback requested for today at 4 PM — Air fitting appointment requested by customer",
+        created,
+        IST,
+    )
+    assert parsed is not None
+    due, note = parsed
+    assert due.astimezone(IST) == datetime(2026, 10, 20, 16, 0, tzinfo=IST)
+    assert note.startswith("Air fitting")
+    tomorrow = callbacks.when_from_callback_subject(
+        "Callback requested for tomorrow at 2 PM — Haircut appointment request",
+        datetime(2026, 10, 3, 12, 2, tzinfo=IST),
+        IST,
+    )
+    assert tomorrow is not None and tomorrow[0].astimezone(IST) == datetime(2026, 10, 4, 14, 0, tzinfo=IST)
 
 
 def test_the_ai_can_say_the_time_back():
@@ -128,6 +148,41 @@ async def test_asking_for_a_callback_schedules_an_ai_call_and_a_second_ask_moves
     assert len(rows) == 1  # moved, not duplicated
     assert rows[0].channel == "call" and rows[0].payload["from_number"] == "+919800011111"
     assert rows[0].payload["reason"] == "wants a haircut slot"
+
+
+async def test_callback_tickets_show_on_the_calendar_at_the_time_that_was_asked(
+    db_session: AsyncSession,
+):
+    tenant, customer, _call = await _setup(db_session)
+    ticket = Ticket(
+        tenant_id=tenant.id,
+        customer_id=customer.id,
+        subject="Callback requested for today at 4 PM — Air fitting appointment",
+        created_at=datetime(2026, 10, 20, 13, 19, tzinfo=IST),
+    )
+    db_session.add(ticket)
+    await db_session.commit()
+
+    week = await callbacks.calendar_callbacks(
+        db_session,
+        tenant.id,
+        datetime(2026, 10, 20, 0, 0, tzinfo=IST),
+        datetime(2026, 10, 21, 0, 0, tzinfo=IST),
+    )
+    assert len(week["events"]) == 1
+    assert week["events"][0]["title"] == "Asha"
+    assert week["events"][0]["detail"] == "Air fitting appointment"
+    assert week["events"][0]["start_at"].astimezone(IST) == datetime(2026, 10, 20, 16, 0, tzinfo=IST)
+    assert week["nearest_at"] is None
+
+    later = await callbacks.calendar_callbacks(
+        db_session,
+        tenant.id,
+        datetime(2026, 11, 9, 0, 0, tzinfo=IST),
+        datetime(2026, 11, 16, 0, 0, tzinfo=IST),
+    )
+    assert later["events"] == []
+    assert later["nearest_at"].astimezone(IST) == datetime(2026, 10, 20, 16, 0, tzinfo=IST)
 
 
 async def test_unclear_time_still_reaches_staff(db_session: AsyncSession):

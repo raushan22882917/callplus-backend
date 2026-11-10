@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from app.core.config import get_settings
 from app.core.deps import get_db
 from app.core.internal_auth import require_internal_service
-from app.integrations.credentials import get_sarvam_api_key, get_twilio_credentials
+from app.integrations.credentials import get_sarvam_api_key, get_twilio_credentials, speech_settings
 from app.integrations.sarvam import speakable
 from app.integrations.twilio_client import (
     MAX_RING_TARGETS,
@@ -161,10 +161,20 @@ async def call_config(call_id: uuid.UUID, db: AsyncSession = Depends(get_db)) ->
             no_response_end_message="I'm still not hearing anything, so I'll end the call here.",
         )
 
+    speech = await speech_settings(db, call.tenant_id, agent)
+    # A call on a premium provider of the platform's own counts extra minutes (see integrations/managed.py).
+    multiplier = float(speech.pop("cost_multiplier"))
+    voice = speech.pop("voice")
+    call.cost_multiplier = multiplier
+    await db.commit()
+    own_speech = speech["stt_provider"] != "sarvam" or speech["tts_provider"] != "sarvam"
     return CallConfigResponse(
         sarvam_api_key=sarvam_api_key,
-        language=speakable(agent.language),
-        voice=agent.voice or "priya",
+        # Sarvam voices only know their own language codes; other providers take the agent's language as set.
+        language=agent.language if own_speech else speakable(agent.language),
+        stt_language=agent.language,
+        **speech,
+        voice=voice,
         greeting=" ".join(
             part
             for part in (await privacy.call_disclosure(db, call.tenant_id), agent.greeting or "")
@@ -173,7 +183,7 @@ async def call_config(call_id: uuid.UUID, db: AsyncSession = Depends(get_db)) ->
         # The agent's own cap, the plan's per-call cap and the minutes left in the
         # plan's allowance, whichever is smallest (see services/plans.py).
         max_call_duration_seconds=await plans.effective_max_call_seconds(
-            db, call.tenant_id, agent.max_call_duration_seconds
+            db, call.tenant_id, agent.max_call_duration_seconds, cost_multiplier=multiplier
         ),
         max_duration_message=agent.max_duration_message,
         no_response_timeout_seconds=agent.no_response_timeout_seconds,

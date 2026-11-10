@@ -79,3 +79,25 @@ class InvoiceRead(BaseModel):
     status: InvoiceStatus
     issued_at: datetime
     paid_at: datetime | None
+
+
+class InvoiceCheckout(BaseModel):
+    """What the browser needs to open a payment the workspace chose to make. Nothing is charged until they pay."""
+
+    key_id: str | None = None
+    order_id: str | None = None
+    amount_paise: int
+    currency: str
+    description: str
+    paypal_order_id: str | None = None
+    paypal_approve_url: str | None = None
+
+
+class InvoiceConfirm(BaseModel):
+    order_id: str
+    payment_id: str
+    signature: str
+
+
+class InvoicePayPalConfirm(BaseModel):
+    order_id: str = Field(min_length=1)

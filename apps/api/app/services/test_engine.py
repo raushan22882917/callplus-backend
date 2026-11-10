@@ -22,7 +22,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from app.integrations.credentials import get_sarvam_api_key
+from app.integrations.credentials import get_llm_key
 from app.integrations.sarvam import SarvamAPIError, chat_completion
 from app.services import guardrails
 from app.services.agent_engine import (
@@ -221,7 +221,7 @@ async def run_test_turn(
     track=False skips the step tracker so the reply comes back at live-call speed;
     the Flow Studio then asks for the node separately (POST .../test-track)."""
     started = time.perf_counter()
-    api_key = await get_sarvam_api_key(db, agent.tenant_id)
+    api_key = await get_llm_key(db, agent.tenant_id)
     events: list[dict] = []
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 

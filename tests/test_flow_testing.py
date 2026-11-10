@@ -1,6 +1,10 @@
 """Flow Studio test engine + scenario scoring (no network: pure functions only)."""
 
 import asyncio
+import uuid
+
+import pytest
+from httpx import AsyncClient
 
 from app.services.agent_engine import CONVERSATION_RULES, TOOL_HONESTY_RULES, VOICE_STYLE_RULES
 from app.services.scenario_runner import evaluate
@@ -109,3 +113,37 @@ def test_agent_is_told_what_it_already_did_so_it_does_not_book_twice():
     assert _other_number("919876543210", "+919876543210") is None
     assert _other_number("+91 90000 00000", "+919876543210") == "+91 90000 00000"
     assert _other_number(None, "+919876543210") is None
+
+
+async def test_a_failed_model_is_not_spoken_as_the_agent(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.integrations.sarvam import SarvamAPIError
+
+    async def down(*, messages, tools=None, api_key=None, **kwargs):
+        raise SarvamAPIError("Connect your own Sarvam API key under Integrations.")
+
+    monkeypatch.setattr("app.services.agent_engine.chat_completion", down)
+    tag = uuid.uuid4().hex[:8]
+    signed = await client.post(
+        "/api/v1/auth/signup",
+        json={
+            "company_name": "Salon",
+            "tenant_slug": f"salon-{tag}",
+            "full_name": "Owner",
+            "email": f"owner-{tag}@example.com",
+            "password": "supersecret1",
+        },
+    )
+    assert signed.status_code == 201, signed.text
+    headers = {"Authorization": f"Bearer {signed.json()['access_token']}"}
+    agent = await client.post("/api/v1/ai-agents", headers=headers, json={"name": "Receptionist"})
+    assert agent.status_code == 201, agent.text
+    turn = await client.post(
+        f"/api/v1/ai-agents/{agent.json()['id']}/test-turn",
+        headers=headers,
+        json={"messages": [{"role": "user", "content": "hi"}], "channel": "voice"},
+    )
+    assert turn.status_code == 424, turn.text
+    assert "Sarvam" in turn.json()["detail"]
+    assert "human" not in turn.json()["detail"]

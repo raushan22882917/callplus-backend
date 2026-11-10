@@ -79,6 +79,14 @@ type CallConfig struct {
 	MaxNoResponseRetries     int    `json:"max_no_response_retries"`
 	NoResponsePrompt         string `json:"no_response_prompt"`
 	NoResponseEndMessage     string `json:"no_response_end_message"`
+
+	// Who hears and speaks for this call. Empty (or "sarvam") means Sarvam, with SarvamAPIKey above.
+	STTProvider string `json:"stt_provider"`
+	STTAPIKey   string `json:"stt_api_key"`
+	STTLanguage string `json:"stt_language"`
+	TTSProvider string `json:"tts_provider"`
+	TTSAPIKey   string `json:"tts_api_key"`
+	TTSModel    string `json:"tts_model"`
 }
 
 func (c *Client) GetCallConfig(callID string) (*CallConfig, error) {

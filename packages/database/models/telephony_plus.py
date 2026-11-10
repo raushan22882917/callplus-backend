@@ -122,6 +122,10 @@ class CampaignDialerSettings(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, Times
     quiet_hours_start: Mapped[str] = mapped_column(String(5), default="21:00", nullable=False)
     quiet_hours_end: Mapped[str] = mapped_column(String(5), default="09:00", nullable=False)
     daily_call_limit: Mapped[int | None] = mapped_column(Integer)
+    # Most calls any one person may get from this workspace in 24 hours / 7 days, counted across every
+    # campaign and retry (not just this one). Empty means no cap.
+    per_customer_daily_cap: Mapped[int | None] = mapped_column(Integer)
+    per_customer_weekly_cap: Mapped[int | None] = mapped_column(Integer)
     max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     # Minutes to wait before attempt 2, 3, ...; the last value repeats.
     retry_schedule_minutes: Mapped[list] = mapped_column(

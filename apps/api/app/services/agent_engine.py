@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from app.core.config import get_settings
-from app.integrations.credentials import get_sarvam_api_key
+from app.integrations.credentials import get_llm_key
+from app.integrations.llm import LlmEndpoint
 from app.integrations.sarvam import (
     SARVAM_LANGUAGES,
     SARVAM_TTS_LANGUAGES,
@@ -69,6 +70,7 @@ MAX_HISTORY_MESSAGES = 20
 # transfer_call) — those don't mean anything outside a live customer conversation.
 ASSISTANT_TOOL_NAMES = (
     "get_customer",
+    "list_open_tickets",
     "list_recent_tickets",
     "create_ticket",
     "add_customer_note",
@@ -215,6 +217,64 @@ CONVERSATION_RULES = (
     "When everything is done and the caller says thank you or goodbye, answer with one short goodbye and nothing else, "
     "and never ask further questions after that."
 )
+
+# For an agent that hears with Deepgram or speaks with ElevenLabs: the same conversation protocol without the
+# India-specific register, scripts and units. The voice says whatever the reply is written in, in its normal script.
+INTERNATIONAL_HUMAN_VOICE_RULES = (
+    "\n\nSound like a real person on the phone, not a script or an assistant. "
+    "Talk like a warm, relaxed receptionist: everyday words, short sentences, one idea at a time. "
+    "Start by reacting to what they just said in a few words when it fits, but never open two replies in a row the "
+    "same way, and skip the reaction when the answer is already one short sentence. "
+    "Use natural contractions where the language has them. "
+    "Never say or write stock phrases like: 'I understand your concern', 'certainly', 'absolutely', 'I apologize for "
+    "the inconvenience', 'kindly', 'assist', 'how may I assist you', 'feel free to', 'is there anything else I can "
+    "help you with today'. Say it the way a neighbour would: 'Anything else?'. "
+    "Do not repeat back what the caller just told you, do not summarise, and do not thank them in every reply. "
+    "If you don't know something, say so plainly and say who will find out, instead of a long apology. "
+    "Say times, prices and dates the way people say them aloud in the caller's language and local style, never as "
+    "digits and symbols. "
+    "A very short answer is often the most natural one. "
+    "Be honest about what you are: you are the business's AI assistant. If the caller asks whether you are a robot, "
+    "an AI, a machine or a real person, say plainly and warmly that you are an AI assistant, and offer to connect "
+    "them to a person if they would prefer. Never claim to be human."
+)
+
+
+def international_conversation_rules(language_name: str) -> str:
+    return (
+        "\n\nConversation rules: "
+        f"Start the call in {language_name}. Callers may speak any language. "
+        "Reply in the language the caller used in their latest message, written in that language's normal script and "
+        "spelling, because the voice reads your words aloud as written. "
+        "Do not switch language on your own: if the caller's latest message is in one language, reply only in it. "
+        "Greet only once, at the start; after that never say welcome or the business name again. "
+        "Collect what you need in this order, one question per turn: what they want, the day and time, "
+        "then confirm the contact number. Never ask about the phone number before you know the service and the time. "
+        "Never ask anything you already know from the conversation, such as their name or the number they are calling from. "
+        "Never offer to have someone else call, or to call another number, unless the caller asks for it. "
+        "Never read out ticket numbers, reference ids or record ids; just say the request is noted. "
+        "Only apologise if something actually went wrong in this conversation. "
+        "Speech recognition on phone lines makes mistakes: if the caller's words are unclear, do not guess; ask them once to repeat. "
+        "When everything is done and the caller says thank you or goodbye, answer with one short goodbye and nothing else, "
+        "and never ask further questions after that."
+    )
+
+
+def voice_rules_for(agent) -> str:
+    """The phone-call rules appended to an agent's prompt. Indian-market agents (Sarvam hears and speaks) get the
+    India-tuned set; an agent on Deepgram or ElevenLabs gets the international one."""
+    if (getattr(agent, "stt_provider", "sarvam") or "sarvam") == "sarvam" and (
+        getattr(agent, "tts_provider", "sarvam") or "sarvam"
+    ) == "sarvam":
+        return VOICE_STYLE_RULES + HUMAN_VOICE_RULES + gender_note(agent.voice) + CONVERSATION_RULES
+    from app.integrations.providers import ALL_LANGUAGES
+
+    return (
+        VOICE_STYLE_RULES
+        + INTERNATIONAL_HUMAN_VOICE_RULES
+        + international_conversation_rules(ALL_LANGUAGES.get(agent.language, "English"))
+    )
+
 
 # WhatsApp brings messages the model can't open. They arrive as a short label.
 WHATSAPP_RULES = (
@@ -499,8 +559,16 @@ ASSISTANT_SYSTEM_PROMPT = (
     "also just answer general questions, draft text, or help think something "
     "through — like a general-purpose assistant. If a question has nothing to do "
     "with this business's data, just answer it directly without trying to force "
-    "a tool call."
+    "a tool call. When staff ask what is open, urgent, or waiting, call "
+    "list_open_tickets (pass priority only if they named one) and answer from "
+    "those rows, including each customer's name. Never say you cannot see tickets."
 )
+
+STAFF_MODEL_UNAVAILABLE = (
+    "I could not reach the language model. "
+    "Connect your Sarvam key under Integrations, then ask again."
+)
+MODEL_TROUBLE = "Sorry, I'm having trouble right now — let me get a human to help you."
 
 
 @dataclass
@@ -579,7 +647,7 @@ async def _run_tool_loop(
     messages: list[dict],
     llm_tools: list[dict],
     tool_ctx: ToolContext,
-    sarvam_api_key: str | None,
+    sarvam_api_key: "str | LlmEndpoint | None",
     executor: ToolExecutor = execute_tool,
     on_event: EventHook | None = None,
     reasoning_effort: str | None = None,
@@ -596,7 +664,7 @@ async def _run_tool_loop(
     """
     transfer_requested = False
     transfer_reason: str | None = None
-    reply_text = "Sorry, I'm having trouble right now — let me get a human to help you."
+    reply_text = MODEL_TROUBLE
 
     try:
         for _ in range(MAX_TOOL_ITERATIONS):
@@ -658,8 +726,9 @@ async def _run_tool_loop(
             reply_text = "Let me connect you with a colleague who can take it from here."
             transfer_requested = True
             transfer_reason = "tool-call loop exceeded max iterations"
-    except SarvamAPIError:
-        pass
+    except SarvamAPIError as exc:
+        logger.warning("language model call failed: %s", exc)
+        raise
 
     return reply_text, transfer_requested, transfer_reason
 
@@ -669,7 +738,7 @@ class _TurnPrep:
     messages: list[dict]
     llm_tools: list[dict]
     tool_ctx: ToolContext
-    sarvam_api_key: str | None
+    sarvam_api_key: "str | LlmEndpoint | None"
     guardrail_rules: list
     is_voice: bool
 
@@ -717,13 +786,13 @@ async def _prepare_turn(
 
     history = await _recent_history(db, conversation.id)
     llm_tools = await _enabled_tools_for_agent(db, agent.id)
-    sarvam_api_key = await get_sarvam_api_key(db, tenant_id)
+    sarvam_api_key = await get_llm_key(db, tenant_id)
     is_voice = conversation.channel == ConversationChannel.VOICE
     customer = await db.get(Customer, conversation.customer_id) if conversation.customer_id else None
     system_prompt = (
         agent.system_prompt
         + TOOL_HONESTY_RULES
-        + ((VOICE_STYLE_RULES + HUMAN_VOICE_RULES + gender_note(agent.voice) + CONVERSATION_RULES) if is_voice else "")
+        + (voice_rules_for(agent) if is_voice else "")
         + (WHATSAPP_RULES if conversation.channel == ConversationChannel.WHATSAPP else "")
         + (caller_context(customer.phone, customer.name, voice=is_voice) if customer else "")
         + await _customer_history(db, conversation)
@@ -763,15 +832,19 @@ async def _finish_buffered(
     prep: _TurnPrep,
 ) -> TurnResult:
     messages, guardrail_rules, is_voice = prep.messages, prep.guardrail_rules, prep.is_voice
-    reply_text, transfer_requested, transfer_reason = await _run_tool_loop(
-        messages=messages,
-        llm_tools=prep.llm_tools,
-        tool_ctx=prep.tool_ctx,
-        sarvam_api_key=prep.sarvam_api_key,
-        # "low" = Sarvam's fast conversational model (~0.4s a reply). The reasoning model takes 8-10s,
-        # far too slow for a customer waiting in a chat window. It stays as the automatic fallback.
-        reasoning_effort="low" if (is_voice or get_settings().fast_model_for_text) else None,
-    )
+    try:
+        reply_text, transfer_requested, transfer_reason = await _run_tool_loop(
+            messages=messages,
+            llm_tools=prep.llm_tools,
+            tool_ctx=prep.tool_ctx,
+            sarvam_api_key=prep.sarvam_api_key,
+            # "low" = Sarvam's fast conversational model (~0.4s a reply). The reasoning model takes 8-10s,
+            # far too slow for a customer waiting in a chat window. It stays as the automatic fallback.
+            reasoning_effort="low" if (is_voice or get_settings().fast_model_for_text) else None,
+        )
+    except SarvamAPIError:
+        # A live caller still hears one short line. Test Studio does not: it reports the real failure.
+        reply_text, transfer_requested, transfer_reason = MODEL_TROUBLE, False, None
     if is_voice:
         reply_text = clean_for_speech(reply_text) or "Sorry, could you say that again?"
 
@@ -848,7 +921,7 @@ async def _run_tool_loop_stream(
     messages: list[dict],
     llm_tools: list[dict],
     tool_ctx: ToolContext,
-    sarvam_api_key: str | None,
+    sarvam_api_key: "str | LlmEndpoint | None",
     reasoning_effort: str | None,
 ) -> AsyncIterator[tuple]:
     """Streaming twin of _run_tool_loop for live calls. Yields ("sentence", text)
@@ -1017,7 +1090,7 @@ async def run_assistant_turn(
     llm_tools = [
         TOOL_REGISTRY[name].as_llm_tool() for name in ASSISTANT_TOOL_NAMES if name in TOOL_REGISTRY
     ]
-    sarvam_api_key = await get_sarvam_api_key(db, tenant_id)
+    sarvam_api_key = await get_llm_key(db, tenant_id)
     messages: list[dict] = [{"role": "system", "content": ASSISTANT_SYSTEM_PROMPT}, *history]
 
     tool_ctx = ToolContext(
@@ -1029,9 +1102,12 @@ async def run_assistant_turn(
         customer_id=None,
     )
 
-    reply_text, _transfer_requested, _transfer_reason = await _run_tool_loop(
-        messages=messages, llm_tools=llm_tools, tool_ctx=tool_ctx, sarvam_api_key=sarvam_api_key
-    )
+    try:
+        reply_text, _transfer_requested, _transfer_reason = await _run_tool_loop(
+            messages=messages, llm_tools=llm_tools, tool_ctx=tool_ctx, sarvam_api_key=sarvam_api_key
+        )
+    except SarvamAPIError:
+        reply_text = STAFF_MODEL_UNAVAILABLE
 
     await _persist_message(
         db,

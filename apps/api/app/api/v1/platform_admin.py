@@ -374,6 +374,17 @@ def _setup_items() -> list[dict[str, Any]]:
             bool(s.sarvam_api_key),
         ),
         item(
+            "managed_providers",
+            "CallPlus-provided voice and AI (optional)",
+            "Lets workspaces use the platform's Deepgram, ElevenLabs and language-model accounts. "
+            "Sarvam is already offered from SARVAM_API_KEY and does not need to be listed.",
+            [
+                "MANAGED_PROVIDERS (deepgram, elevenlabs, llm)",
+                "DEEPGRAM_API_KEY, ELEVENLABS_API_KEY, MANAGED_LLM_API_KEY/URL/MODEL as needed",
+            ],
+            bool(s.managed_providers.strip()),
+        ),
+        item(
             "whatsapp",
             "WhatsApp (Meta)",
             "Receiving WhatsApp messages and one-click connect",

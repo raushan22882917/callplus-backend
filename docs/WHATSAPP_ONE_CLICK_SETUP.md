@@ -14,7 +14,7 @@ Your addresses (used below):
 
 ## 1. Meta Business account (≈10 min, approval takes 1–5 days)
 
-1. Go to <https://business.facebook.com> and create (or open) your **Business portfolio** for CallPulse.
+1. Go to <https://business.facebook.com> and create (or open) your **Business portfolio** for CallPlus.
 2. **Settings → Security Center → Start verification.** Upload a business document
    (GST certificate, Udyam, or incorporation certificate) and verify the phone/email/domain.
    Meta must approve this before clients outside your team can connect.
@@ -26,14 +26,14 @@ Your addresses (used below):
 2. **App settings → Basic:** note the **App ID** and click *Show* on the **App secret**.
    Add your privacy-policy URL and app icon (required to go Live).
 
-## 3. Webhook, so messages reach CallPulse
+## 3. Webhook, so messages reach CallPlus
 
 1. In the app: **WhatsApp → Configuration → Webhook → Edit**.
 2. Callback URL: the *WhatsApp webhook URL* from the table above.
 3. Verify token: the value of `META_WHATSAPP_VERIFY_TOKEN` on the Railway **api** service
    (Railway → api → Variables). Click **Verify and save**.
 4. Under *Webhook fields*, **Subscribe** to `messages` and `message_template_status_update`
-   (the second one tells CallPulse when Meta approves or rejects a message template).
+   (the second one tells CallPlus when Meta approves or rejects a message template).
 
 ## 4. The signup popup (Embedded Signup configuration)
 
@@ -43,7 +43,7 @@ Your addresses (used below):
    - *Allowed Domains for the JavaScript SDK*: `https://web-production-2b784.up.railway.app`
    - *Valid OAuth Redirect URIs*: `https://web-production-2b784.up.railway.app/`
 3. **Facebook Login for Business → Configurations → Create configuration:**
-   - Name: `CallPulse WhatsApp signup`
+   - Name: `CallPlus WhatsApp signup`
    - Login variation: **WhatsApp Embedded Signup**
    - Assets: **WhatsApp accounts**; permissions: `whatsapp_business_management`, `whatsapp_business_messaging`
    - Save, then copy the **Configuration ID**.
@@ -59,7 +59,7 @@ Your addresses (used below):
 Until approval, the button already works for anyone with a role on the app
 (App roles → add yourself / testers), so you can try it end to end today.
 
-## 6. Tell CallPulse (Railway → `call-center-backend` → **api** → Variables)
+## 6. Tell CallPlus (Railway → `call-center-backend` → **api** → Variables)
 
 | Variable | Value |
 |---|---|
@@ -67,7 +67,7 @@ Until approval, the button already works for anyone with a role on the app
 | `META_APP_SECRET` | App secret from step 2 (paste it yourself; keep it private) |
 | `META_WHATSAPP_CONFIG_ID` | Configuration ID from step 4 |
 
-Railway redeploys on save. Then open the **WhatsApp** page in CallPulse: the
+Railway redeploys on save. Then open the **WhatsApp** page in CallPlus: the
 *Connect WhatsApp with Facebook* button is enabled and the manual form is gone.
 
 ## What your client sees
@@ -75,7 +75,7 @@ Railway redeploys on save. Then open the **WhatsApp** page in CallPulse: the
 1. WhatsApp page → **Connect WhatsApp with Facebook**.
 2. Log in to Facebook, pick or create their business.
 3. Enter the phone number customers will message, type the SMS/call code.
-4. Done. CallPulse stores everything (token encrypted) and shows a 6-digit
+4. Done. CallPlus stores everything (token encrypted) and shows a 6-digit
    two-step-verification PIN once, to save.
 
 Tips for clients: the number must not be on the regular WhatsApp app. A number

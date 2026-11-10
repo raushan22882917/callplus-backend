@@ -21,7 +21,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
-USER_AGENT = "CallPulseBot/1.0 (+https://callpulse.autobot360.com)"
+USER_AGENT = "CallPlusBot/1.0 (+https://callplus.autobot360.com)"
 ALLOWED_PORTS = {80, 443}
 MAX_REDIRECTS = 5
 Resolver = Callable[[str, int], Awaitable[list[str]]]

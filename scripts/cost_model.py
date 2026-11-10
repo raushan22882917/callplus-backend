@@ -1,4 +1,4 @@
-"""Unit-economics model for CallPulse plans.
+"""Unit-economics model for CallPlus plans.
 
 Run:  python scripts/cost_model.py
 

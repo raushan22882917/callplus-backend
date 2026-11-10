@@ -64,6 +64,12 @@ class Tenant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     plan_overrides: Mapped[dict] = mapped_column(
         JSONB, default=dict, server_default="{}", nullable=False
     )
+    # Where each provider's account comes from: {"deepgram": "managed" | "own", ...}. "managed" is the platform's
+    # own account (CallPlus), "own" is one the workspace connected. Unset = the workspace's own if it has one,
+    # otherwise CallPlus's when that is offered. See app/integrations/managed.py.
+    provider_modes: Mapped[dict] = mapped_column(
+        JSONB, default=dict, server_default="{}", nullable=False
+    )
     # Set when the business tells its phone company which numbers place
     # automated calls. A voice campaign will not start until this is set.
     a2p_declared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

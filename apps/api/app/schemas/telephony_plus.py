@@ -336,6 +336,8 @@ class DialerSettingsBase(BaseModel):
     quiet_hours_start: str = "21:00"
     quiet_hours_end: str = "09:00"
     daily_call_limit: int | None = Field(default=None, ge=1)
+    per_customer_daily_cap: int | None = Field(default=None, ge=1, le=50)
+    per_customer_weekly_cap: int | None = Field(default=None, ge=1, le=200)
     max_attempts: int = Field(default=3, ge=1, le=20)
     retry_schedule_minutes: list[int] = Field(default_factory=lambda: [60, 240, 1440], max_length=20)
     route_qualified_to_user_id: uuid.UUID | None = None

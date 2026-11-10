@@ -6,10 +6,13 @@ from app.core.permissions import Permissions
 from app.core.repository import TenantScopedRepository
 from app.integrations.credentials import (
     OWN_ACCOUNT_MESSAGE,
-    get_sarvam_api_key,
+    get_llm_key,
+    get_provider_key,
     get_twilio_credentials,
     uses_platform_twilio,
 )
+from app.integrations import providers
+from app.services.voice_clones import clone_for_voice, is_sarvam_clone_id, voice_allowed
 from app.integrations.sarvam import SarvamAPIError, chat_completion
 from app.integrations.twilio_client import (
     TwilioClientError,
@@ -82,6 +85,37 @@ async def _save_number(db: AsyncSession, tenant_id: uuid.UUID, **fields) -> Phon
     return number
 
 
+async def _check_speech_choice(
+    db: AsyncSession, tenant_id: uuid.UUID, *, language: str, stt: str, tts: str, voice: str | None
+) -> None:
+    """An agent may use Deepgram or ElevenLabs only after the workspace connected its key, in a language the chosen
+    providers handle, and ElevenLabs needs the ID of the voice to speak with."""
+    if not providers.language_ok(language, stt=stt, tts=tts):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "This language needs Deepgram to hear and ElevenLabs to speak. Choose them, or pick an Indian language for Sarvam."
+            if language in providers.INTERNATIONAL_LANGUAGES
+            else "That language is not available with the chosen providers.",
+        )
+    for provider, label in ((providers.DEEPGRAM, "Deepgram"), (providers.ELEVENLABS, "ElevenLabs")):
+        if provider in (stt, tts) and not await get_provider_key(db, tenant_id, provider):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Connect your {label} account under Integrations before choosing it for an agent.",
+            )
+    if tts == providers.SARVAM and is_sarvam_clone_id(voice) and await clone_for_voice(db, tenant_id, providers.SARVAM, voice) is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "That cloned voice is not available to this workspace."
+        )
+    if tts == providers.ELEVENLABS and not (voice or "").strip():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Choose an ElevenLabs voice for this agent.")
+    if tts == providers.ELEVENLABS and not await voice_allowed(db, tenant_id, voice.strip()):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "That voice is not available to this workspace. Pick one from the list, or one you cloned.",
+        )
+
+
 @router.get("/ai-agents", response_model=list[AIAgentRead])
 async def list_agents(
     ctx: RequestContext = Depends(require_permission(Permissions.AGENTS_READ)),
@@ -97,6 +131,9 @@ async def create_agent(
     db: AsyncSession = Depends(get_db),
 ) -> AIAgent:
     await plans.ensure_can_create(db, ctx.tenant_id, "agents")
+    await _check_speech_choice(
+        db, ctx.tenant_id, language=payload.language, stt=payload.stt_provider, tts=payload.tts_provider, voice=payload.voice
+    )
     agent = await AIAgentRepository(db, ctx.tenant_id).create(**payload.model_dump())
     await db.commit()
     await db.refresh(agent)
@@ -121,7 +158,17 @@ async def update_agent(
 ) -> AIAgent:
     repo = AIAgentRepository(db, ctx.tenant_id)
     agent = await repo.get(agent_id)
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    if {"language", "stt_provider", "tts_provider", "voice"} & changes.keys():
+        await _check_speech_choice(
+            db,
+            ctx.tenant_id,
+            language=changes.get("language", agent.language),
+            stt=changes.get("stt_provider", agent.stt_provider),
+            tts=changes.get("tts_provider", agent.tts_provider),
+            voice=changes.get("voice", agent.voice),
+        )
+    for field, value in changes.items():
         setattr(agent, field, value)
     await db.commit()
     await db.refresh(agent)
@@ -266,7 +313,7 @@ async def test_agent_chat(
     else:
         system_prompt = agent.system_prompt
 
-    sarvam_api_key = await get_sarvam_api_key(db, ctx.tenant_id)
+    sarvam_api_key = await get_llm_key(db, ctx.tenant_id)
     history = [m.model_dump() for m in payload.messages]
     messages = [{"role": "system", "content": system_prompt}, *history]
 

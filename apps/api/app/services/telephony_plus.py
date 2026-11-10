@@ -108,6 +108,30 @@ class DialDecision:
     reason: str | None = None
 
 
+# Reasons that only mean "not now": the contact stays queued and is looked at again on a later pass.
+DEFER_REASONS = ("outside_call_window", "daily_cap", "weekly_cap")
+
+
+async def calls_to_number_since(
+    db: AsyncSession, tenant_id: uuid.UUID, phone: str, since: datetime
+) -> int:
+    """Outbound calls the workspace has placed to this number since `since`. A call that failed
+    before it connected to anyone does not count."""
+    return (
+        await db.execute(
+            select(func.count())
+            .select_from(Call)
+            .where(
+                Call.tenant_id == tenant_id,
+                Call.direction == CallDirection.OUTBOUND,
+                Call.to_number == phone,
+                Call.status != CallStatus.FAILED,
+                Call.created_at >= since,
+            )
+        )
+    ).scalar_one()
+
+
 async def check_outbound_allowed(
     db: AsyncSession,
     tenant_id: uuid.UUID,
@@ -117,9 +141,13 @@ async def check_outbound_allowed(
     quiet_hours: tuple[str, str] | None = None,
     window: tuple[str, str] | None = None,
     tz_name: str | None = None,
+    max_per_day: int | None = None,
+    max_per_week: int | None = None,
 ) -> DialDecision:
     """Blocklist + dnd_registry always; quiet hours / call window when the
-    caller passes them (campaigns do; one-off manual calls only get DND)."""
+    caller passes them (campaigns do; one-off manual calls only get DND).
+    `max_per_day` / `max_per_week` cap how many calls this number has already had from
+    the workspace in the last 24 hours / 7 days, across every campaign and retry."""
     blocked = (
         await db.execute(
             select(BlockedCaller.id).where(
@@ -140,6 +168,15 @@ async def check_outbound_allowed(
         ).first()
         if dnd:
             return DialDecision(False, "dnd")
+
+    if max_per_day is not None or max_per_week is not None:
+        moment = now or datetime.now(UTC)
+        for limit, span, reason in (
+            (max_per_day, timedelta(days=1), "daily_cap"),
+            (max_per_week, timedelta(days=7), "weekly_cap"),
+        ):
+            if limit is not None and await calls_to_number_since(db, tenant_id, phone, moment - span) >= limit:
+                return DialDecision(False, reason)
 
     if quiet_hours or window:
         now = now or datetime.now(UTC)

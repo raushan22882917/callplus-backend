@@ -34,3 +34,20 @@
 		header_up X-Forwarded-For {remote_host}
 	}
 }
+
+# Other apps that share this server and its Caddy. They live here because deploy.sh replaces the server's
+# Caddyfile with this file; a block added only on the server disappears at the next deploy and Caddy
+# then has no certificate for the site (browsers show ERR_SSL_PROTOCOL_ERROR).
+# Both containers join the digitalocean_internal network by name.
+
+# WebToApp
+web2app.autobot360.com {
+	encode zstd gzip
+	reverse_proxy webtoapp-web-1:3000
+}
+
+# Notemaker
+notemaker.autobot360.com {
+	encode gzip
+	reverse_proxy deploy-app-1:3000
+}

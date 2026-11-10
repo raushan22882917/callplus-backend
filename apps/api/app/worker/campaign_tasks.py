@@ -266,9 +266,11 @@ async def _run_dialer_pass(db, campaign: Campaign, ds, phone_number) -> None:
             tz_name=zone,
             window=(ds.call_window_start, ds.call_window_end),
             quiet_hours=(ds.quiet_hours_start, ds.quiet_hours_end),
+            max_per_day=ds.per_customer_daily_cap,
+            max_per_week=ds.per_customer_weekly_cap,
         )
         if not decision.allowed:
-            if decision.reason != "outside_call_window":  # blocked / DND: never dial
+            if decision.reason not in telephony_plus.DEFER_REASONS:  # blocked / DND: never dial
                 contact.status = CampaignContactStatus.FAILED
                 contact.result = {"skipped": decision.reason}
                 contact.attempted_at = now

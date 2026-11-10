@@ -17,6 +17,7 @@ page, so check them against your console before relying on the margins.
 | **Enterprise** | Custom. Volume rates, from about ₹7 per minute |
 | **Annual** | Ten months' price for twelve (two months free) |
 | **Allowances** | Hard caps. See "Overage" below |
+| **Sarvam, two prices** | **CallPlus key** (`SARVAM_API_KEY`): one plan or wallet minute per call minute. **Workspace key**: the customer pays Sarvam and `cost_multiplier` is 0, so the plan and wallet are not charged again. Deepgram or ElevenLabs on CallPlus still add their extra minutes. |
 
 Prices are in rupees, excluding GST.
 

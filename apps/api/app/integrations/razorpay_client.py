@@ -120,6 +120,15 @@ async def cancel_subscription(subscription_id: str, *, cancel_at_cycle_end: bool
     return response.json()
 
 
+async def fetch_payment(payment_id: str) -> dict:
+    """The payment Razorpay captured. Used to check the amount before an invoice is marked paid."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(f"{RAZORPAY_API_BASE}/payments/{payment_id}", auth=_auth())
+    if response.status_code >= 400:
+        raise RazorpayAPIError(f"Razorpay payment fetch failed ({response.status_code}): {response.text}")
+    return response.json()
+
+
 async def create_order(*, amount_paise: int, receipt: str, notes: dict | None = None) -> dict:
     """A one-time payment (a wallet top-up). The browser opens Razorpay Checkout with the
     returned order id; the paid amount is confirmed by verify_checkout_signature and by the

@@ -10,7 +10,7 @@ import re
 import time
 import uuid
 
-from app.integrations.credentials import get_sarvam_api_key
+from app.integrations.credentials import get_llm_key
 from app.integrations.sarvam import SarvamAPIError, chat_completion
 from app.services.test_engine import TestVariables, actions_from_events, opening_line, run_test_turn
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -111,7 +111,7 @@ async def evaluate(checks: list[dict], transcript: list[dict], nodes: list[dict]
 async def run_case(db: AsyncSession, agent: AIAgent, case: AgentTestCase, nodes: list[dict], edges: list[dict]) -> dict:
     """Plays the scenario out and scores it. Returns the AgentTestRun fields."""
     started = time.perf_counter()
-    api_key = await get_sarvam_api_key(db, agent.tenant_id)
+    api_key = await get_llm_key(db, agent.tenant_id)
     variables = TestVariables.from_dict(case.variables)
     transcript: list[dict] = []
     total_tokens = 0

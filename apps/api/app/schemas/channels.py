@@ -38,6 +38,7 @@ CONFIG_KEYS: dict[str, set[str]] = {
         "quick_replies",
         "form_fields",
         "call_from_number",
+        "voice_enabled",
     },
     "instagram": set(),
     "messenger": set(),

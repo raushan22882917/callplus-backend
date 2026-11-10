@@ -20,6 +20,7 @@ allowed and written onto a pending invoice (`sync_overage_invoice`).
 """
 
 import dataclasses
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -368,7 +369,9 @@ async def billable_minutes_used(db: AsyncSession, tenant_id: uuid.UUID, period: 
     )
     total = (
         await db.execute(
-            select(func.coalesce(func.sum(func.ceil(Call.duration_seconds / 60.0)), 0)).where(
+            select(
+                func.coalesce(func.sum(func.ceil(Call.duration_seconds / 60.0) * Call.cost_multiplier), 0)
+            ).where(
                 Call.tenant_id == tenant_id,
                 Call.duration_seconds > 0,
                 when >= start,
@@ -381,7 +384,8 @@ async def billable_minutes_used(db: AsyncSession, tenant_id: uuid.UUID, period: 
             )
         )
     ).scalar_one()
-    return int(total)
+    # A call on a premium provider of the platform's own counts more than its minutes (Call.cost_multiplier).
+    return math.ceil(float(total))
 
 
 async def whatsapp_used(db: AsyncSession, tenant_id: uuid.UUID, period: Period) -> int:
@@ -496,12 +500,27 @@ async def minutes_remaining(db: AsyncSession, tenant: Tenant) -> int | None:
     return max(tier.ai_minutes - used, 0)
 
 
+async def _included_ai(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
+    """True when calls use CallPlus's Sarvam or model, so a plan or wallet minute applies."""
+    from app.integrations.credentials import resolve_key, resolve_llm
+    from app.integrations.providers import SARVAM
+
+    _key, llm_source = await resolve_llm(db, tenant_id)
+    if llm_source == "managed":
+        return True
+    _key, sarvam_source = await resolve_key(db, tenant_id, SARVAM)
+    return sarvam_source == "managed"
+
+
 async def ensure_minutes_available(db: AsyncSession, tenant_id: uuid.UUID) -> None:
     """Refuses a new AI call once the minutes allowance is spent."""
     tenant = await _lock_tenant(db, tenant_id)
     if tenant is None:
         return
     await ensure_owner_verified(db, tenant)
+    if not await _included_ai(db, tenant_id):
+        # Own Sarvam or language-model key: the workspace pays that provider.
+        return
     if effective(tenant).code == PAYG.code:
         from app.services import wallet
 
@@ -519,7 +538,7 @@ async def ensure_minutes_available(db: AsyncSession, tenant_id: uuid.UUID) -> No
 
 
 async def effective_max_call_seconds(
-    db: AsyncSession, tenant_id: uuid.UUID, agent_cap_seconds: int
+    db: AsyncSession, tenant_id: uuid.UUID, agent_cap_seconds: int, *, cost_multiplier: float = 1.0
 ) -> int:
     """The longest this call may run: the agent's own cap, the plan's per-call cap,
     and the minutes left in the allowance, whichever is smallest. This is what
@@ -533,8 +552,10 @@ async def effective_max_call_seconds(
     if tier.max_call_seconds is not None:
         cap = min(cap, tier.max_call_seconds)
     remaining = await minutes_remaining(db, tenant)
-    if remaining is not None:
-        cap = min(cap, max(remaining, 1) * 60)
+    if remaining is not None and cost_multiplier > 0:
+        # Each minute of this call counts `cost_multiplier` minutes, so fewer real minutes are left.
+        # A multiplier of 0 is the workspace's own key: the plan allowance does not end the call.
+        cap = min(cap, max(int(max(remaining, 1) * 60 / cost_multiplier), 1))
     return max(cap, 1)
 
 

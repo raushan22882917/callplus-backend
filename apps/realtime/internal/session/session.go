@@ -6,6 +6,7 @@
 package session
 
 import (
+	"callcenter/realtime/internal/elevenlabs"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -45,6 +46,11 @@ type Session struct {
 	browserTest   bool
 	testSessionID string
 
+	// webCallID: a visitor calling from a web page (see webcall.go). The backend created the call; the
+	// id is fixed by the signed address. There is no carrier to hang up or to transfer to, so a hangup
+	// closes the stream and a transfer ends the call politely instead.
+	webCallID string
+
 	// closeOnFinalize: a carrier other than Twilio (see internal/exotel) has no way for the backend
 	// to hang the call up, so once the agent has finished with the call we close the stream, which
 	// is what lets that carrier's flow move on to its hang-up step.
@@ -58,8 +64,10 @@ type Session struct {
 
 	backendClient    *backend.Client
 	callConfig       *backend.CallConfig
-	stt              *sarvam.STTStream
+	stt              sttStream
 	tts              *sarvam.TTSClient
+	eleven           *elevenlabs.Client  // set when this agent speaks with ElevenLabs instead of Sarvam
+	cloneTTS         *sarvam.CloneClient // set when this agent speaks with a Sarvam cloned voice
 	ttsMu            sync.Mutex
 	ttsSockets       map[string]*sarvam.TTSSocket // persistent TTS connection per language
 	sarvamKey        string
@@ -180,6 +188,10 @@ func (s *Session) handleStart(start *twilio.StartPayload) {
 	s.streamSID = start.StreamSID
 	s.callID = start.CustomParameters["callId"]
 	s.closeOnFinalize = start.CustomParameters["closeOnFinalize"] == "1"
+	if s.webCallID != "" {
+		s.callID = s.webCallID
+		s.closeOnFinalize = true
+	}
 	if s.browserTest {
 		s.callID = s.testSessionID
 	}
@@ -222,7 +234,18 @@ func (s *Session) handleStart(start *twilio.StartPayload) {
 	s.voice = callConfig.Voice
 	s.tts = sarvam.NewTTSClient(sarvamAPIKey)
 	s.sarvamKey = sarvamAPIKey
-	if s.cfg.TTSWebSocket {
+	if callConfig.TTSProvider == "elevenlabs" && callConfig.TTSAPIKey != "" {
+		s.eleven = elevenlabs.NewClient(callConfig.TTSAPIKey, callConfig.TTSModel)
+	}
+	if s.eleven == nil && sarvam.IsCloneVoice(callConfig.Voice) {
+		// A cloned voice is reached with the key of the account it was made on, which the API sends as the TTS key.
+		cloneKey := callConfig.TTSAPIKey
+		if cloneKey == "" {
+			cloneKey = sarvamAPIKey
+		}
+		s.cloneTTS = sarvam.NewCloneClient(cloneKey)
+	}
+	if s.cfg.TTSWebSocket && s.eleven == nil && s.cloneTTS == nil {
 		// Open the speech connection now, while the greeting is being prepared, so
 		// the first sentence of every reply skips the connect cost.
 		go s.warmTTS()
@@ -231,9 +254,9 @@ func (s *Session) handleStart(start *twilio.StartPayload) {
 	// Sarvam's own VAD default (500ms of silence = utterance finished) cuts
 	// callers off mid-sentence on a normal speaking pause. 900ms gives real
 	// hesitation room while still feeling responsive on a phone call.
-	stt, err := sarvam.DialSTT(sarvamAPIKey, sttLanguage(language), sttSilenceMs)
+	stt, err := s.dialSTT(callConfig, sarvamAPIKey, language)
 	if err != nil {
-		log.Printf("[session %s] failed to connect to Sarvam STT: %v", s.callID, err)
+		log.Printf("[session %s] failed to connect to speech recognition: %v", s.callID, err)
 		// Without STT the call can't progress; say so and hang up instead of
 		// leaving the caller on a silent line until Twilio times out.
 		s.endCall(
@@ -300,6 +323,11 @@ func (s *Session) readTranscripts() {
 // now, guaranteeing the caller heard the message first rather than racing a
 // server-side redirect against audio the gateway hasn't sent yet.
 func (s *Session) actOn(action, reason string) {
+	if s.webCallID != "" && action == "transfer" {
+		// Nobody can be rung from a browser call, so the call ends here (the agent has already
+		// spoken its closing line) and the team follows up from the saved transcript.
+		action, reason = "hangup", "web_call_transfer_unavailable"
+	}
 	switch action {
 	case "transfer", "hangup":
 		s.waitForPlayback()

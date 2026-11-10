@@ -8,7 +8,7 @@ import json
 import re
 import uuid
 
-from app.integrations.credentials import get_sarvam_api_key
+from app.integrations.credentials import get_llm_key
 from app.integrations.sarvam import SarvamAPIError, chat_completion
 from app.services import knowledge
 from app.services.qa import PRICE_CLAIM, REFUND_CLAIM, Turn, get_default_scorecard, load_turns
@@ -112,7 +112,7 @@ async def _ask(db: AsyncSession, tenant_id: uuid.UUID, system: str, user: str, t
     try:
         completion = await chat_completion(
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            api_key=await get_sarvam_api_key(db, tenant_id),
+            api_key=await get_llm_key(db, tenant_id),
             temperature=0.2,
             max_tokens=2048,
             timeout=timeout,

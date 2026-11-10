@@ -59,6 +59,24 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         },
         handler=handlers.get_customer,
     ),
+    "list_open_tickets": ToolSpec(
+        name="list_open_tickets",
+        description="List open and pending support tickets for the whole workspace, each with the "
+        "customer it belongs to. Use this when staff ask what is open, urgent, or waiting. "
+        "Pass priority only when they name one (low, medium, high, urgent).",
+        parameters={
+            "type": "object",
+            "properties": {
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "urgent"],
+                    "description": "Only tickets of this priority. Omit to list every open ticket.",
+                },
+                "limit": {"type": "integer", "default": 10},
+            },
+        },
+        handler=handlers.list_open_tickets,
+    ),
     "list_recent_tickets": ToolSpec(
         name="list_recent_tickets",
         description="List a customer's most recent support tickets.",

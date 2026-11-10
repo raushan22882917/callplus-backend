@@ -10,7 +10,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 
-from app.integrations.credentials import get_sarvam_api_key
+from app.integrations.credentials import get_llm_key
 from app.integrations.sarvam import SarvamAPIError, chat_completion
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -148,7 +148,7 @@ async def _collect_answers(db: AsyncSession, call: Call, transcript: str) -> Non
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": transcript[-12000:]},
             ],
-            api_key=await get_sarvam_api_key(db, call.tenant_id),
+            api_key=await get_llm_key(db, call.tenant_id),
             temperature=0,
             max_tokens=2048,
             timeout=60.0,
@@ -220,7 +220,7 @@ async def analyze_call(db: AsyncSession, call_id: uuid.UUID) -> bool:
                 {"role": "system", "content": ANALYSIS_PROMPT},
                 {"role": "user", "content": transcript[-12000:]},
             ],
-            api_key=await get_sarvam_api_key(db, call.tenant_id),
+            api_key=await get_llm_key(db, call.tenant_id),
             temperature=0,
             max_tokens=4096,
             timeout=60.0,

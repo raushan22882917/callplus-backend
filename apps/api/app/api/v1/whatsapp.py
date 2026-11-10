@@ -67,7 +67,7 @@ async def disconnect_whatsapp_account(
     ctx: RequestContext = Depends(require_permission(Permissions.CONVERSATIONS_MANAGE)),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Stops CallPulse using this number. Past conversations stay in the inbox."""
+    """Stops CallPlus using this number. Past conversations stay in the inbox."""
     account = await WhatsAppAccountRepository(db, ctx.tenant_id).get(account_id)
     await db.delete(account)
     await db.commit()

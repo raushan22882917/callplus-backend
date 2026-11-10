@@ -12,6 +12,8 @@ import re
 from collections import Counter
 from typing import Protocol
 
+import httpx
+
 from packages.database.vector_support import EMBEDDING_DIM
 
 _WORD = re.compile(r"\w+", re.UNICODE)
@@ -126,8 +128,43 @@ class HashingEmbedder:
         return [self._vector(t) for t in texts]
 
 
-_embedder: Embedder = HashingEmbedder()
+class HttpEmbedder:
+    """An OpenAI-compatible embeddings API. Used only when a URL and key are set, and only at 384 dimensions,
+    which is the size the knowledge column was built for. A missing key keeps the hashing embedder."""
+
+    name = "http-384"
+    dim = EMBEDDING_DIM
+
+    def __init__(self, url: str, api_key: str, model: str) -> None:
+        self.url = url
+        self.api_key = api_key
+        self.model = model
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        response = httpx.post(
+            self.url,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json={"model": self.model, "input": texts, "dimensions": self.dim},
+            timeout=30,
+        )
+        response.raise_for_status()
+        rows = sorted(response.json().get("data") or [], key=lambda row: row.get("index", 0))
+        vectors = [list(row.get("embedding") or []) for row in rows]
+        if len(vectors) != len(texts) or any(len(v) != self.dim for v in vectors):
+            raise ValueError(f"Embeddings API must return {self.dim} numbers for each text.")
+        return vectors
 
 
 def get_embedder() -> Embedder:
-    return _embedder
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    if settings.embeddings_api_url and settings.embeddings_api_key:
+        return HttpEmbedder(
+            settings.embeddings_api_url,
+            settings.embeddings_api_key,
+            settings.embeddings_model or "text-embedding-3-small",
+        )
+    return HashingEmbedder()

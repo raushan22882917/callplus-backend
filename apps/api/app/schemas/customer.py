@@ -63,3 +63,43 @@ class CustomerRead(BaseModel):
     tags: list[str]
     created_at: datetime
     updated_at: datetime
+
+
+class DossierCall(BaseModel):
+    id: uuid.UUID
+    direction: str
+    status: str
+    duration_seconds: int | None
+    created_at: datetime
+
+
+class DossierMessage(BaseModel):
+    id: uuid.UUID
+    channel: str
+    direction: str
+    text: str | None
+    created_at: datetime
+
+
+class DossierTicket(BaseModel):
+    id: uuid.UUID
+    subject: str
+    status: str
+    priority: str
+    created_at: datetime
+
+
+class DossierConsent(BaseModel):
+    id: uuid.UUID
+    purpose: str
+    status: str
+    source: str
+    granted_at: datetime
+    withdrawn_at: datetime | None
+
+
+class CustomerDossier(BaseModel):
+    calls: list[DossierCall]
+    messages: list[DossierMessage]
+    tickets: list[DossierTicket]
+    consents: list[DossierConsent]

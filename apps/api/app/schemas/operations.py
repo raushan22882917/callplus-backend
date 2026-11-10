@@ -228,6 +228,22 @@ class AppointmentStatusUpdate(BaseModel):
     status: Literal["confirmed", "completed", "no_show"]
 
 
+class CalendarCallbackRead(BaseModel):
+    id: uuid.UUID
+    kind: Literal["ticket", "follow_up"]
+    start_at: datetime
+    end_at: datetime
+    title: str
+    detail: str
+    customer_name: str | None = None
+    ticket_id: uuid.UUID | None = None
+
+
+class CalendarCallbacksRead(BaseModel):
+    events: list[CalendarCallbackRead]
+    nearest_at: datetime | None = None
+
+
 class AppointmentRead(_Read):
     id: uuid.UUID
     customer_id: uuid.UUID

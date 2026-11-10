@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
-from app.integrations.credentials import get_sarvam_api_key
+from app.integrations.credentials import get_llm_key
 from app.integrations.sarvam import SarvamAPIError, chat_completion
 from app.services import test_sessions
 from app.services.scenario_runner import CHECK_TYPES, run_batch
@@ -140,7 +140,7 @@ async def test_track(
     reply's critical path). Also reports whether that node is an end step."""
     agent = await _agent(db, ctx.tenant_id, agent_id)
     nodes, _edges, _ = await _flow(db, agent, payload.nodes, payload.edges)
-    tracked = await track_step(nodes, [m.model_dump() for m in payload.messages], await get_sarvam_api_key(db, ctx.tenant_id), payload.previous_node_id)
+    tracked = await track_step(nodes, [m.model_dump() for m in payload.messages], await get_llm_key(db, ctx.tenant_id), payload.previous_node_id)
     node = next((n for n in nodes if n.get("id") == tracked["node_id"]), None)
     return {**tracked, "ended": bool(node and node.get("type") == "end")}
 
@@ -304,7 +304,7 @@ async def suggest_test_cases(
                 },
                 {"role": "user", "content": f"Agent: {agent.name}\nFlow steps:\n{steps}"},
             ],
-            api_key=await get_sarvam_api_key(db, ctx.tenant_id),
+            api_key=await get_llm_key(db, ctx.tenant_id),
             temperature=0.4,
             max_tokens=8000,
             timeout=110.0,

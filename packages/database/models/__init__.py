@@ -3,6 +3,7 @@
 from packages.database.models.agent import AgentStatus, AIAgent, AIAgentTool, AIAgentVersion
 from packages.database.models.agent_test import AgentTestCase, AgentTestRun
 from packages.database.models.audit import AuditLog
+from packages.database.models.voice_clone import VoiceClone
 from packages.database.models.billing import (
     BillingInterval,
     Invoice,
@@ -172,6 +173,7 @@ __all__ = [
     "AgentTestCase",
     "AgentTestRun",
     "AuditLog",
+    "VoiceClone",
     "BillingInterval",
     "BlockedCaller",
     "Call",

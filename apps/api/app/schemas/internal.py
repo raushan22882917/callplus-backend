@@ -63,3 +63,11 @@ class CallConfigResponse(BaseModel):
     max_no_response_retries: int
     no_response_prompt: str
     no_response_end_message: str
+    # Who hears and speaks for this call. Sarvam unless the agent chose Deepgram and/or ElevenLabs
+    # (with the workspace's own keys). The gateway falls back to Sarvam when these are empty.
+    stt_provider: str = "sarvam"
+    stt_api_key: str = ""
+    stt_language: str = ""
+    tts_provider: str = "sarvam"
+    tts_api_key: str = ""
+    tts_model: str = ""

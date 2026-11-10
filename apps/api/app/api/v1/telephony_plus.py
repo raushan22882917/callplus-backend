@@ -969,6 +969,8 @@ async def preview_next(
                 if settings_row
                 else ("21:00", "09:00")
             ),
+            max_per_day=settings_row.per_customer_daily_cap if settings_row else None,
+            max_per_week=settings_row.per_customer_weekly_cap if settings_row else None,
         )
         if decision.allowed and await privacy.has_outbound_consent(
             db, ctx.tenant_id, customer.phone

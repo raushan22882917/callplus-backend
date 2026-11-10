@@ -14,7 +14,7 @@ x-app-env: &app-env
     MIGRATION_DATABASE_URL: postgresql+asyncpg://callcenter:${POSTGRES_PASSWORD}@postgres:5432/callcenter
     APP_DB_PASSWORD: ${APP_DB_PASSWORD}
     REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
-    PUBLIC_BASE_URL: https://${API_DOMAIN}
+    PUBLIC_BASE_URL: https://${PUBLIC_DOMAIN:-${API_DOMAIN}}
     FRONTEND_BASE_URL: ${FRONTEND_URL}  # where people open the dashboard (links in emails, privacy page)
     # Every website allowed to call this API from a browser, as a JSON list: the dashboard wherever
     # it is hosted (the Railway one, this server's, or both).
@@ -124,7 +124,7 @@ services:
       context: ${FRONTEND_DIR:-../../../frontend}
       dockerfile: Dockerfile.prod  # copied in from frontend.Dockerfile by deploy.sh
       args:
-        NEXT_PUBLIC_API_BASE_URL: https://${API_DOMAIN}/api/v1
+        NEXT_PUBLIC_API_BASE_URL: https://${PUBLIC_DOMAIN:-${API_DOMAIN}}/api/v1
         NEXT_PUBLIC_RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
         NEXT_PUBLIC_PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
     restart: unless-stopped

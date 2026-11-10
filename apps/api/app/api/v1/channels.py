@@ -58,7 +58,7 @@ from app.schemas.channels import (
 )
 from app.services import channels as svc
 from app.services import channels_voice as voice
-from app.services import chat_form, follow_up, plans, widget_install, widget_leads
+from app.services import chat_form, follow_up, plans, web_call, widget_install, widget_leads
 from app.services import privacy as privacy_svc
 from app.services import whatsapp_templates as tpl
 from app.services.customer_lookup import find_or_create_customer_by_phone
@@ -74,6 +74,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.database.models import (
     Call,
+    CallDirection,
+    CallStatus,
     Conversation,
     ConversationChannel,
     Customer,
@@ -192,7 +194,7 @@ _WIDGET_TEXT_LIMITS = {
 
 
 def _validate_widget_config(config: dict) -> None:
-    for key in ("lead_form", "require_phone", "call_me", "show_email", "show_message", "use_knowledge", "kb_only", "privacy_consent"):
+    for key in ("lead_form", "require_phone", "call_me", "voice_enabled", "show_email", "show_message", "use_knowledge", "kb_only", "privacy_consent"):
         if key in config and not isinstance(config[key], bool):
             raise HTTPException(422, f"{key} must be true or false")
     if config.get("template") not in (None, "", *widget_leads.WIDGET_TEMPLATES):
@@ -1416,6 +1418,67 @@ async def set_voicemail_handled(
             voice.mark_handled(missed, ctx.user_id, True)
     await db.commit()
     return _voicemail_read(voicemail, name, cid)
+
+
+# ------------------------------------------------------------------ web calls (browser voice)
+
+
+@router.get("/webcall/demo", include_in_schema=False)
+async def webcall_demo(request: Request) -> JSONResponse:
+    """Whether the marketing site offers a "Talk to the AI" button, and the public key it calls with."""
+    key = get_settings().web_call_demo_key
+    return JSONResponse({"enabled": bool(key), "key": key or None})
+
+
+@router.get("/webcall/{public_key}/config")
+async def webcall_config(public_key: str, request: Request, db: AsyncSession = Depends(get_db)) -> JSONResponse:
+    row = await svc.get_settings_by_public_key(db, public_key, "web_chat")
+    if row is None or not (row.config or {}).get("voice_enabled") or row.ai_agent_id is None:
+        return _cors_json(request, None, {"enabled": False}, 404)
+    config = row.config or {}
+    return _cors_json(request, row, {"enabled": True, "title": config.get("title") or "Talk to us"})
+
+
+@router.post("/webcall/{public_key}/start")
+async def webcall_start(public_key: str, request: Request, db: AsyncSession = Depends(get_db)) -> JSONResponse:
+    """Starts a call from the visitor's browser. Creates the Call row and returns where to connect."""
+    row = await svc.get_settings_by_public_key(db, public_key, "web_chat")
+    if row is None or not (row.config or {}).get("voice_enabled") or row.ai_agent_id is None:
+        return _cors_json(request, None, {"detail": "Voice calls are not available"}, 404)
+    if _origin_forbidden(request, row):
+        return _cors_json(request, row, {"detail": "This website is not allowed to start calls"}, 403)
+    # A call costs real money, so starts are limited per visitor and per key.
+    if await svc.hit_rate_limit(f"wcall:{public_key}:{_client_ip(request)}", limit=4, window_seconds=600):
+        return _cors_json(request, row, {"detail": "Too many calls started; please try again in a few minutes"}, 429)
+    if await svc.hit_rate_limit(f"wcall-all:{public_key}", limit=60, window_seconds=600):
+        return _cors_json(request, row, {"detail": "We are taking a lot of calls right now; please try again soon"}, 429)
+    try:
+        await plans.ensure_inbound_allowed(db, row.tenant_id)
+    except plans.PlanLimitError:
+        return _cors_json(request, row, {"detail": "Calls are not available right now. Please try again later."}, 402)
+
+    call = Call(
+        tenant_id=row.tenant_id,
+        ai_agent_id=row.ai_agent_id,
+        direction=CallDirection.INBOUND,
+        status=CallStatus.RINGING,
+        from_number="web",
+        to_number="web",
+        started_at=datetime.now(UTC),
+    )
+    db.add(call)
+    await db.flush()
+    await db.commit()
+    return _cors_json(
+        request,
+        row,
+        {
+            "call_id": str(call.id),
+            "ws_url": web_call.gateway_url(str(call.id)),
+            "expires_in": web_call.TTL_SECONDS,
+        },
+        201,
+    )
 
 
 # ------------------------------------------------------------------ click-to-call

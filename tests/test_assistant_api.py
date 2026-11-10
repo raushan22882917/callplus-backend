@@ -143,3 +143,69 @@ async def test_another_tenant_cannot_read_assistant_conversation(
         f"/api/v1/assistant/conversations/{conversation_id}/messages", headers=_auth(tokens_b)
     )
     assert as_b.status_code == 404
+
+
+async def test_chat_lists_urgent_tickets_with_the_customer(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict = {}
+
+    async def fake_chat_completion(*, messages, tools=None, api_key=None, **kwargs):
+        if not seen:
+            seen["tools"] = [t["function"]["name"] for t in tools or []]
+            return _tool_call_completion(
+                tool_call_id="call_1", name="list_open_tickets", arguments={"priority": "urgent"}
+            )
+        seen["tool"] = next(m["content"] for m in reversed(messages) if m.get("role") == "tool")
+        return _final_completion("Asha has one urgent ticket.")
+
+    monkeypatch.setattr("app.services.agent_engine.chat_completion", fake_chat_completion)
+    tokens = await _signup(client, slug="queue-co", email="owner@queue.com")
+    customer = await client.post(
+        "/api/v1/customers",
+        headers=_auth(tokens),
+        json={"name": "Asha", "phone": "+919800000001"},
+    )
+    assert customer.status_code == 201, customer.text
+    ticket = await client.post(
+        "/api/v1/tickets",
+        headers=_auth(tokens),
+        json={
+            "customer_id": customer.json()["id"],
+            "subject": "Air fitting",
+            "priority": "urgent",
+        },
+    )
+    assert ticket.status_code == 201, ticket.text
+
+    resp = await client.post(
+        "/api/v1/assistant/chat",
+        headers=_auth(tokens),
+        json={
+            "message": "Show me all urgent open support tickets and what customers they belong to."
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["reply_text"] == "Asha has one urgent ticket."
+    assert "list_open_tickets" in seen["tools"]
+    assert "Air fitting" in seen["tool"]
+    assert "Asha" in seen["tool"]
+
+
+async def test_chat_says_to_connect_sarvam_when_the_model_is_down(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.integrations.sarvam import SarvamAPIError
+
+    async def fake_chat_completion(*, messages, tools=None, api_key=None, **kwargs):
+        raise SarvamAPIError("Connect your own Sarvam API key under Integrations.")
+
+    monkeypatch.setattr("app.services.agent_engine.chat_completion", fake_chat_completion)
+
+    tokens = await _signup(client, slug="nokey-co", email="owner@nokey.com")
+    resp = await client.post(
+        "/api/v1/assistant/chat", headers=_auth(tokens), json={"message": "What is open?"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert "Connect your Sarvam key under Integrations" in resp.json()["reply_text"]
+    assert "human" not in resp.json()["reply_text"]

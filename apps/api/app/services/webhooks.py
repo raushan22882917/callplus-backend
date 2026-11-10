@@ -100,7 +100,7 @@ async def attempt_delivery(
     timestamp = int(time.time())
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "CallPulse-Webhooks/1.0",
+        "User-Agent": "CallPlus-Webhooks/1.0",
         "X-Event": delivery.event,
         "X-Delivery-Id": str(delivery.id),
         "X-Timestamp": str(timestamp),

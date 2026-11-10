@@ -384,7 +384,7 @@ async def test_webhook(
         tenant_id=ctx.tenant_id,
         endpoint_id=endpoint.id,
         event=TEST_EVENT,
-        payload={"message": "This is a test event from your CallPulse workspace."},
+        payload={"message": "This is a test event from your CallPlus workspace."},
         created_at=datetime.now(UTC),
     )
     db.add(delivery)

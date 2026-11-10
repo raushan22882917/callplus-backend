@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import Call, FollowUp
+from packages.database.models import Call, Customer, FollowUp, Tenant, Ticket
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,29 @@ def _clock_time(text: str, local_now: datetime) -> datetime | None:
     return due.astimezone(UTC)
 
 
+_CALLBACK_PREFIX = "callback requested for "
+
+
+def when_from_callback_subject(
+    subject: str, created_at: datetime, tz: ZoneInfo
+) -> tuple[datetime, str] | None:
+    """The time a "Callback requested for today at 4 PM — …" ticket is asking for.
+
+    "today" and "tomorrow" are read from the moment the ticket was written, in the
+    business time zone, which is what the caller meant."""
+    if not subject.lower().startswith(_CALLBACK_PREFIX):
+        return None
+    rest = subject[len(_CALLBACK_PREFIX) :]
+    note = ""
+    if " — " in rest:
+        rest, note = rest.split(" — ", 1)
+    rest = re.sub(r"\s+on\s+\+[\d\s-]+$", "", rest).strip()
+    due = parse_when(rest, now=created_at, tz=tz)
+    if due is None:
+        return None
+    return due, note.strip()
+
+
 def describe(due: datetime, tz: ZoneInfo, now: datetime | None = None) -> str:
     """How the AI says it back to the caller: "in about 5 minutes" or "tomorrow at 4:00 PM"."""
     now = (now or datetime.now(UTC)).astimezone(UTC)
@@ -173,6 +196,88 @@ async def schedule(
     db.add(follow_up)
     await db.flush()
     return follow_up
+
+
+async def calendar_callbacks(
+    db: AsyncSession, tenant_id: uuid.UUID, start: datetime, end: datetime
+) -> dict:
+    """Callback tickets and scheduled call-backs whose time falls in [start, end).
+
+    When the window is empty, `nearest_at` is the closest such time outside it,
+    so the calendar can jump to the week that actually has requests."""
+    tenant = await db.get(Tenant, tenant_id)
+    tz = tz_for(tenant.timezone if tenant else None)
+    start = start.astimezone(UTC)
+    end = end.astimezone(UTC)
+    found: list[dict] = []
+
+    tickets = (
+        await db.execute(
+            select(Ticket, Customer.name)
+            .join(Customer, Customer.id == Ticket.customer_id)
+            .where(
+                Ticket.tenant_id == tenant_id,
+                Ticket.subject.ilike("Callback requested for %"),
+                Ticket.created_at >= start - timedelta(days=120),
+                Ticket.created_at < end + timedelta(days=1),
+            )
+            .order_by(Ticket.created_at.desc())
+            .limit(300)
+        )
+    ).all()
+    for ticket, name in tickets:
+        parsed = when_from_callback_subject(ticket.subject, ticket.created_at, tz)
+        if parsed is None:
+            continue
+        due, note = parsed
+        found.append(
+            {
+                "id": ticket.id,
+                "kind": "ticket",
+                "start_at": due,
+                "end_at": due + timedelta(minutes=30),
+                "title": name or "Customer",
+                "detail": note or "Callback",
+                "customer_name": name,
+                "ticket_id": ticket.id,
+            }
+        )
+
+    follow_ups = (
+        await db.execute(
+            select(FollowUp, Customer.name)
+            .join(Customer, Customer.id == FollowUp.customer_id)
+            .where(
+                FollowUp.tenant_id == tenant_id,
+                FollowUp.channel == "call",
+                FollowUp.status != "cancelled",
+                FollowUp.due_at >= start - timedelta(days=120),
+                FollowUp.due_at < end + timedelta(days=30),
+            )
+        )
+    ).all()
+    for follow_up, name in follow_ups:
+        reason = (follow_up.payload or {}).get("reason") or "Call back"
+        found.append(
+            {
+                "id": follow_up.id,
+                "kind": "follow_up",
+                "start_at": follow_up.due_at,
+                "end_at": follow_up.due_at + timedelta(minutes=15),
+                "title": name or "Customer",
+                "detail": reason,
+                "customer_name": name,
+                "ticket_id": None,
+            }
+        )
+
+    inside = [e for e in found if start <= e["start_at"] < end]
+    inside.sort(key=lambda e: e["start_at"])
+    outside = [e for e in found if e["start_at"] < start or e["start_at"] >= end]
+    nearest = None
+    if not inside and outside:
+        nearest = min(outside, key=lambda e: abs((e["start_at"] - start).total_seconds()))["start_at"]
+    return {"events": inside, "nearest_at": nearest}
 
 
 def mission_for(payload: dict) -> dict:

@@ -182,6 +182,43 @@ async def get_credentials(db: AsyncSession, tenant_id: uuid.UUID) -> dict | None
     }
 
 
+async def list_incoming_numbers(db: AsyncSession, tenant_id: uuid.UUID) -> list[dict[str, str]]:
+    """The ExoPhones already on this workspace's Exotel account, as +91 numbers.
+
+    Exotel sells the number after its own KYC. This only reads the numbers that account already has,
+    so they can be added here without copying them out of the Exotel dashboard.
+    """
+    creds = await get_credentials(db, tenant_id)
+    if creds is None:
+        raise ExotelError("Connect your Exotel account first.")
+    url = (
+        f"https://{creds['subdomain']}/v1/Accounts/{creds['account_sid']}/IncomingPhoneNumbers.json"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(url, auth=(creds["api_key"], creds["api_token"]))
+    except httpx.HTTPError as exc:
+        raise ExotelError("We couldn't reach Exotel. Please try again in a moment.") from exc
+    if response.status_code in (401, 403):
+        raise ExotelError("Exotel did not accept the saved API key. Connect Exotel again.")
+    if response.status_code >= 400:
+        raise ExotelError(f"Exotel could not list numbers ({response.status_code}).")
+    body = response.json()
+    raw = (body.get("IncomingPhoneNumbers") or body).get("PhoneNumber") or []
+    if isinstance(raw, dict):
+        raw = [raw]
+    numbers: list[dict[str, str]] = []
+    for item in raw:
+        phone = str(item.get("PhoneNumber") or item.get("phone_number") or "").strip()
+        if not phone:
+            continue
+        numbers.append({
+            "e164": to_e164(phone),
+            "name": str(item.get("FriendlyName") or item.get("friendly_name") or phone),
+        })
+    return numbers
+
+
 async def tenant_for_stream_key(db: AsyncSession, stream_key: str) -> uuid.UUID | None:
     """Which workspace does this stream address belong to? None if it is unknown or switched off."""
     wanted = hash_stream_key(stream_key)

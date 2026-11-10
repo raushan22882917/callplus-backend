@@ -12,13 +12,27 @@ from app.core.permissions import Permissions
 from app.integrations.credentials import (
     OWN_ACCOUNT_MESSAGE,
     TwilioCredentials,
+    get_provider_key,
     get_twilio_credentials,
+    resolve_key,
 )
+from app.integrations import managed, providers
+from app.integrations.llm import LlmError, check_endpoint, endpoint_from
 from app.integrations.sarvam import SarvamAPIError, check_api_key
+from app.integrations.speech_providers import (
+    SpeechProviderError,
+    check_deepgram_key,
+    check_elevenlabs_key,
+    elevenlabs_voices,
+)
 from app.integrations.twilio_client import check_account
 from app.schemas.integration import (
+    ConnectDeepgramRequest,
+    ConnectElevenLabsRequest,
     ConnectExotelRequest,
+    ConnectLlmRequest,
     ConnectSarvamRequest,
+    SetProviderModeRequest,
     ConnectTwilioRequest,
     ExotelOutboundRequest,
     ExotelSetup,
@@ -33,6 +47,8 @@ from packages.database.models import (
     Integration,
     IntegrationCredential,
     IntegrationStatus,
+    Tenant,
+    VoiceClone,
     WhatsAppAccount,
 )
 
@@ -161,10 +177,23 @@ async def setup_status(
         },
     ]
     calls_ready = connected["exotel"] or connected["twilio"]
+    # CallPlus's Sarvam key is enough. An own key is the other price, not a requirement.
+    sarvam_ready = connected["sarvam"] or managed.available("sarvam")
+    if managed.available("sarvam") and not connected["sarvam"]:
+        items[2]["connected"] = True
+        items[2]["detail"] = (
+            "Included. CallPlus's key is used and each minute comes out of your plan or wallet. "
+            "Add your own key only if you want Sarvam to bill you instead."
+        )
+    elif connected["sarvam"]:
+        items[2]["detail"] = (
+            "Your key is connected. On it you pay Sarvam and CallPlus does not charge the minutes. "
+            "On CallPlus, the minutes come out of your plan or wallet."
+        )
     return {
-        "ready_for_calls": calls_ready and connected["sarvam"],
+        "ready_for_calls": calls_ready and sarvam_ready,
         "message": None
-        if calls_ready and connected["sarvam"]
+        if calls_ready and sarvam_ready
         else OWN_ACCOUNT_MESSAGE,
         "items": items,
     }
@@ -224,6 +253,218 @@ async def connect_sarvam(
     return integration
 
 
+ELEVENLABS_DEFAULT_MODEL = "eleven_flash_v2_5"
+
+
+@router.post("/elevenlabs", response_model=IntegrationRead, status_code=status.HTTP_201_CREATED)
+async def connect_elevenlabs(
+    payload: ConnectElevenLabsRequest,
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> Integration:
+    """Bring your own ElevenLabs account so agents can speak in its voices, in dozens of languages."""
+    try:
+        await check_elevenlabs_key(payload.api_key)
+    except SpeechProviderError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    integration = await _upsert_integration(
+        db,
+        tenant_id=ctx.tenant_id,
+        provider=providers.ELEVENLABS,
+        config={"model": (payload.model or ELEVENLABS_DEFAULT_MODEL).strip()},
+        secret=payload.api_key.strip(),
+    )
+    await db.commit()
+    await db.refresh(integration)
+    return integration
+
+
+@router.get("/elevenlabs/voices")
+async def list_elevenlabs_voices(
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """The voices an agent can speak with: the library, plus this workspace's own cloned voices. On CallPlus's shared
+    account only premade voices are listed, because the account also holds other workspaces' clones."""
+    key, source = await resolve_key(db, ctx.tenant_id, providers.ELEVENLABS)
+    if not key:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Connect your ElevenLabs account first.")
+    clones = (
+        await db.execute(select(VoiceClone).where(VoiceClone.tenant_id == ctx.tenant_id).order_by(VoiceClone.created_at.desc()))
+    ).scalars().all()
+    mine = [
+        {
+            "voice_id": c.provider_voice_id,
+            "name": f"{c.name} (cloned)",
+            "category": "cloned",
+            "labels": {"language": c.language} if c.language else {},
+            "preview_url": None,
+            "clone_id": str(c.id),
+        }
+        for c in clones
+    ]
+    try:
+        voices = await elevenlabs_voices(key)
+    except SpeechProviderError as exc:
+        if mine:  # a key that cannot list voices can still speak with the ones we made
+            return mine
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    if source == "managed":
+        voices = [v for v in voices if (v.get("category") or "") == "premade"]
+    own_ids = {m["voice_id"] for m in mine}
+    return mine + [v for v in voices if v["voice_id"] not in own_ids]
+
+
+@router.post("/deepgram", response_model=IntegrationRead, status_code=status.HTTP_201_CREATED)
+async def connect_deepgram(
+    payload: ConnectDeepgramRequest,
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> Integration:
+    """Bring your own Deepgram account so agents can hear callers in dozens of languages."""
+    try:
+        await check_deepgram_key(payload.api_key)
+    except SpeechProviderError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    integration = await _upsert_integration(
+        db, tenant_id=ctx.tenant_id, provider=providers.DEEPGRAM, config={}, secret=payload.api_key.strip()
+    )
+    await db.commit()
+    await db.refresh(integration)
+    return integration
+
+
+@router.post("/llm", response_model=IntegrationRead, status_code=status.HTTP_201_CREATED)
+async def connect_llm(
+    payload: ConnectLlmRequest,
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> Integration:
+    """Bring your own language model (OpenAI, Gemini, Groq, Mistral or any OpenAI-compatible service). Every agent in
+    the workspace then writes its replies with it instead of Sarvam's model."""
+    try:
+        endpoint = endpoint_from(payload.preset, api_key=payload.api_key, model=payload.model, base_url=payload.base_url)
+        await check_endpoint(endpoint)
+    except LlmError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    integration = await _upsert_integration(
+        db,
+        tenant_id=ctx.tenant_id,
+        provider=providers.LLM,
+        config={"preset": payload.preset, "label": endpoint.label, "url": endpoint.url, "model": endpoint.model},
+        secret=endpoint.api_key,
+    )
+    await db.commit()
+    await db.refresh(integration)
+    return integration
+
+
+MODE_LABELS = {
+    providers.SARVAM: "Sarvam (India voice and replies)",
+    providers.DEEPGRAM: "Deepgram (hearing, worldwide)",
+    providers.ELEVENLABS: "ElevenLabs (voices, worldwide)",
+    providers.LLM: "Language model",
+}
+
+
+async def _provider_state(db: AsyncSession, tenant: Tenant) -> list[dict]:
+    """For each provider: whether the workspace has its own account, whether CallPlus's is offered, what it chose and
+    what a call will actually use."""
+    rows = (await db.execute(select(Integration).where(Integration.tenant_id == tenant.id))).scalars().all()
+    own = {r.provider for r in rows if r.status == IntegrationStatus.CONNECTED}
+    saved = tenant.provider_modes or {}
+    out = []
+    for provider in managed.PROVIDERS:
+        offered = managed.available(provider)
+        has_own = provider in own
+        choice = saved.get(provider) if saved.get(provider) in ("own", "managed") else None
+        order = ("managed", "own") if choice == "managed" else ("own", "managed")
+        using = "none"
+        for source in order:
+            if (source == "own" and has_own) or (source == "managed" and offered):
+                using = source
+                break
+        out.append(
+            {
+                "provider": provider,
+                "label": MODE_LABELS[provider],
+                "own_connected": has_own,
+                "managed_available": offered,
+                "choice": choice,
+                "using": using,
+                # Extra minutes counted per call minute when this runs on CallPlus's account.
+                "managed_extra_minutes": managed.extra_minutes(provider),
+            }
+        )
+    return out
+
+
+@router.get("/modes")
+async def provider_modes(
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_READ)),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Per provider: use CallPlus's account (nothing to set up) or the workspace's own."""
+    tenant = await db.get(Tenant, ctx.tenant_id)
+    return await _provider_state(db, tenant)
+
+
+@router.put("/modes")
+async def set_provider_mode(
+    payload: SetProviderModeRequest,
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    if payload.provider not in managed.PROVIDERS:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown provider.")
+    tenant = await db.get(Tenant, ctx.tenant_id)
+    state = {s["provider"]: s for s in await _provider_state(db, tenant)}[payload.provider]
+    if payload.mode == "managed" and not state["managed_available"]:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "CallPlus's account is not offered for this provider.")
+    if payload.mode == "own" and not state["own_connected"]:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "Connect your own account for this provider first."
+        )
+    modes = dict(tenant.provider_modes or {})
+    if payload.mode is None:
+        modes.pop(payload.provider, None)
+    else:
+        modes[payload.provider] = payload.mode
+    tenant.provider_modes = modes
+    await db.commit()
+    await db.refresh(tenant)
+    return await _provider_state(db, tenant)
+
+
+@router.get("/providers")
+async def provider_catalogue(
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """What the agent form and the integrations page offer: providers, languages and which are usable, either on the
+    workspace's own account or on CallPlus's."""
+    tenant = await db.get(Tenant, ctx.tenant_id)
+    state = {s["provider"]: s for s in await _provider_state(db, tenant)}
+    rows = (await db.execute(select(Integration).where(Integration.tenant_id == ctx.tenant_id))).scalars().all()
+    llm = next((r.config for r in rows if r.provider == providers.LLM and r.status == IntegrationStatus.CONNECTED), None)
+
+    def usable(provider: str) -> bool:
+        s = state.get(provider)
+        return provider == providers.SARVAM or bool(s and (s["own_connected"] or s["managed_available"]))
+
+    return {
+        "stt": [{"id": k, "label": v, "connected": usable(k)} for k, v in providers.STT_PROVIDERS.items()],
+        "tts": [{"id": k, "label": v, "connected": usable(k)} for k, v in providers.TTS_PROVIDERS.items()],
+        "languages": {
+            "indian": providers.SARVAM_LANGUAGES,
+            "international": providers.INTERNATIONAL_LANGUAGES,
+        },
+        "llm_presets": {k: {"label": v["label"], "model": v["model"], "url": v["url"]} for k, v in providers.LLM_PRESETS.items()},
+        "llm": {"connected": llm is not None, "label": (llm or {}).get("label"), "model": (llm or {}).get("model")},
+        "modes": list(state.values()),
+    }
+
+
 def _exotel_steps() -> list[str]:
     return [
         "In Exotel, open App Bazaar and create a new flow (or edit the one your number uses).",
@@ -231,7 +472,7 @@ def _exotel_steps() -> list[str]:
         "Keep the sample rate at 8000.",
         "Add a Hangup applet after the Voicebot applet.",
         "Attach your Exotel number (ExoPhone) to this flow.",
-        "In CallPulse, add the same number under Phone numbers, choose Exotel, "
+        "In CallPlus, add the same number under Phone numbers, choose Exotel, "
         "and pick the AI agent.",
         "To place calls from this number too, copy the flow's App ID (next to it in App Bazaar) "
         "into Integrations → Exotel → Outgoing calls.",
@@ -291,6 +532,19 @@ async def new_exotel_stream_address(
         stream_url=exotel_service.stream_url(key),
         steps=_exotel_steps(),
     )
+
+
+@router.get("/exotel/numbers")
+async def exotel_numbers(
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_READ)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """ExoPhones already on the workspace's Exotel account. Buying one still happens in Exotel, after KYC."""
+    try:
+        numbers = await exotel_service.list_incoming_numbers(db, ctx.tenant_id)
+    except exotel_service.ExotelError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    return {"numbers": numbers}
 
 
 @router.put("/exotel/outbound", response_model=IntegrationRead)
