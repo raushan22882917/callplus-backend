@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-ChannelName = Literal["sms", "email", "web_chat", "instagram", "messenger", "web_form", "voicemail"]
+ChannelName = Literal["sms", "email", "web_chat", "web_form", "voicemail"]
 
 # Keys a tenant may store per channel. Anything else is rejected so the JSON
 # columns cannot be used as free-form storage.
@@ -40,8 +40,6 @@ CONFIG_KEYS: dict[str, set[str]] = {
         "call_from_number",
         "voice_enabled",
     },
-    "instagram": set(),
-    "messenger": set(),
     "web_form": {"allowed_origins", "callback_followup", "success_message", "ticket_priority"},
     "voicemail": {"greeting"},
 }
@@ -49,8 +47,6 @@ CREDENTIAL_KEYS: dict[str, set[str]] = {
     "sms": set(),
     "email": {"webhook_secret"},
     "web_chat": set(),
-    "instagram": {"page_access_token", "app_secret", "verify_token"},
-    "messenger": {"page_access_token", "app_secret", "verify_token"},
     "web_form": set(),
     "voicemail": set(),
 }

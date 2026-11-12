@@ -91,6 +91,8 @@ class InvoiceCheckout(BaseModel):
     description: str
     paypal_order_id: str | None = None
     paypal_approve_url: str | None = None
+    paypal_amount: str | None = None
+    paypal_currency: str | None = None
 
 
 class InvoiceConfirm(BaseModel):

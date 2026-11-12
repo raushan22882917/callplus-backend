@@ -7,6 +7,7 @@ import asyncio
 import uuid
 
 from app.core.crypto import encrypt_secret
+from app.core.audit import log_audit_event
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
 from app.integrations.credentials import (
@@ -27,6 +28,7 @@ from app.integrations.speech_providers import (
 )
 from app.integrations.twilio_client import check_account
 from app.schemas.integration import (
+    ConnectEmailSenderRequest,
     ConnectDeepgramRequest,
     ConnectElevenLabsRequest,
     ConnectExotelRequest,
@@ -38,6 +40,7 @@ from app.schemas.integration import (
     ExotelSetup,
     IntegrationRead,
 )
+from app.services import connection_health
 from app.services import exotel as exotel_service
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -99,6 +102,7 @@ async def _upsert_integration(
         )
     else:
         credential.encrypted_secret = encrypt_secret(secret)
+    connection_health.forget(tenant_id)
     return integration
 
 
@@ -222,6 +226,51 @@ async def connect_twilio(
     await db.commit()
     await db.refresh(integration)
     return integration
+
+
+@router.post("/email-sender", response_model=IntegrationRead, status_code=status.HTTP_201_CREATED)
+async def connect_email_sender(
+    payload: ConnectEmailSenderRequest,
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> Integration:
+    """Saves this workspace's own Resend or Brevo key, after the provider confirms the key and the sender address.
+    The key is encrypted and is used for this workspace's customer email."""
+    from app.integrations import email_providers
+
+    try:
+        await email_providers.check_sender(payload.provider, payload.api_key, str(payload.from_email))
+    except email_providers.EmailProviderError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    integration = await _upsert_integration(
+        db,
+        tenant_id=ctx.tenant_id,
+        provider="email_sender",
+        config={
+            "provider": payload.provider,
+            "from_email": str(payload.from_email).lower(),
+            **({"from_name": payload.from_name.strip()} if payload.from_name and payload.from_name.strip() else {}),
+        },
+        secret=payload.api_key.strip(),
+    )
+    await log_audit_event(
+        db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="integration.email_sender_connected",
+        resource_type="integration", resource_id=integration.id, extra={"provider": payload.provider},
+    )
+    await db.commit()
+    await db.refresh(integration)
+    return integration
+
+
+@router.get("/health")
+async def connections_health(
+    force: bool = False,
+    ctx: RequestContext = Depends(require_permission(Permissions.INTEGRATIONS_READ)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Asks each connected provider whether it still accepts this workspace's credentials. Kept for five minutes;
+    `force` asks again, at most once every fifteen seconds."""
+    return await connection_health.check_all(db, ctx.tenant_id, force=force)
 
 
 @router.get("/twilio/status")
@@ -506,6 +555,7 @@ async def connect_exotel(
     )
     await db.commit()
     await db.refresh(integration)
+    connection_health.forget(ctx.tenant_id)
     return ExotelSetup(
         integration=integration, stream_url=exotel_service.stream_url(key), steps=_exotel_steps()
     )
@@ -580,3 +630,4 @@ async def disconnect_integration(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Integration not connected")
     await db.delete(integration)
     await db.commit()
+    connection_health.forget(ctx.tenant_id)

@@ -204,10 +204,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
 }
 
 
+STAFF_ONLY_TOOLS: frozenset[str] = frozenset()
+
+
 async def execute_tool(name: str, ctx: ToolContext, arguments: dict[str, Any]) -> dict[str, Any]:
     spec = TOOL_REGISTRY.get(name)
     if spec is None:
         return {"error": f"unknown tool: {name}"}
+    if name in STAFF_ONLY_TOOLS and not ctx.staff:
+        return {"error": "That action is only available to the staff assistant"}
     try:
         return await spec.handler(ctx, **arguments)
     except TypeError as exc:
@@ -217,15 +222,18 @@ async def execute_tool(name: str, ctx: ToolContext, arguments: dict[str, Any]) -
 def _register_module_tools() -> None:
     """Tools defined in their own modules (crm, operations); merged here, after
     ToolSpec exists, so those modules can import it without a circular import."""
-    from app.tools import crm_tools, operations_tools, platform_tools
+    from app.tools import crm_tools, operations_tools, platform_tools, staff_tools
 
+    global STAFF_ONLY_TOOLS
     for specs in (
         crm_tools.build_tool_specs(),
         operations_tools.TOOL_SPECS,
         platform_tools.TOOL_SPECS,
+        staff_tools.TOOL_SPECS,
     ):
         for name, spec in specs.items():
             TOOL_REGISTRY[name] = spec if isinstance(spec, ToolSpec) else ToolSpec(**spec)
+    STAFF_ONLY_TOOLS = frozenset(staff_tools.TOOL_SPECS)
 
 
 _register_module_tools()

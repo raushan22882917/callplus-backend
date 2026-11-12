@@ -447,7 +447,7 @@ prompts against the live model.
 Every workspace has a plan tier (`tenants.plan_tier`): **Free**, **Starter**, **Growth**,
 **Scale**, **Enterprise**, or **legacy** (unlimited; what workspaces that predate plans get).
 The free plan is **10 AI call minutes in total** (one-time), at most 5 minutes per call, 50 WhatsApp
-messages, 20 SMS segments, 30 customer emails, 50 Instagram or Messenger replies, 1 agent, 1 phone number, 2 seats, 5 knowledge documents,
+messages, 20 SMS segments, 30 customer emails, 1 agent, 1 phone number, 2 seats, 5 knowledge documents,
 1 API key, no campaigns and no recording. A free workspace cannot buy a number on the platform Twilio
 account, and a number the platform bought is released on delete and after 14 idle days. Calls on that
 number, including a human queue, draw the same minute pool. Limits are enforced where the money is
@@ -461,7 +461,7 @@ non-legacy workspace gets 403 `email_unverified` before any of those spends.
 * New sign-ups start on `SIGNUP_PLAN_TIER` (default `free`). A subscription moves a workspace up
   (Razorpay webhook); a platform admin can grant extras with
   `PUT /api/v1/platform/admin/tenants/{id}/plan`. `GET /api/v1/billing/entitlements` feeds the Billing page.
-* Allowances are hard caps. `allow_overage` (a platform-admin override) lets a workspace past the minute, WhatsApp, SMS, email and Instagram/Messenger caps and writes the extra onto a pending invoice. Collecting that invoice in Razorpay is still manual. Legacy workspaces stay unlimited until a person moves them.
+* Allowances are hard caps. `allow_overage` (a platform-admin override) lets a workspace past the minute, WhatsApp, SMS and email caps and writes the extra onto a pending invoice. Collecting that invoice in Razorpay is still manual. Legacy workspaces stay unlimited until a person moves them.
 
 ## What's not here yet
 

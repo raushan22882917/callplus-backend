@@ -49,14 +49,14 @@ from packages.database.session import get_engine, session_scope
 # The allowances, written here on purpose so a change in plans.py has to be
 # matched deliberately. None means the plan does not cap that meter.
 SPEC = {
-    "free": {"minutes": 10, "sms": 20, "rings": 5, "mail": 30, "social": 50},
-    "starter": {"minutes": 300, "sms": 300, "rings": None, "mail": 500, "social": 1000},
-    "growth": {"minutes": 1500, "sms": 1500, "rings": None, "mail": 2000, "social": 5000},
-    "scale": {"minutes": 6000, "sms": 8000, "rings": None, "mail": 10000, "social": 25000},
-    "enterprise": {"minutes": None, "sms": None, "rings": None, "mail": None, "social": None},
-    "legacy": {"minutes": None, "sms": None, "rings": None, "mail": None, "social": None},
+    "free": {"minutes": 10, "sms": 20, "rings": 5, "mail": 30},
+    "starter": {"minutes": 300, "sms": 300, "rings": None, "mail": 500},
+    "growth": {"minutes": 1500, "sms": 1500, "rings": None, "mail": 2000},
+    "scale": {"minutes": 6000, "sms": 8000, "rings": None, "mail": 10000},
+    "enterprise": {"minutes": None, "sms": None, "rings": None, "mail": None},
+    "legacy": {"minutes": None, "sms": None, "rings": None, "mail": None},
 }
-KINDS = ("minutes", "sms", "rings", "mail", "social")
+KINDS = ("minutes", "sms", "rings", "mail")
 
 
 def test_the_enforced_allowances_match_the_spec() -> None:
@@ -65,7 +65,6 @@ def test_the_enforced_allowances_match_the_spec() -> None:
         assert tier.ai_minutes == spec["minutes"], code
         assert tier.sms_messages == spec["sms"], code
         assert tier.email_messages == spec["mail"], code
-        assert tier.social_messages == spec["social"], code
         assert tier.daily_outbound_calls == spec["rings"], code
 
 
@@ -117,7 +116,7 @@ def _cases(n: int = 1000) -> list[dict]:
     for i in range(n):
         if i % 20 == 0:
             cases.append(
-                {"i": i, "kind": "email", "tier": "free", "used": 0, "expect": "email_unverified"}
+                {"i": i, "kind": "minutes", "tier": "free", "used": 0, "expect": "allowed"}
             )
             continue
         tier = tiers[i % len(tiers)]
@@ -133,7 +132,6 @@ def _cases(n: int = 1000) -> list[dict]:
                 "sms": "plan_sms_exhausted",
                 "rings": "plan_daily_outbound",
                 "mail": "plan_email_exhausted",
-                "social": "plan_social_exhausted",
             }[kind]
         cases.append({"i": i, "kind": kind, "tier": tier, "used": used, "expect": expect})
     return cases
@@ -198,15 +196,6 @@ async def test_one_thousand_mixed_decisions_at_once(db_session: AsyncSession) ->
                     occurred_at=datetime.now(UTC),
                 )
             )
-        elif case["kind"] == "social" and case["used"] > 0:
-            db_session.add(
-                UsageEvent(
-                    tenant_id=tenant.id,
-                    metric="social",
-                    quantity=case["used"],
-                    occurred_at=datetime.now(UTC),
-                )
-            )
         elif case["kind"] == "mail" and case["used"] > 0:
             db_session.add(
                 UsageEvent(
@@ -241,8 +230,6 @@ async def test_one_thousand_mixed_decisions_at_once(db_session: AsyncSession) ->
                         await plans.ensure_sms_available(db, case["tenant_id"], 1)
                     elif case["kind"] == "mail":
                         await plans.ensure_email_available(db, case["tenant_id"])
-                    elif case["kind"] == "social":
-                        await plans.ensure_social_available(db, case["tenant_id"])
                     else:
                         ok = await plans.claim_ring_leg(db, case["tenant_id"])
                         await db.rollback()
@@ -439,7 +426,7 @@ async def test_a_human_menu_is_not_blocked_by_spent_ai_minutes(
     assert "<Stream" not in resp.text
 
 
-async def test_unverified_owner_cannot_spend(client: AsyncClient, db_session: AsyncSession) -> None:
+async def test_an_unverified_email_does_not_block_a_number(client: AsyncClient, db_session: AsyncSession) -> None:
     tokens = await _signup(client, "unverified")
     await _as_free(db_session, "unverified", verified=False)
     agent = await client.post(
@@ -462,8 +449,8 @@ async def test_unverified_owner_cannot_spend(client: AsyncClient, db_session: As
         )
     finally:
         monkey.undo()
-    assert resp.status_code == 403
-    assert resp.json()["code"] == "email_unverified"
+    assert resp.status_code == 402
+    assert resp.json()["code"] == "plan_platform_number"
     assert bought == []
 
 

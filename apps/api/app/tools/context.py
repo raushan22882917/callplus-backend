@@ -30,3 +30,5 @@ class ToolContext:
     call_id: uuid.UUID | None
     conversation_id: uuid.UUID | None
     customer_id: uuid.UUID | None
+    # True only for the staff assistant. Staff-only tools refuse every other caller.
+    staff: bool = False

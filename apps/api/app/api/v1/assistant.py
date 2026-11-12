@@ -50,7 +50,11 @@ async def chat(
         )
 
     reply_text = await run_assistant_turn(
-        db=db, tenant_id=ctx.tenant_id, conversation=conversation, user_text=payload.message
+        db=db,
+        tenant_id=ctx.tenant_id,
+        conversation=conversation,
+        user_text=payload.message,
+        page=payload.page,
     )
     await db.commit()
 

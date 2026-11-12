@@ -14,7 +14,7 @@ page, so check them against your console before relying on the margins.
 | **Starter** | ₹2,999 / month, 300 minutes, 1,000 WhatsApp messages |
 | **Growth** | ₹12,999 / month, 1,500 minutes, 5,000 WhatsApp messages |
 | **Scale** | ₹54,999 / month, 6,000 minutes, 25,000 WhatsApp messages |
-| **Enterprise** | Custom. Volume rates, from about ₹7 per minute |
+| **Enterprise** | Custom. Volume rates, from about ₹8 per minute |
 | **Annual** | Ten months' price for twelve (two months free) |
 | **Allowances** | Hard caps. See "Overage" below |
 | **Sarvam, two prices** | **CallPlus key** (`SARVAM_API_KEY`): one plan or wallet minute per call minute. **Workspace key**: the customer pays Sarvam and `cost_multiplier` is 0, so the plan and wallet are not charged again. Deepgram or ElevenLabs on CallPlus still add their extra minutes. |
@@ -31,7 +31,7 @@ Prices are in rupees, excluding GST.
    minute). None of them was derived from cost.
 4. **The old landing prices lose money.** Growth at ₹14,999 with 3,500 minutes is a
    −11% margin at full use, and its ₹3.80 per minute overage is −75% on outbound calls
-   (an outbound minute costs about ₹6.64 to serve).
+   (an outbound minute costs about ₹6.94 to serve).
 5. **WhatsApp usage was under-counted.** Usage is counted from saved `Message` rows,
    but the AI tool, appointment reminders, campaigns, follow-ups and CSAT surveys send
    without saving one, so those messages were never counted. Any cap or bill built
@@ -50,25 +50,25 @@ Per minute of an AI call, in rupees:
 
 | Part | Inbound | Outbound | Source |
 |---|---|---|---|
-| Twilio carrier | 0.66 | 4.36 | Outbound to India mobile is **$0.0496/min** ([Twilio](https://www.twilio.com/en-us/voice/pricing/in)). Inbound is **ASSUMPTION** (about $0.0075; Twilio's page does not list it) |
+| Twilio carrier | 0.71 | 4.66 | Outbound to India mobile is **$0.0496/min** ([Twilio](https://www.twilio.com/en-us/voice/pricing/in)). Inbound is **ASSUMPTION** (about $0.0075; Twilio's page does not list it) |
 | Media stream / carrier buffer | 0.35 | 0.35 | **ASSUMPTION** |
 | Sarvam speech-to-text | 0.49 | 0.49 | **₹0.49/min** pay-as-you-go ([Sarvam](https://www.sarvam.ai/api-pricing)). Streamed for the whole call |
 | Sarvam text-to-speech (bulbul v3) | 1.20 | 1.20 | **₹3.00 per 1,000 characters**; assumes about 400 characters per call minute |
 | Sarvam LLM (sarvam-105b) | 0.40 | 0.40 | ₹15 / ₹60 per million input / output tokens; assumes 4 turns a minute, 3,000 tokens in and 250 out per turn |
-| **Total** | **2.94** | **6.64** | |
+| **Total** | **2.99** | **6.94** | |
 
-Blended at 60% inbound: **₹4.42 per minute.** The older indicative setting
+Blended at 60% inbound: **₹4.57 per minute.** The older indicative setting
 `ai_call_cost_paise_per_minute` (₹4.00, used by the AI analytics page) is within about 10% of that;
-set it to `442` once you have replaced the assumptions with real measurements.
+set it to `457` once you have replaced the assumptions with real measurements.
 
 Other costs that are not per minute:
 
 | Cost | Amount | Note |
 |---|---|---|
-| Phone number | about ₹176 / month each | Twilio's page starts at $1.15; India local is closer to $2 (**ASSUMPTION**) |
+| Phone number | about ₹188 / month each | Twilio's page starts at $1.15; India local is closer to $2 (**ASSUMPTION**) |
 | WhatsApp (Meta, India) | utility ₹0.115, marketing ₹0.8631, service free in the 24-hour window | Marketing rate rose in 2026. India rates come from secondary sources; Meta's own page links a CSV. Meta no longer makes utility messages inside the window free (from 1 Oct 2026) |
 | Razorpay | 2% + 18% GST on the fee, about 2.4% | Subscriptions on cards are quoted 0.9% plus platform fees |
-| Hosting (Railway) | about ₹4,750 / month at the current estimate | Dominated by memory ($28.71 of $30.46 so far this period) |
+| Hosting (Railway) | about ₹5,100 / month at the current estimate | Dominated by memory ($28.71 of $30.46 so far this period) |
 
 ## Plan margins
 
@@ -77,9 +77,9 @@ the customer uses (the model assumes 60% inbound calls and ₹0.25 average per W
 
 | Plan | Price | Per included minute | 100% used | 60% used | 40% used |
 |---|---|---|---|---|---|
-| Starter | ₹2,999 | ₹10.00 | 33% | 54% | 65% |
-| Growth | ₹12,999 | ₹8.67 | 30% | 54% | 67% |
-| Scale | ₹54,999 | ₹9.17 | 32% | 55% | 67% |
+| Starter | ₹2,999 | ₹10.00 | 31% | 53% | 63% |
+| Growth | ₹12,999 | ₹8.67 | 28% | 53% | 65% |
+| Scale | ₹54,999 | ₹9.17 | 30% | 54% | 66% |
 
 Customers typically use well under their whole allowance, so real margins should sit
 near the 60% column. The hosting bill is covered by about three Starter customers.
@@ -90,11 +90,11 @@ The most one sign-up can cost us, in rupees:
 
 | | Cost |
 |---|---|
-| 10 minutes, all outbound | 66 |
-| 10 minutes, all inbound | 29 |
+| 10 minutes, all outbound | 69 |
+| 10 minutes, all inbound | 30 |
 | 50 WhatsApp messages, all marketing | 43 |
-| One phone number, first month | 176 |
-| **Worst case in total** | **about 286** |
+| One phone number, first month | 188 |
+| **Worst case in total** | **about 301** |
 
 The 10-minute pool is lifetime, so abandoned accounts stop costing minutes. A free
 workspace cannot buy a number on the platform Twilio account. A number the platform
@@ -114,7 +114,6 @@ draw the same minute pool, and the plan's per-call cap hangs up the dial.
 | WhatsApp messages | claimed in its own transaction before the Meta call, so two sends cannot share the last message. A campaign pauses instead of failing each contact. A reply saved as a message is counted from that row |
 | SMS segments | `reserve_sms` under the tenant lock |
 | Customer email | `reserve_email`. Verification and password mail is not counted |
-| Instagram and Messenger | `reserve_social`, one count per reply even when the text is split. These use the workspace's own page token |
 | Unverified owner | `ensure_owner_verified` on every spend, except legacy workspaces |
 
 Errors come back as HTTP **402** (HTTP **429** for rate-style limits) with
@@ -140,8 +139,8 @@ Only the Razorpay webhook and a platform admin
 
 Allowances are hard caps. A workspace that reaches its monthly minutes is stopped, and
 the 402 tells it to upgrade. A platform admin can grant bonus minutes, or `allow_overage`.
-`allow_overage` lets the workspace keep going past the minute, WhatsApp, SMS, email and
-Instagram/Messenger caps, and `sync_overage_invoice` writes the extra onto a pending
+`allow_overage` lets the workspace keep going past the minute, WhatsApp, SMS and email
+caps, and `sync_overage_invoice` writes the extra onto a pending
 invoice. Minutes use the plan rate (Starter ₹10, Growth ₹9, Scale ₹8 per minute). Messages
 use the wallet rates below. Free has no minute rate, so its minutes are not invoiced.
 Pay-as-you-go is charged from the wallet instead. Opening Billing, ending a call, and the
@@ -162,13 +161,12 @@ usage becomes a new one.
 3. **Legacy tenants stay unlimited** until you move them. That is deliberate: they
    predate plans. New sign-ups start on Free. The test suite signs up onto legacy so
    older tests are not plan tests.
-4. **An unverified owner cannot spend** (calls, messages, a platform number, a ring)
-   on any tier except legacy. Signup still returns a token so they can open the
-   verification link.
+4. **There is no email confirmation.** Signup opens the workspace immediately. No
+   confirmation mail is sent, and calls, messages, and number purchase do not wait on one.
 5. **Collect the pending overage invoice.** The row is written when `allow_overage`
    is on. Charging it through Razorpay is still a manual step: nothing here captures
    a card for that invoice.
-6. **Exchange rate.** The model uses ₹88 per US dollar; carrier costs move with it.
+6. **Exchange rate.** The model uses ₹94 per US dollar (the live rate the wallet showed on 12 Nov 2026); carrier costs move with it. At ₹88 the same minute cost ₹2.94 inbound and ₹6.64 outbound.
 
 ## Wallet (pay as you go)
 
@@ -185,17 +183,30 @@ minutes and messages they use.
   | Top-up | Inbound / min | Outbound / min |
   |---|---|---|
   | ₹100 – ₹999 | ₹5.00 | ₹9.00 |
-  | ₹1,000 – ₹4,999 | ₹4.50 | ₹8.00 |
-  | ₹5,000 – ₹19,999 | ₹4.00 | ₹7.50 |
-  | ₹20,000 and up | ₹3.50 | ₹7.00 |
+  | ₹1,000 – ₹4,999 | ₹4.50 | ₹8.50 |
+  | ₹5,000 and up | ₹4.00 | ₹8.00 |
 
-  WhatsApp messages ₹1.50, SMS ₹0.75, customer email ₹0.20, Instagram or Messenger ₹0.20.
-  Instagram and Messenger use the workspace's own Meta token, so that charge is for the platform.
-  These leave a margin over today's cost (about ₹2.94
-  inbound, ₹6.64 outbound per minute, table above). **Lower them as the cost per minute falls**
+  The cheapest outbound minute stays at ₹8. An outbound Indian minute costs about ₹6.94 to serve,
+  and after the payment fee ₹7 would leave almost nothing. Inbound does not go under ₹4.
+  A workspace turns each service on in Billing. A service that is off is refused and is not charged.
+  Calls, WhatsApp, SMS, and email are separate. The bill is only the ones they use.
+
+  **Credits.** 1 credit is ₹1 (100 paise). The billing page shows the balance in credits and a
+  calculator that uses the same numbers the wallet deducts (`app/services/credits.py`).
+  A browser call, or a call on a number the workspace connected through Exotel, is **2.50 credits a minute**
+  (`OWN_LINE_PAISE`), in India or abroad, because those calls do not use our Twilio line.
+  Sarvam speech plus the language model is about ₹1.93, so 2.50 credits still covers the payment fee.
+  A Twilio call inside India stays on the table above: outbound to an Indian mobile still costs about ₹6.94 to serve.
+  A Twilio call to another country is 17.50 credits a minute for every country: 2.50 credits of speech plus
+  15 credits for the phone line. The speech part is multiplied
+  when the agent uses our Deepgram or ElevenLabs account, and it is ₹0 when the workspace pays those providers
+  itself; the phone line is still charged.
+  WhatsApp messages ₹1.50, SMS ₹0.75, customer email ₹0.20.
+  These leave a margin over today's cost (about ₹2.99
+  inbound, ₹6.94 outbound per minute, table above). **Lower them as the cost per minute falls**
   (an Indian carrier, silence-gated speech-to-text); at today's cost, ₹2–4 per minute would lose money.
 - **Charging.** Calls are charged per started minute when they finish, and WhatsApp, SMS,
-  email and Instagram/Messenger per message, from what already exists (calls, outbound
+  email per message, from what already exists (calls, outbound
   WhatsApp messages, usage events). Every
   charge is one ledger row with a unique reference, so a retry or a second worker cannot charge
   twice. A Celery job settles every wallet each minute, and a wallet is settled whenever it is read
@@ -208,17 +219,26 @@ minutes and messages they use.
   monthly plan have their own minutes, and `legacy` (unlimited) workspaces are not changed.
 - **Payment confirmation.** The browser confirms with Razorpay's signature right after Checkout;
   the `payment.captured` / `order.paid` webhook does the same if the browser never returns. PayPal
-  is the same wallet: `POST /wallet/topups` with `"provider": "paypal"` creates an order in INR
-  (credit plus GST). The browser approves it, then `POST /wallet/topups/{id}/capture` captures it
-  with our secret and credits the wallet. The webhook
-  `{PUBLIC_BASE_URL}/api/v1/webhooks/payment/paypal` (events `CHECKOUT.ORDER.APPROVED` and
+  is the same wallet: `POST /wallet/topups` with `"provider": "paypal"` creates an order for the
+  rupee total (credit plus GST), charged in US dollars because this PayPal account cannot receive
+  INR. The rupee total is turned into dollars at the live USD to INR rate, read again for
+  each order and kept for one minute on the page. The dollar charge is rounded up and includes
+  PayPal's receiving fee, GST on that fee, and PayPal's 3% conversion cut, so the rupees
+  credited are covered (`PAYPAL_INR_PER_USD` is only the fallback when that rate cannot be read). The wallet, the quote, and the
+  invoice show both: the tax invoice stays in rupees, and the PayPal line is the dollars collected
+  (`charged_cents` on the top-up). A dollar invoice is charged as those dollars, not converted again.
+  PayPal sends the buyer back to
+  `/billing?paypal=topup&token={order id}`, and the dashboard calls `POST /wallet/paypal/capture` to
+  capture it and credit the rupee amount. `POST /wallet/topups/{id}/capture` does the same. The
+  webhook `{PUBLIC_BASE_URL}/api/v1/webhooks/payment/paypal` (events `CHECKOUT.ORDER.APPROVED` and
   `PAYMENT.CAPTURE.COMPLETED`) captures and credits if the browser never returns. Both providers
   credit an order only when the paid amount is exactly the one we asked for.
 - **API:** `GET /wallet`, `PUT /wallet/billing-profile`, `POST /wallet/topups`,
-  `POST /wallet/topups/{id}/verify`, `POST /wallet/topups/{id}/capture`, `GET /wallet/transactions`,
+  `POST /wallet/topups/{id}/verify`, `POST /wallet/topups/{id}/capture`, `POST /wallet/paypal/capture`,
+  `GET /wallet/transactions`,
   `GET /wallet/topups`, `GET /wallet/topups/{id}/invoice`. Dashboard: Billing → Wallet.
   PayPal needs `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID`, and
-  `PAYPAL_MODE` (`sandbox` or `live`). The PayPal account must be able to receive INR.
+  `PAYPAL_MODE` (`sandbox` or `live`). The buyer pays in USD at the live rupees-per-dollar rate.
 - **Before launch:** set `SELLER_LEGAL_NAME`, `SELLER_GSTIN`, `SELLER_STATE_CODE`,
   `SELLER_ADDRESS`; point the Razorpay webhook at `/api/v1/webhooks/payment/razorpay` and enable
   `payment.captured` and `order.paid`; for PayPal, point the webhook at `/api/v1/webhooks/payment/paypal`

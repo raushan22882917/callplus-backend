@@ -15,6 +15,21 @@ class TopupVerify(BaseModel):
     signature: str = Field(min_length=10, max_length=128)
 
 
+class PayPalCapture(BaseModel):
+    """PayPal's return URL puts the order id in `token`. The dashboard sends it here."""
+
+    order_id: str = Field(min_length=3, max_length=64)
+
+
+class ServiceChoice(BaseModel):
+    """Which services this workspace wants. A turned-off service is not sent and is not charged."""
+
+    calls: bool = True
+    whatsapp: bool = True
+    sms: bool = True
+    email: bool = True
+
+
 class BillingProfile(BaseModel):
     billing_name: str = Field(min_length=2, max_length=255)
     gstin: str | None = Field(default=None, max_length=15)
@@ -37,8 +52,11 @@ class TopupRead(BaseModel):
 
     id: uuid.UUID
     status: str
+    provider: str = "razorpay"
     amount_paise: int
     total_paise: int
+    charged_cents: int | None = None
+    fx_inr_per_usd: int | None = None
     invoice_number: str | None
     inbound_rate_paise: int
     outbound_rate_paise: int

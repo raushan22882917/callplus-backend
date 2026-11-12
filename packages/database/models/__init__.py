@@ -73,6 +73,9 @@ from packages.database.models.knowledge import (
 )
 from packages.database.models.mcp import McpApiKey
 from packages.database.models.mcp_oauth import McpOAuthClient, McpOAuthCode, McpOAuthToken
+from packages.database.models.email_mailbox import EmailMailbox
+from packages.database.models.email_suppression import EmailSuppression
+from packages.database.models.email_template import EmailTemplate
 from packages.database.models.oauth import (  # noqa: E402
     OAuthConnection,
     OAuthConnectionStatus,
@@ -138,6 +141,7 @@ from packages.database.models.ticket import Ticket, TicketComment, TicketPriorit
 from packages.database.models.transfer_target import TransferTarget
 from packages.database.models.user import User
 from packages.database.models.whatsapp import WhatsAppAccount, WhatsAppTemplate
+from packages.database.models.pack import PackPurchase
 from packages.database.models.wallet import Wallet, WalletTopup, WalletTransaction
 from packages.database.models.widget_lead import WidgetLead
 from packages.database.models.workflow import (
@@ -205,6 +209,7 @@ __all__ = [
     "CsatSettings",
     "UserSession",
     "Wallet",
+    "PackPurchase",
     "WalletTopup",
     "WalletTransaction",
     "WidgetLead",
@@ -294,6 +299,9 @@ __all__ = [
     "UsageEvent",
     "PricingPlan",
     "IntegrationConnector",
+    "EmailMailbox",
+    "EmailSuppression",
+    "EmailTemplate",
     "OAuthConnection",
     "OAuthConnectionStatus",
     "OAuthState",

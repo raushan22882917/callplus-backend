@@ -10,7 +10,7 @@ from the provider's own published page and should be checked in the console.
 from dataclasses import dataclass
 
 # --- FX and carrier --------------------------------------------------------
-USD_INR = 88.0  # ASSUMPTION: planning rate, update to the current one
+USD_INR = 94.0  # the live rate the app's wallet showed on 12 Nov 2026; update when it moves
 TWILIO_OUT_MOBILE_USD = 0.0496  # Twilio India outbound to mobile (published)
 TWILIO_IN_USD = 0.0075  # ASSUMPTION: inbound to an Indian number, third-party figure
 TWILIO_NUMBER_USD_MONTH = 2.0  # ASSUMPTION: published floor is $1.15, India local ~$2
@@ -91,6 +91,69 @@ def free_tier_worst_case(minutes: int = 10, wa: int = 50) -> dict[str, float]:
     }
 
 
+# --- Channel packs (docs/CHANNEL_PACKS.md) ---------------------------------
+# Email and SMS costs. Email through an SES-class API is $0.10 per 1,000; Resend's overage is
+# $0.90 per 1,000 and is the worst case. India SMS on a DLT route is about ₹0.11 to ₹0.35 a
+# segment (published 2026 rate cards).
+EMAIL_INR_EXPECTED = 0.10 / 1000 * USD_INR
+EMAIL_INR_WORST = 0.90 / 1000 * USD_INR
+SMS_INR_EXPECTED = 0.20
+SMS_INR_WORST = 0.35
+PACK_NUMBERS = 2  # a Call pack unlocks two phone numbers
+
+
+@dataclass(frozen=True)
+class Pack:
+    name: str
+    price: float  # per 30 days, ex-GST
+    minutes: int = 0
+    whatsapp: int = 0
+    emails: int = 0
+    sms: int = 0
+    numbers: int = 0
+
+
+def pack_cost(
+    pack: Pack, use: float, *, worst: bool = False, inbound_share: float = INBOUND_SHARE
+) -> float:
+    """What serving this pack costs in a 30 day window when `use` of its allowance is used."""
+    minute = INBOUND * inbound_share + OUTBOUND * (1 - inbound_share)
+    wa = WA_MARKETING_INR if worst else WA_BLENDED_INR
+    email = EMAIL_INR_WORST if worst else EMAIL_INR_EXPECTED
+    sms = SMS_INR_WORST if worst else SMS_INR_EXPECTED
+    variable = pack.minutes * minute + pack.whatsapp * wa + pack.emails * email + pack.sms * sms
+    return variable * use + pack.numbers * NUMBER_INR + pack.price * RAZORPAY_FEE
+
+
+def pack_margin(pack: Pack, use: float, **kw) -> float:
+    return (pack.price - pack_cost(pack, use, **kw)) / pack.price
+
+
+CURRENT_PACKS = [
+    Pack("Call", 2499, minutes=250, numbers=PACK_NUMBERS),
+    Pack("WhatsApp", 1499, whatsapp=1000),
+    Pack("Email + SMS", 999, emails=3000, sms=500),
+]
+PROPOSED_PACKS = [
+    Pack("Call", 2199, minutes=250, numbers=PACK_NUMBERS),
+    Pack("WhatsApp", 899, whatsapp=1000),
+    Pack("Email + SMS", 449, emails=3000, sms=500),
+]
+
+
+def print_packs(title: str, packs: list[Pack]) -> None:
+    print(title)
+    uses = "".join(f"{int(u * 100):>4d}% use " for u in (1.0, 0.6, 0.4))
+    print(f"  {'pack':12s}{'price':>8s}{'cost@100%':>11s}  {uses}   worst case")
+    for p in packs:
+        cols = "".join(f"{pack_margin(p, u):>9.0%} " for u in (1.0, 0.6, 0.4))
+        worst = pack_margin(p, 1.0, worst=True, inbound_share=0.0 if p.minutes else INBOUND_SHARE)
+        print(f"  {p.name:12s}{p.price:8,.0f}{pack_cost(p, 1.0):11,.0f}  {cols}   {worst:>6.0%}")
+    total = sum(p.price for p in packs)
+    print(f"  all three: {total:,.0f} list, {total * 0.9:,.0f} with the 10% bundle discount "
+          f"(${total * 0.9 / USD_INR:,.2f})\n")
+
+
 def main() -> None:
     print("COST OF ONE AI CALL MINUTE (INR)")
     print(f"  inbound   {INBOUND:5.2f}")
@@ -127,6 +190,28 @@ def main() -> None:
     print(f"\nBREAK-EVEN: fixed infra {fixed_need:,.0f}/month is covered by about "
           f"{fixed_need / (PLANS[0].price * (1 - 0.5)):.1f} Starter customers at 50% margin")
 
+    # Cheapest minute we can sell without losing money. Twilio outbound to an Indian
+    # mobile is most of the outbound cost, so a call that does not use Twilio (the
+    # browser, or the workspace's own Exotel number) drops the carrier and the media
+    # surcharge. Sarvam's bundled voice-agent minute is ₹3.50 plus ₹0.40 telephony,
+    # which is dearer than buying the speech APIs ourselves.
+    speech = STT_INR_PER_MIN + TTS_CHARS_PER_CALL_MIN / 1000 * TTS_INR_PER_1K_CHARS
+    llm = TURNS_PER_MIN * (
+        LLM_IN_TOKENS_PER_TURN * LLM_IN_INR_PER_M + LLM_OUT_TOKENS_PER_TURN * LLM_OUT_INR_PER_M
+    ) / 1_000_000
+    own_line = speech + llm
+    print("\nCHEAPEST MINUTE (INR), no Twilio")
+    print(f"  speech {speech:.2f} + language model {llm:.2f} = {own_line:.2f} to serve")
+    print(f"  charge 2.50  (wallet OWN_LINE_PAISE); margin {(2.50 - own_line) / 2.50:.0%} before the payment fee")
+    print(f"  Twilio outbound still costs {OUTBOUND:.2f} to serve, so those rates stay at ₹8–9")
+    print("  Sarvam voice-agent bundle is 3.50 plus 0.40 telephony = 3.90, dearer than this")
+
 
 if __name__ == "__main__":
     main()
+    print()
+    print("CHANNEL PACKS: gross margin by use of the allowance")
+    print("  (worst case: every call outbound, every WhatsApp a marketing message,")
+    print("   SMS at 0.35, email at overage rates)")
+    print_packs("  Current prices", CURRENT_PACKS)
+    print_packs("  Proposed prices", PROPOSED_PACKS)

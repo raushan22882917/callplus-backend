@@ -334,7 +334,7 @@ async def _send_sms(db, tenant_id, customer, text):
     return message, target
 
 
-async def _send_email(db, tenant_id, customer, text, subject):
+async def _send_email(db, tenant_id, customer, text, subject, extra_headers=None):
     if not customer.email:
         raise FollowUpError("No email address on file for this customer.")
     email_settings = await svc.get_channel_settings(db, tenant_id, "email")
@@ -351,6 +351,7 @@ async def _send_email(db, tenant_id, customer, text, subject):
             else None,
             db=db,
             tenant_id=tenant_id,
+            extra_headers=extra_headers,
         )
     except ChannelSendError as exc:
         raise FollowUpError(str(exc)) from exc

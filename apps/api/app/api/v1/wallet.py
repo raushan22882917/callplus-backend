@@ -8,7 +8,15 @@ from app.core.config import get_settings
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.permissions import Permissions
 from app.integrations import paypal_client, razorpay_client
-from app.schemas.wallet import BillingProfile, TopupCreate, TopupRead, TopupVerify, TransactionRead
+from app.schemas.wallet import (
+    BillingProfile,
+    PayPalCapture,
+    ServiceChoice,
+    TopupCreate,
+    TopupRead,
+    TopupVerify,
+    TransactionRead,
+)
 from app.services import plans, wallet
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import HTMLResponse
@@ -22,12 +30,19 @@ Billing = Depends(require_permission(Permissions.BILLING_MANAGE))
 
 
 def _can_topup(tenant: Tenant) -> tuple[bool, str | None]:
+    """Any workspace except unlimited legacy can buy credit for the services it chose."""
     tier = plans.effective(tenant)
-    if tier.code in ("free", "payg"):
-        return True, None
     if tier.code == "legacy":
         return False, "Your workspace has unlimited legacy access. Contact support to move to pay-as-you-go."
-    return False, f"You are on the {tier.name} plan, which includes its own minutes. The wallet is for pay-as-you-go workspaces."
+    return True, None
+
+
+async def _dollar_rate() -> int:
+    """Rupees per dollar for the PayPal quote. The live rate, or 0 if it cannot be read."""
+    try:
+        return await paypal_client.current_inr_per_usd()
+    except paypal_client.PayPalAPIError:
+        return 0
 
 
 async def _summary(db: AsyncSession, tenant: Tenant) -> dict:
@@ -42,21 +57,25 @@ async def _summary(db: AsyncSession, tenant: Tenant) -> dict:
         "active": bool(w) and plans.effective(tenant).code == "payg",
         "inbound_rate_paise": inbound,
         "outbound_rate_paise": outbound,
+        "own_line_paise": wallet.OWN_LINE_PAISE,
+        "credits": round(balance / 100, 2),
+        "price_card": wallet.credit_prices(inbound, outbound),
         "minutes_left_inbound": max(balance, 0) // max(inbound, 1),
         "minutes_left_outbound": max(balance, 0) // max(outbound, 1),
         "whatsapp_message_paise": wallet.WHATSAPP_MESSAGE_PAISE,
         "sms_paise": wallet.SMS_PAISE,
         "email_paise": wallet.EMAIL_PAISE,
-        "social_paise": wallet.SOCIAL_PAISE,
         "paypal_enabled": bool(
             get_settings().paypal_client_id and get_settings().paypal_client_secret
         ),
+        "paypal_inr_per_usd": await _dollar_rate(),
         "paypal_client_id": get_settings().paypal_client_id or None,
         "paypal_mode": get_settings().paypal_mode,
         "gst_percent": wallet.GST_PERCENT,
         "min_topup_paise": wallet.TOPUP_MIN_PAISE,
         "max_topup_paise": wallet.TOPUP_MAX_PAISE,
         "rate_table": wallet.rate_table(),
+        "services": wallet.services_from(w.services if w else None),
         "can_topup": can,
         "cannot_topup_reason": why_not,
         "billing_profile": {
@@ -103,6 +122,24 @@ async def save_billing_profile(
     return out
 
 
+@router.put("/services")
+async def save_services(
+    payload: ServiceChoice, ctx: RequestContext = Billing, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """The workspace picks the services it wants. Turned-off ones are refused and not charged."""
+    w = await wallet.ensure_wallet(db, ctx.tenant_id)
+    chosen = payload.model_dump()
+    w.services = chosen
+    await log_audit_event(
+        db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="wallet.services_saved",
+        resource_type="wallet", resource_id=w.id, extra=chosen,
+    )
+    tenant = await db.get(Tenant, ctx.tenant_id)
+    out = await _summary(db, tenant)
+    await db.commit()
+    return out
+
+
 @router.post("/topups", status_code=status.HTTP_201_CREATED)
 async def create_topup(
     payload: TopupCreate, ctx: RequestContext = Billing, db: AsyncSession = Depends(get_db)
@@ -124,8 +161,13 @@ async def create_topup(
     provider = payload.provider
     try:
         if provider == "paypal":
+            return_url, cancel_url = paypal_client.checkout_urls("topup")
             order = await paypal_client.create_order(
-                amount_paise=tax["total"], receipt=receipt, custom_id=str(ctx.tenant_id)
+                amount_paise=tax["total"],
+                receipt=receipt,
+                custom_id=str(ctx.tenant_id),
+                return_url=return_url,
+                cancel_url=cancel_url,
             )
         else:
             order = await razorpay_client.create_order(
@@ -143,6 +185,8 @@ async def create_topup(
         sgst_paise=tax["sgst"],
         igst_paise=tax["igst"],
         total_paise=tax["total"],
+        charged_cents=order.get("charged_cents") if provider == "paypal" else None,
+        fx_inr_per_usd=order.get("fx_inr_per_usd") if provider == "paypal" else None,
         inbound_rate_paise=inbound,
         outbound_rate_paise=outbound,
         billing_name=w.billing_name,
@@ -170,6 +214,8 @@ async def create_topup(
         "inbound_rate_paise": inbound,
         "outbound_rate_paise": outbound,
         "currency": "INR",
+        "paypal_amount": order.get("value") if provider == "paypal" else None,
+        "paypal_currency": order.get("currency") if provider == "paypal" else None,
     }
 
 
@@ -216,29 +262,24 @@ async def verify_topup(
     return out
 
 
-@router.post("/topups/{topup_id}/capture")
-async def capture_topup(
-    topup_id: uuid.UUID, ctx: RequestContext = Billing, db: AsyncSession = Depends(get_db)
-) -> dict:
-    """Called after the buyer approves the PayPal order. We capture it ourselves, so the
-    browser never has to send a signature, and credit the wallet when the captured amount
-    is the one we asked for."""
-    topup = await _own_topup(db, ctx.tenant_id, topup_id)
+async def _capture_paypal_topup(db: AsyncSession, ctx: RequestContext, topup: WalletTopup) -> dict:
+    """Captures the approved PayPal order and credits the rupee amount when the dollars match."""
     if topup.provider != "paypal":
         raise HTTPException(status.HTTP_409_CONFLICT, "This top-up is paid with Razorpay")
     try:
         order = await paypal_client.capture_order(topup.provider_order_id)
     except paypal_client.PayPalAPIError as exc:
         raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(exc)) from exc
-    captured = paypal_client.capture_from_order(order)
-    if captured is None or captured[2] != "INR":
+    payment_id = paypal_client.capture_payment_id(
+        order, topup.total_paise, expected_cents=topup.charged_cents
+    )
+    if payment_id is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "PayPal has not completed this payment")
-    payment_id, paid_paise, _currency = captured
     if await wallet.credit_paid_order(
         db,
         order_id=topup.provider_order_id,
         payment_id=payment_id,
-        paid_paise=paid_paise,
+        paid_paise=topup.total_paise,
         provider="paypal",
     ):
         await log_audit_event(
@@ -250,6 +291,45 @@ async def capture_topup(
     out = await _summary(db, tenant)
     await db.commit()
     return out
+
+
+@router.post("/paypal/capture")
+async def capture_paypal_return(
+    payload: PayPalCapture, ctx: RequestContext = Billing, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """The billing page calls this when PayPal redirects back with the order id in `token`."""
+    topup = (
+        await db.execute(
+            select(WalletTopup).where(
+                WalletTopup.provider_order_id == payload.order_id,
+                WalletTopup.tenant_id == ctx.tenant_id,
+                WalletTopup.provider == "paypal",
+            )
+        )
+    ).scalar_one_or_none()
+    if topup is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "PayPal payment not found")
+    return await _capture_paypal_topup(db, ctx, topup)
+
+
+@router.post("/topups/{topup_id}/capture")
+async def capture_topup(
+    topup_id: uuid.UUID, ctx: RequestContext = Billing, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Called after the buyer approves the PayPal order. We capture it ourselves, so the
+    browser never has to send a signature, and credit the wallet when the captured amount
+    is the one we asked for."""
+    topup = await _own_topup(db, ctx.tenant_id, topup_id)
+    return await _capture_paypal_topup(db, ctx, topup)
+
+
+@router.get("/usage")
+async def wallet_usage(ctx: RequestContext = Billing, db: AsyncSession = Depends(get_db)) -> dict:
+    """This month's charges, one line per service. Unused services are zero."""
+    await wallet.settle(db, ctx.tenant_id)
+    summary = await wallet.usage_by_service(db, ctx.tenant_id)
+    await db.commit()
+    return summary
 
 
 @router.get("/transactions", response_model=list[TransactionRead])

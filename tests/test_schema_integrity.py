@@ -118,7 +118,7 @@ async def test_the_migrated_database_matches_the_models_and_isolates_every_tenan
 # in the body) or serve visitors who have no account. Adding a route here is a security decision.
 PUBLIC = re.compile(
     r"^/api/v1/("
-    r"auth/(signup|login|refresh|forgot-password|reset-password|verify-email|resend-verification|sso|oauth)"
+    r"auth/(signup|login|refresh|forgot-password|reset-password|sso|oauth)"
     r"|channels/(sms/webhook|email/webhook|meta/webhook|forms|webchat|webcall|voicemail|click-to-call/bridge)"
     r"|webhooks/"
     r"|privacy/public/"

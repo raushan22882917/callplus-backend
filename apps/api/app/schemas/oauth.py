@@ -28,6 +28,19 @@ class OAuthProviderRead(BaseModel):
     selected: dict[str, Any] | None = None
     redirect_uri: str
     supports_login: bool = False
+    # An API token can be pasted instead of signing in (HubSpot, Shopify, Slack).
+    token_supported: bool = False
+    token_label: str | None = None
+    token_steps: str | None = None
+    token_url: str | None = None
+    token_placeholder: str | None = None
+    # True when the saved connection was made with a pasted token, not a sign-in.
+    via_token: bool = False
+
+
+class TokenConnectRequest(BaseModel):
+    token: str = Field(min_length=8, max_length=600)
+    shop: str | None = Field(default=None, max_length=255)
 
 
 class AuthorizeRequest(BaseModel):
@@ -46,7 +59,6 @@ class ResourceItem(BaseModel):
     name: str
     primary: bool = False
     detail: str | None = None
-    instagram: dict[str, Any] | None = None
 
 
 class ResourcesResponse(BaseModel):
@@ -58,8 +70,6 @@ class ResourcesResponse(BaseModel):
 class SelectRequest(BaseModel):
     resource_id: str | None = Field(default=None, max_length=255)
     block_busy: bool | None = None
-    messenger: bool | None = None
-    instagram: bool | None = None
     events: list[str] | None = None
 
 

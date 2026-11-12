@@ -101,6 +101,10 @@ celery_app.conf.beat_schedule = {
         "task": "campaigns.start_due",
         "schedule": 60.0,
     },
+    "mailbox-poll": {
+        "task": "mailbox.poll",
+        "schedule": 2 * 60.0,
+    },
     "calls-reap-stuck": {
         "task": "calls.reap_stuck_calls",
         "schedule": 2 * 60.0,
@@ -124,6 +128,7 @@ celery_app.conf.beat_schedule = {
 from app.worker import (  # noqa: E402,F401
     call_tasks,
     campaign_tasks,
+    mailbox_tasks,
     knowledge_tasks,
     operations_tasks,
     platform_tasks,

@@ -236,6 +236,7 @@ class AdminTenantDetail(AdminTenantRow):
     user_list: list[dict[str, Any]]
     number_list: list[dict[str, Any]]
     usage: UsageSummary
+    plan_overrides: dict[str, Any] = {}
 
 
 class AdminHealth(BaseModel):

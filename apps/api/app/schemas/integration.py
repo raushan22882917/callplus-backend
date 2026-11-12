@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from packages.database.models import IntegrationStatus
 
@@ -20,6 +20,15 @@ class IntegrationRead(BaseModel):
 class ConnectTwilioRequest(BaseModel):
     account_sid: str = Field(min_length=1, max_length=64)
     auth_token: str = Field(min_length=1)
+
+
+class ConnectEmailSenderRequest(BaseModel):
+    """The workspace's own Resend or Brevo account, and the address its customer email comes from."""
+
+    provider: Literal["resend", "brevo"]
+    api_key: str = Field(min_length=8, max_length=400)
+    from_email: EmailStr
+    from_name: str | None = Field(default=None, max_length=80)
 
 
 class ConnectSarvamRequest(BaseModel):

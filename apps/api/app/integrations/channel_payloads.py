@@ -1,9 +1,7 @@
-"""Pure parsers/validators for inbound channel payloads (email providers,
-Meta Messenger/Instagram, Twilio voicemail TwiML). No I/O, so they are unit
-tested directly (tests/test_channels.py)."""
+"""Pure parsers/validators for inbound channel payloads (email providers and
+Twilio voicemail TwiML). No I/O, so they are unit tested directly
+(tests/test_channels.py)."""
 
-import hashlib
-import hmac
 import re
 from dataclasses import dataclass, field
 from email import message_from_string
@@ -101,52 +99,6 @@ def parse_email_payload(data: dict) -> InboundEmail | None:
         references=_id_tokens(header("references")),
         is_automated=automated,
     )
-
-
-# ---------------------------------------------------------------- Meta
-
-
-@dataclass
-class MetaMessage:
-    channel: str  # "messenger" | "instagram"
-    account_id: str  # Facebook page id / Instagram business account id
-    sender_id: str  # page-scoped user id
-    text: str
-    message_id: str | None
-
-
-def parse_meta_messages(body: dict) -> list[MetaMessage]:
-    """Text messages from a Messenger/Instagram webhook. Echoes of our own
-    outgoing messages, read receipts, postbacks and attachments are skipped."""
-    channel = {"page": "messenger", "instagram": "instagram"}.get(body.get("object", ""))
-    if channel is None:
-        return []
-    out: list[MetaMessage] = []
-    for entry in body.get("entry", []):
-        account_id = str(entry.get("id", ""))
-        for event in entry.get("messaging", []):
-            message = event.get("message") or {}
-            text = message.get("text")
-            sender = str((event.get("sender") or {}).get("id", ""))
-            if not text or message.get("is_echo") or not sender or sender == account_id:
-                continue
-            out.append(
-                MetaMessage(
-                    channel=channel,
-                    account_id=account_id,
-                    sender_id=sender,
-                    text=text,
-                    message_id=message.get("mid"),
-                )
-            )
-    return out
-
-
-def verify_meta_signature(raw_body: bytes, signature_header: str | None, app_secret: str) -> bool:
-    if not app_secret or not signature_header or not signature_header.startswith("sha256="):
-        return False
-    expected = hmac.new(app_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, signature_header.removeprefix("sha256="))
 
 
 def chunk_text(text: str, limit: int) -> list[str]:

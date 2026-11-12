@@ -19,7 +19,7 @@ from packages.database.mixins import TenantScopedMixin, TimestampMixin, UUIDPrim
 
 # Values of ChannelSettings.channel. A plain string (not a Postgres enum) so a
 # new channel never needs a type migration.
-SETTINGS_CHANNELS = ("sms", "email", "web_chat", "instagram", "messenger", "web_form", "voicemail")
+SETTINGS_CHANNELS = ("sms", "email", "web_chat", "web_form", "voicemail")
 
 
 class ChannelSettings(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
@@ -29,7 +29,7 @@ class ChannelSettings(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
     `public_key` is the unguessable id embedded in public URLs (web chat
     widget, web forms, email webhook) — it is how an unauthenticated request
     is mapped to a tenant. `external_id` is the provider-side identifier an
-    inbound webhook carries (Facebook page id, Instagram account id, ...)."""
+    inbound webhook carries."""
 
     __tablename__ = "channel_settings"
 

@@ -49,6 +49,20 @@ async def _connected_integration(
     return integration, decrypt_secret(credential.encrypted_secret)
 
 
+async def get_email_sender(db: AsyncSession, tenant_id: uuid.UUID):
+    """The workspace's own Resend or Brevo sending account, or None. Used for its customer email."""
+    from app.integrations.email_providers import EmailApiCredentials
+
+    connected = await _connected_integration(db, tenant_id, "email_sender")
+    if connected is None:
+        return None
+    integration, key = connected
+    cfg = integration.config or {}
+    if not cfg.get("from_email") or cfg.get("provider") not in ("resend", "brevo"):
+        return None
+    return EmailApiCredentials(provider=cfg["provider"], api_key=key, from_email=cfg["from_email"], from_name=cfg.get("from_name"))
+
+
 async def uses_platform_twilio(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
     """True when this tenant has not connected its own Twilio account, so a
     purchase or a call would bill the platform's account."""
@@ -221,8 +235,10 @@ async def speech_settings(db: AsyncSession, tenant_id: uuid.UUID, agent) -> dict
             model = get_settings().elevenlabs_model
     llm_key, llm_source = await resolve_llm(db, tenant_id)
     # Included price when CallPlus pays a provider. Own keys only: charge 0.
-    on_callplus = "managed" in (stt_source, tts_source, llm_source)
-    multiplier = 1.0 if on_callplus else 0.0
+    # Free only when every part really runs on the workspace's own key. A part with no key at all is not
+    # "own", so it stays billable: never let a missing key turn into free minutes.
+    all_own = all(source == "own" for source in (stt_source, tts_source, llm_source))
+    multiplier = 0.0 if all_own else 1.0
     for provider, source in ((stt, stt_source), (tts, tts_source)):
         if source == "managed" and provider != SARVAM:
             multiplier += managed.extra_minutes(provider)

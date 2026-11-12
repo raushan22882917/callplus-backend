@@ -9,7 +9,7 @@ Priority = Literal["low", "medium", "high", "urgent"]
 AppointmentStatus = Literal["booked", "confirmed", "cancelled", "completed", "no_show"]
 AppointmentSource = Literal["manual", "ai_agent", "whatsapp", "web", "workflow"]
 ResourceKind = Literal["staff", "chair", "room"]
-FollowUpChannel = Literal["call", "whatsapp", "sms", "email"]
+FollowUpChannel = Literal["call", "whatsapp", "sms", "email", "auto"]
 FollowUpStatus = Literal["pending", "done", "failed", "cancelled"]
 PromiseStatus = Literal["pending", "kept", "broken", "cancelled"]
 
@@ -273,6 +273,10 @@ class FollowUpCreate(BaseModel):
     subject: str | None = None
     template_name: str | None = None
     ai_agent_id: uuid.UUID | None = None
+    # channel "auto": what the AI should achieve, in plain words. It picks the channel and writes the message.
+    goal: str | None = Field(default=None, max_length=1000)
+    purpose: Literal["marketing", "service"] = "marketing"
+    fallback_after_minutes: int | None = Field(default=None, ge=5, le=10080)
 
 
 class FollowUpUpdate(BaseModel):

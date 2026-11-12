@@ -11,6 +11,7 @@ from app.core.permissions import Permissions
 from app.core.repository import TenantScopedRepository
 from app.integrations.whatsapp import check_account_details, verify_webhook_signature
 from app.schemas.whatsapp import WhatsAppAccountConnect, WhatsAppAccountRead, WhatsAppAccountUpdate
+from app.services import connection_health
 from app.services import whatsapp_inbound as wa
 from app.services import whatsapp_templates as tpl
 from fastapi import (
@@ -71,6 +72,7 @@ async def disconnect_whatsapp_account(
     account = await WhatsAppAccountRepository(db, ctx.tenant_id).get(account_id)
     await db.delete(account)
     await db.commit()
+    connection_health.forget(ctx.tenant_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -94,6 +96,7 @@ async def connect_whatsapp_account(
     )
     await db.commit()
     await db.refresh(account)
+    connection_health.forget(ctx.tenant_id)
     return account
 
 

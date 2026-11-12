@@ -42,11 +42,9 @@ from packages.database.models import (
     KnowledgeDocument,
     MembershipStatus,
     PhoneNumber,
-    Role,
     Tenant,
     TenantUser,
     UsageEvent,
-    User,
 )
 
 Period = Literal["lifetime", "month"]
@@ -71,7 +69,7 @@ class Tier:
     sms_period: Period
     email_messages: int | None  # customer emails; login and verification mail is not counted
     email_period: Period
-    social_messages: int | None  # Instagram and Messenger replies
+    social_messages: int | None  # unused; kept so existing plan rows still load
     social_period: Period
     max_call_seconds: int | None  # hard cap on a single call
     max_concurrent_calls: int | None
@@ -210,7 +208,7 @@ ENTERPRISE = Tier(
     name="Enterprise",
     price_month_inr=0,
     price_year_inr=0,
-    overage_per_min_inr=7.0,
+    overage_per_min_inr=8.0,
     ai_minutes=None,
     ai_minutes_period="month",
     whatsapp_messages=None,
@@ -262,12 +260,43 @@ PAYG = Tier(
     recording=True,
     blurb="Top up a wallet and pay only for answered minutes and messages.",
 )
+# Channel packs (services/packs.py): the allowances come from the packs a workspace has paid for, so this base tier
+# allows nothing; packs.tier_for() fills in what the live packs grant. Their usage windows are each pack's own
+# 30 days, not the calendar month, so the checks below hand over to the packs module.
+PACKS = Tier(
+    code="packs",
+    name="Channel packs",
+    price_month_inr=0,
+    price_year_inr=0,
+    overage_per_min_inr=None,
+    ai_minutes=0,
+    ai_minutes_period="month",
+    whatsapp_messages=0,
+    whatsapp_period="month",
+    sms_messages=0,
+    sms_period="month",
+    email_messages=0,
+    email_period="month",
+    social_messages=0,
+    social_period="month",
+    max_call_seconds=300,
+    max_concurrent_calls=1,
+    daily_outbound_calls=5,
+    phone_numbers=0,
+    agents=1,
+    team_members=2,
+    knowledge_documents=5,
+    api_keys=1,
+    campaigns=False,
+    recording=False,
+    blurb="Buy only the channels you use: Call, WhatsApp, Email + SMS, or all three together.",
+)
 _LEGACY_TIER = dataclasses.replace(
     ENTERPRISE, code=LEGACY, name="Legacy", custom=False, blurb="Pre-plan account."
 )
 
 TIERS: dict[str, Tier] = {
-    t.code: t for t in (FREE, PAYG, STARTER, GROWTH, SCALE, ENTERPRISE, _LEGACY_TIER)
+    t.code: t for t in (FREE, PAYG, PACKS, STARTER, GROWTH, SCALE, ENTERPRISE, _LEGACY_TIER)
 }
 PUBLIC_TIERS = [FREE, STARTER, GROWTH, SCALE, ENTERPRISE]
 
@@ -305,6 +334,10 @@ def tier_for_plan_code(code: str) -> str | None:
 def effective(tenant: Tenant) -> Tier:
     """The tenant's tier with any platform-admin overrides applied."""
     tier = TIERS.get(tenant.plan_tier or LEGACY, _LEGACY_TIER)
+    if tier.code == PACKS.code:
+        from app.services import packs
+
+        tier = packs.tier_for(tenant)
     overrides = tenant.plan_overrides or {}
     changes: dict = {}
     for key in _INT_OVERRIDES:
@@ -361,6 +394,11 @@ async def billable_minutes_used(db: AsyncSession, tenant_id: uuid.UUID, period: 
     bills (a 5 second call costs a full minute), and it stops many tiny calls
     from stretching a free allowance."""
     start, end = _window(period)
+    return await billable_minutes_between(db, tenant_id, start, end)
+
+
+async def billable_minutes_between(db: AsyncSession, tenant_id: uuid.UUID, start: datetime, end: datetime) -> int:
+    """The same count for any window (a channel pack's own 30 days)."""
     when = func.coalesce(Call.started_at, Call.created_at)
     # A call on a number we pay Twilio for costs us even when a person, not the
     # AI, talks. The AI's own calls count whether or not the number is ours.
@@ -439,33 +477,8 @@ async def _lock_tenant(db: AsyncSession, tenant_id: uuid.UUID) -> Tenant | None:
 
 
 async def ensure_owner_verified(db: AsyncSession, tenant: Tenant) -> None:
-    """A workspace that is not on the pre-plan legacy tier must have a verified
-    owner before it can spend money. No owner row (a system tenant) is allowed
-    through: there is nobody to verify. Legacy is skipped because those accounts
-    predate verification and the test suite signs up onto it."""
-    if (tenant.plan_tier or LEGACY) == LEGACY:
-        return
-    row = (
-        await db.execute(
-            select(User.email_verified_at)
-            .join(TenantUser, TenantUser.user_id == User.id)
-            .join(Role, Role.id == TenantUser.role_id)
-            .where(
-                TenantUser.tenant_id == tenant.id,
-                TenantUser.status == MembershipStatus.ACTIVE,
-                Role.name == "OWNER",
-            )
-            .limit(1)
-        )
-    ).first()
-    if row is None or row[0] is not None:
-        return
-    raise PlanLimitError(
-        "email_unverified",
-        "Verify your email before this workspace can call, buy a number, or send messages.",
-        tier=effective(tenant).code,
-        http_status=403,
-    )
+    """Email verification does not block calls, numbers, or messages."""
+    return
 
 
 async def _usage_quantity(
@@ -494,6 +507,10 @@ async def minutes_remaining(db: AsyncSession, tenant: Tenant) -> int | None:
         from app.services import wallet
 
         return await wallet.minutes_available(db, tenant.id)
+    if tier.code == PACKS.code:
+        from app.services import packs
+
+        return await packs.minutes_remaining(db, tenant)
     if tier.ai_minutes is None or allows_overage(tenant):
         return None
     used = await billable_minutes_used(db, tenant.id, tier.ai_minutes_period)
@@ -501,15 +518,15 @@ async def minutes_remaining(db: AsyncSession, tenant: Tenant) -> int | None:
 
 
 async def _included_ai(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
-    """True when calls use CallPlus's Sarvam or model, so a plan or wallet minute applies."""
+    """True unless the workspace pays its own providers for both the model and the speech, in which case
+    no plan or wallet minute applies. A part with no key at all is not "own", so it stays billable:
+    a missing key must never turn into free minutes."""
     from app.integrations.credentials import resolve_key, resolve_llm
     from app.integrations.providers import SARVAM
 
     _key, llm_source = await resolve_llm(db, tenant_id)
-    if llm_source == "managed":
-        return True
     _key, sarvam_source = await resolve_key(db, tenant_id, SARVAM)
-    return sarvam_source == "managed"
+    return not (llm_source == "own" and sarvam_source == "own")
 
 
 async def ensure_minutes_available(db: AsyncSession, tenant_id: uuid.UUID) -> None:
@@ -525,6 +542,11 @@ async def ensure_minutes_available(db: AsyncSession, tenant_id: uuid.UUID) -> No
         from app.services import wallet
 
         await wallet.ensure_call_balance(db, tenant_id)
+        return
+    if effective(tenant).code == PACKS.code:
+        from app.services import packs
+
+        await packs.ensure_minutes(db, tenant)
         return
     remaining = await minutes_remaining(db, tenant)
     if remaining is not None and remaining <= 0:
@@ -559,12 +581,33 @@ async def effective_max_call_seconds(
     return max(cap, 1)
 
 
+async def ensure_service_enabled(db: AsyncSession, tenant_id: uuid.UUID, key: str) -> None:
+    """Refuses a service the workspace has turned off. A wallet with no choice leaves every service on."""
+    from app.services import wallet
+
+    chosen = await wallet.services_for(db, tenant_id)
+    if chosen.get(key, True):
+        return
+    label = {
+        "calls": "Calls",
+        "whatsapp": "WhatsApp",
+        "sms": "SMS",
+        "email": "Email",
+    }[key]
+    raise PlanLimitError(
+        "service_off",
+        f"{label} is turned off. Turn it on in Billing to use it. You only pay for the services you turn on.",
+        tier="",
+    )
+
+
 async def ensure_outbound_allowed(db: AsyncSession, tenant_id: uuid.UUID, calls: int = 1) -> None:
     """Plan checks for placing an outbound call (hooked into guard_outbound)."""
     tenant = await _lock_tenant(db, tenant_id)
     if tenant is None:
         return
     await ensure_owner_verified(db, tenant)
+    await ensure_service_enabled(db, tenant_id, "calls")
     if not effective(tenant).is_limited:
         return
     tier = effective(tenant)
@@ -616,6 +659,7 @@ async def ensure_inbound_allowed(
     if tenant is None:
         return
     await ensure_owner_verified(db, tenant)
+    await ensure_service_enabled(db, tenant_id, "calls")
     if not effective(tenant).is_limited:
         return
     tier = effective(tenant)
@@ -643,11 +687,17 @@ async def ensure_whatsapp_available(db: AsyncSession, tenant_id: uuid.UUID, coun
     if tenant is None:
         return
     await ensure_owner_verified(db, tenant)
+    await ensure_service_enabled(db, tenant_id, "whatsapp")
     tier = effective(tenant)
     if tier.code == PAYG.code:
         from app.services import wallet
 
         await wallet.ensure_balance(db, tenant_id, wallet.WHATSAPP_MESSAGE_PAISE * count, "this message")
+        return
+    if tier.code == PACKS.code:
+        from app.services import packs
+
+        await packs.ensure_whatsapp(db, tenant, count)
         return
     if tier.whatsapp_messages is None or allows_overage(tenant):
         return
@@ -663,11 +713,17 @@ async def ensure_whatsapp_available(db: AsyncSession, tenant_id: uuid.UUID, coun
 
 async def _refuse_sms_if_needed(db: AsyncSession, tenant: Tenant, segments: int) -> None:
     await ensure_owner_verified(db, tenant)
+    await ensure_service_enabled(db, tenant.id, "sms")
     tier = effective(tenant)
     if tier.code == PAYG.code:
         from app.services import wallet
 
         await wallet.ensure_balance(db, tenant.id, wallet.SMS_PAISE * segments, "this SMS")
+        return
+    if tier.code == PACKS.code:
+        from app.services import packs
+
+        await packs.ensure_sms(db, tenant, segments)
         return
     if tier.sms_messages is None or allows_overage(tenant):
         return
@@ -714,11 +770,17 @@ async def reserve_sms(db: AsyncSession, tenant_id: uuid.UUID, segments: int = 1)
 
 async def _refuse_email_if_needed(db: AsyncSession, tenant: Tenant) -> None:
     await ensure_owner_verified(db, tenant)
+    await ensure_service_enabled(db, tenant.id, "email")
     tier = effective(tenant)
     if tier.code == PAYG.code:
         from app.services import wallet
 
         await wallet.ensure_balance(db, tenant.id, wallet.EMAIL_PAISE, "this email")
+        return
+    if tier.code == PACKS.code:
+        from app.services import packs
+
+        await packs.ensure_email(db, tenant)
         return
     if tier.email_messages is None or allows_overage(tenant):
         return
@@ -756,52 +818,6 @@ async def reserve_email(db: AsyncSession, tenant_id: uuid.UUID) -> UsageEvent:
         quantity=1,
         occurred_at=datetime.now(UTC),
         extra={"kind": "customer"},
-    )
-    db.add(event)
-    await db.flush()
-    return event
-
-
-async def _refuse_social_if_needed(db: AsyncSession, tenant: Tenant) -> None:
-    await ensure_owner_verified(db, tenant)
-    tier = effective(tenant)
-    if tier.code == PAYG.code:
-        from app.services import wallet
-
-        await wallet.ensure_balance(db, tenant.id, wallet.SOCIAL_PAISE, "this message")
-        return
-    if tier.social_messages is None or allows_overage(tenant):
-        return
-    start, end = _window(tier.social_period)
-    used = await _usage_quantity(db, tenant.id, "social", start, end)
-    if used + 1 > tier.social_messages:
-        raise PlanLimitError(
-            "plan_social_exhausted",
-            f"Your {tier.name} plan's {tier.social_messages} Instagram and Messenger "
-            f"messages are used up. {UPGRADE_HINT}",
-            tier=tier.code,
-        )
-
-
-async def ensure_social_available(db: AsyncSession, tenant_id: uuid.UUID) -> None:
-    tenant = await _lock_tenant(db, tenant_id)
-    if tenant is None:
-        return
-    await _refuse_social_if_needed(db, tenant)
-
-
-async def reserve_social(db: AsyncSession, tenant_id: uuid.UUID) -> UsageEvent:
-    """Records one Instagram or Messenger reply against the plan."""
-    tenant = await _lock_tenant(db, tenant_id)
-    if tenant is None:
-        raise PlanLimitError("plan_social_exhausted", "Workspace not found.", tier="")
-    await _refuse_social_if_needed(db, tenant)
-    event = UsageEvent(
-        tenant_id=tenant_id,
-        metric="social",
-        quantity=1,
-        occurred_at=datetime.now(UTC),
-        extra={"kind": "social"},
     )
     db.add(event)
     await db.flush()
@@ -975,8 +991,8 @@ async def sync_overage_invoice(db: AsyncSession, tenant_id: uuid.UUID) -> int:
     if tenant is None or not allows_overage(tenant):
         return 0
     tier = effective(tenant)
-    if not tier.is_limited or tier.code == PAYG.code:
-        return 0
+    if not tier.is_limited or tier.code in (PAYG.code, PACKS.code):
+        return 0  # packs are hard caps: nothing is billed past the allowance
 
     from app.services import wallet
 
@@ -1018,13 +1034,6 @@ async def sync_overage_invoice(db: AsyncSession, tenant_id: uuid.UUID) -> int:
             await _usage_quantity(db, tenant.id, "email", *_window(tier.email_period)),
             wallet.EMAIL_PAISE,
             "email",
-        ),
-        (
-            tier.social_messages,
-            tier.social_period,
-            await _usage_quantity(db, tenant.id, "social", *_window(tier.social_period)),
-            wallet.SOCIAL_PAISE,
-            "Instagram/Messenger",
         ),
     )
     for limit, period, used, rate, label in message_meters:
@@ -1107,6 +1116,10 @@ def _meter(key: str, label: str, used: int, limit: int | None, period: str, unit
 async def entitlements(db: AsyncSession, tenant: Tenant) -> dict:
     overage_paise = await sync_overage_invoice(db, tenant.id)
     tier = effective(tenant)
+    if tier.code == PACKS.code:
+        from app.services import packs
+
+        return await packs.entitlements(db, tenant, tier, overage_paise)
     minutes = await billable_minutes_used(db, tenant.id, tier.ai_minutes_period)
     wa = await whatsapp_used(db, tenant.id, tier.whatsapp_period)
     meters = [
@@ -1136,14 +1149,6 @@ async def entitlements(db: AsyncSession, tenant: Tenant) -> dict:
             tier.email_messages,
             tier.email_period,
             "email",
-        ),
-        _meter(
-            "social",
-            "Instagram and Messenger",
-            await _usage_quantity(db, tenant.id, "social", *_window(tier.social_period)),
-            tier.social_messages,
-            tier.social_period,
-            "msg",
         ),
     ]
     for key, (label, model, extra) in _RESOURCES.items():
@@ -1178,11 +1183,13 @@ def public_catalogue() -> list[dict]:
 
 
 __all__ = [
+    "PACKS",
     "PUBLIC_TIERS",
     "TIERS",
     "Tier",
     "PlanLimitError",
     "billable_minutes_used",
+    "billable_minutes_between",
     "effective",
     "effective_max_call_seconds",
     "claim_ring_leg",
@@ -1195,12 +1202,10 @@ __all__ = [
     "ensure_platform_number_purchase",
     "claim_whatsapp_send",
     "ensure_email_available",
-    "ensure_social_available",
     "ensure_sms_available",
     "ensure_whatsapp_available",
     "release_whatsapp_claim",
     "reserve_email",
-    "reserve_social",
     "reserve_sms",
     "entitlements",
     "sync_overage_invoice",

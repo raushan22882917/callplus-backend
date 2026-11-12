@@ -60,12 +60,53 @@ async def require_super_admin(
     return ctx
 
 
+async def _control_is_open(db: AsyncSession) -> bool:
+    flagged = (
+        await db.execute(select(func.count()).select_from(User).where(User.is_platform_admin.is_(True)))
+    ).scalar_one()
+    listed = (await db.execute(select(func.count()).select_from(PlatformAdmin))).scalar_one()
+    return flagged == 0 and listed == 0
+
+
 @router.get("/me")
 async def admin_me(
     ctx: RequestContext = Depends(get_current_context), db: AsyncSession = Depends(get_db)
 ) -> dict[str, bool]:
     """Lets the frontend decide whether to show the admin area."""
-    return {"is_platform_admin": await is_super_admin(db, ctx)}
+    return {
+        "is_platform_admin": await is_super_admin(db, ctx),
+        "claim_open": await _control_is_open(db),
+    }
+
+
+@router.post("/claim")
+async def claim_platform_admin(
+    ctx: RequestContext = Depends(get_current_context), db: AsyncSession = Depends(get_db)
+) -> dict[str, bool]:
+    """Hands control to the signed-in account only while nobody is a platform admin.
+    After that, Operators is the only way to add another admin."""
+    if ctx.api_key_id is not None:
+        raise PermissionDeniedError("Sign in with your account to take control")
+    if await is_super_admin(db, ctx):
+        return {"is_platform_admin": True}
+    await db.execute(text("SELECT pg_advisory_xact_lock(814201)"))
+    if not await _control_is_open(db):
+        raise HTTPException(status.HTTP_409_CONFLICT, "A platform admin already controls this system")
+    user = await db.get(User, ctx.user_id)
+    if user is None or not user.is_active:
+        raise PermissionDeniedError("This account cannot take control")
+    user.is_platform_admin = True
+    await log_audit_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_user_id=ctx.user_id,
+        action="platform_admin.claimed",
+        resource_type="user",
+        resource_id=user.id,
+        extra={"email": user.email},
+    )
+    await db.commit()
+    return {"is_platform_admin": True}
 
 
 async def _row(db: AsyncSession, tenant: Tenant) -> AdminTenantRow:
@@ -172,6 +213,7 @@ async def tenant_detail(
             {"id": str(n.id), "e164_number": n.e164_number, "provider": n.provider} for n in numbers
         ],
         usage=await usage_summary(db, tenant_id),
+        plan_overrides=tenant.plan_overrides or {},
     )
 
 

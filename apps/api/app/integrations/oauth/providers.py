@@ -108,7 +108,7 @@ class Provider:
     pkce = False
     login = False  # usable for "Sign in with ..."
     requires_shop = False
-    resources_kind: str | None = None  # calendars | pages | channels
+    resources_kind: str | None = None  # calendars | channels
     features: tuple[str, ...] = ()
     authorize_url_base = ""
     token_url_base = ""
@@ -340,6 +340,7 @@ class MicrosoftProvider(Provider):
         "User.Read",
         "Calendars.ReadWrite",
         "Mail.Send",
+        "Mail.Read",
     )
     pkce = True
     login = True
@@ -376,6 +377,27 @@ class MicrosoftProvider(Provider):
             email=email,
             external_id=data.get("id"),
         )
+
+
+class GmailProvider(GoogleProvider):
+    """Same Google OAuth app as Calendar, separate connection so mail consent
+    is not mixed into the calendar grant."""
+
+    key = "gmail"
+    label = "Gmail"
+    category = "Email"
+    description = "Send and receive email from a Gmail or Google Workspace mailbox."
+    scopes = (
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.readonly",
+    )
+    scope_groups = {}
+    login = False
+    resources_kind = None
+    features = ("mail",)
 
 
 class SalesforceProvider(Provider):
@@ -635,124 +657,6 @@ class SlackProvider(Provider):
         )
 
 
-class MetaProvider(Provider):
-    key = "meta"
-    label = "Facebook & Instagram"
-    category = "Messaging"
-    description = "Connect Facebook Pages (Messenger) and linked Instagram accounts."
-    id_attr = "meta_app_id"
-    scopes = (
-        "pages_show_list",
-        "pages_messaging",
-        "pages_manage_metadata",
-        "instagram_basic",
-        "instagram_manage_messages",
-    )
-    scope_separator = ","
-    resources_kind = "pages"
-    features = ("messenger", "instagram")
-    revoke_supported = True
-    refresh_from_access_token = True
-
-    def client_secret(self) -> str:
-        return get_settings().meta_oauth_secret
-
-    def _graph(self) -> str:
-        return f"https://graph.facebook.com/{get_settings().meta_graph_api_version}"
-
-    def authorize_url(self, shop=None) -> str:
-        return f"https://www.facebook.com/{get_settings().meta_graph_api_version}/dialog/oauth"
-
-    def token_url(self, extra=None, shop=None) -> str:
-        return f"{self._graph()}/oauth/access_token"
-
-    def authorize_params(self, *, state, scopes, code_challenge, redirect, shop=None):
-        params = {
-            "client_id": self.client_id(),
-            "redirect_uri": redirect,
-            "state": state,
-            "response_type": "code",
-        }
-        config_id = get_settings().meta_login_config_id
-        if config_id:
-            # Facebook Login for Business: permissions come from the configuration.
-            params["config_id"] = config_id
-            params["override_default_response_type"] = "true"
-        else:
-            params["scope"] = ",".join(scopes)
-        return params
-
-    async def _get_token(self, client: httpx.AsyncClient, params: dict[str, str], kind: str) -> dict[str, Any]:
-        try:
-            response = await client.get(self.token_url(), params=params)
-        except httpx.HTTPError as exc:
-            raise OAuthError(
-                "token_exchange_failed" if kind == "exchange" else "refresh_failed",
-                f"Meta token request failed: {exc}",
-            ) from exc
-        if response.status_code >= 500:
-            raise OAuthError("refresh_failed" if kind == "refresh" else "token_exchange_failed", f"Meta error {response.status_code}")
-        if response.status_code >= 400:
-            raise OAuthError(
-                "refresh_rejected" if kind == "refresh" else "token_exchange_failed",
-                _error_text(response),
-            )
-        return _body(response)
-
-    async def exchange_code(self, client, *, code, code_verifier, redirect=None, context=None):
-        self.require_configured()
-        short = await self._get_token(
-            client,
-            {
-                "client_id": self.client_id(),
-                "client_secret": self.client_secret(),
-                "redirect_uri": redirect or redirect_uri(self.key),
-                "code": code,
-            },
-            "exchange",
-        )
-        if not short.get("access_token"):
-            raise OAuthError("token_exchange_failed", "Meta returned no access token")
-        return await self._long_lived(client, short["access_token"], "exchange")
-
-    async def _long_lived(self, client: httpx.AsyncClient, token: str, kind: str) -> TokenResult:
-        data = await self._get_token(
-            client,
-            {
-                "grant_type": "fb_exchange_token",
-                "client_id": self.client_id(),
-                "client_secret": self.client_secret(),
-                "fb_exchange_token": token,
-            },
-            kind,
-        )
-        result = _token_from_json(data)
-        # Meta has no refresh token: re-exchanging the long-lived token IS the refresh.
-        return result
-
-    async def refresh(self, client, *, refresh_token, extra) -> TokenResult:
-        return await self._long_lived(client, refresh_token, "refresh")
-
-    async def identity(self, client, token, context) -> Identity:
-        response = await client.get(
-            f"{self._graph()}/me",
-            params={"fields": "id,name,email", "access_token": token.access_token},
-        )
-        if response.status_code >= 400:
-            raise OAuthError("identity_failed", _error_text(response))
-        data = _body(response)
-        return Identity(
-            label=data.get("name") or data.get("email") or "Facebook",
-            email=data.get("email"),
-            external_id=data.get("id"),
-        )
-
-    async def revoke(self, client, *, access_token, refresh_token, extra) -> None:
-        await client.delete(
-            f"{self._graph()}/me/permissions", params={"access_token": access_token}
-        )
-
-
 class ShopifyProvider(Provider):
     key = "shopify"
     label = "Shopify"
@@ -857,12 +761,12 @@ PROVIDERS: dict[str, Provider] = {
     p.key: p
     for p in (
         GoogleProvider(),
+        GmailProvider(),
         MicrosoftProvider(),
         SalesforceProvider(),
         HubSpotProvider(),
         ZohoProvider(),
         SlackProvider(),
-        MetaProvider(),
         ShopifyProvider(),
     )
 }

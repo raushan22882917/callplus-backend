@@ -14,7 +14,6 @@ from app.core.security import (
     create_access_token,
     create_purpose_token,
     create_refresh_token,
-    decode_purpose_token,
     decode_purpose_token_full,
     decode_token,
     hash_password,
@@ -35,7 +34,6 @@ from app.schemas.auth import (
     SwitchTenantRequest,
     TenantOption,
     TokenPair,
-    VerifyEmailRequest,
 )
 from app.services import plans
 from app.services.platform_totp import get_enabled_totp, verify_second_factor
@@ -72,26 +70,9 @@ _limit_reset = ip_rate_limit("reset", limit=_settings.auth_reset_rate_limit_per_
 logger = logging.getLogger(__name__)
 
 PASSWORD_RESET_PURPOSE = "password_reset"
-EMAIL_VERIFY_PURPOSE = "email_verify"
 # Generic response for forgot-password regardless of whether the email
 # matched an account — avoids leaking which emails have accounts.
 _FORGOT_PASSWORD_MESSAGE = "If an account with that email exists, a reset link has been sent."
-
-
-async def _send_verification_email(user: User) -> None:
-    token = create_purpose_token(
-        user_id=user.id, purpose=EMAIL_VERIFY_PURPOSE, expires_delta=timedelta(hours=24)
-    )
-    link = f"{get_settings().frontend_base_url}/verify-email?token={token}"
-    try:
-        await send_email(
-            to_email=user.email,
-            subject="Verify your email",
-            html_body=f"<p>Confirm your email by visiting <a href='{link}'>this link</a>.</p>",
-        )
-    except Exception:
-        # Best-effort — signup/resend must not fail because SMTP is down.
-        logger.exception("failed to send verification email to %s", user.email)
 
 
 async def _issue_tokens(
@@ -175,6 +156,7 @@ async def signup(
         email=payload.email.lower(),
         hashed_password=hash_password(payload.password),
         full_name=payload.full_name,
+        email_verified_at=datetime.now(UTC),
     )
     db.add_all([tenant, user])
     try:
@@ -187,8 +169,6 @@ async def signup(
     db.add(membership)
     await db.flush()
     await db.commit()
-
-    await _send_verification_email(user)
 
     return await _issue_tokens(db, membership, request)
 
@@ -360,41 +340,6 @@ async def reset_password(
     await db.commit()
 
     return MessageResponse(message="Password has been reset. You can now log in.")
-
-
-@router.post("/verify-email", response_model=MessageResponse)
-async def verify_email(
-    payload: VerifyEmailRequest, db: AsyncSession = Depends(get_db)
-) -> MessageResponse:
-    try:
-        user_id = decode_purpose_token(payload.token, expected_purpose=EMAIL_VERIFY_PURPOSE)
-    except InvalidTokenError as exc:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "Invalid or expired verification token"
-        ) from exc
-
-    user = await db.get(User, user_id)
-    if user is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired verification token")
-
-    user.email_verified_at = datetime.now(UTC)
-    await db.commit()
-
-    return MessageResponse(message="Email verified.")
-
-
-@router.post("/resend-verification", response_model=MessageResponse)
-async def resend_verification(
-    ctx: RequestContext = Depends(get_current_context), db: AsyncSession = Depends(get_db)
-) -> MessageResponse:
-    if ctx.api_key_id is not None:
-        raise PermissionDeniedError("API keys cannot trigger account emails")
-    user = await db.get(User, ctx.user_id)
-    if user.email_verified_at is not None:
-        return MessageResponse(message="Email is already verified.")
-
-    await _send_verification_email(user)
-    return MessageResponse(message="Verification email sent.")
 
 
 # --- Signed-in sessions -----------------------------------------------------

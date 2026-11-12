@@ -1,12 +1,12 @@
-"""Omnichannel: SMS, email, website live chat, Instagram/Messenger, web
-forms, missed calls + voicemail, click-to-call and the unified inbox.
+"""Omnichannel: SMS, email, website live chat, web forms, missed calls +
+voicemail, click-to-call and the unified inbox.
 
 Two kinds of routes live here. Staff routes use the normal JWT context
 (RequestContext). Public/webhook routes derive the tenant from something
 other than a JWT — the Twilio "To" number (SMS), an unguessable
-`public_key` stored in channel_settings (web chat, forms, email) or the
-Meta page/account id — and authenticate the *request* by Twilio/Meta signature
-or by that key. Treat those lookups as the trust boundary.
+`public_key` stored in channel_settings (web chat, forms, email) — and
+authenticate the *request* by Twilio signature or by that key. Treat those
+lookups as the trust boundary.
 """
 
 import hashlib
@@ -27,11 +27,7 @@ from app.core.config import get_settings
 from app.core.deps import RequestContext, get_db, require_permission
 from app.core.exceptions import NotFoundError
 from app.core.permissions import Permissions
-from app.integrations.channel_payloads import (
-    parse_email_payload,
-    parse_meta_messages,
-    verify_meta_signature,
-)
+from app.integrations.channel_payloads import parse_email_payload
 from app.integrations.channel_senders import ChannelSendError
 from app.integrations.credentials import get_twilio_credentials
 from app.integrations.webchat_widget import WIDGET_JS
@@ -109,8 +105,6 @@ _CHANNEL_LABELS = {
     "sms": "SMS",
     "email": "Email",
     "web_chat": "Website live chat",
-    "instagram": "Instagram DMs",
-    "messenger": "Facebook Messenger",
     "web_form": "Web forms",
     "voicemail": "Voicemail",
 }
@@ -118,8 +112,6 @@ _SETUP_NOTES = {
     "sms": "In the Twilio console set the number's 'A message comes in' webhook (HTTP POST) to the URL below. Replies are sent from the same number.",
     "email": "Point your inbound email provider (Mailgun route, SendGrid Inbound Parse, or your own IMAP poller) at the URL below with a POST of JSON or form fields. Replies are sent through the platform SMTP server with a Reply-To of your inbound address.",
     "web_chat": "Paste the snippet before </body> on every page where the chat bubble should appear.",
-    "instagram": "In your Meta app add the Instagram webhook with the shared URL below and the verify token, subscribe to 'messages', and store the access token + app secret here. External id is your Instagram business account id.",
-    "messenger": "In your Meta app add the Page webhook with the shared URL below and the verify token, subscribe to 'messages', and store the page access token + app secret here. External id is your Facebook page id.",
     "web_form": "POST fields name, email, phone, subject, message (JSON or form-encoded) to the URL below. Include a hidden field named 'website' (left empty) as a bot trap.",
     "voicemail": "When a number you own has no AI agent assigned, callers can leave a message instead of being rejected. Transcripts arrive via Twilio.",
 }
@@ -261,8 +253,6 @@ def _settings_read(channel: str, row: ChannelSettings | None, all_rows: dict[str
     webhook = {
         "sms": urls["sms"],
         "email": urls.get("email"),
-        "instagram": urls["meta"],
-        "messenger": urls["meta"],
         "web_form": urls.get("web_form"),
         "voicemail": urls["voicemail"],
     }.get(channel)
@@ -350,25 +340,13 @@ async def update_channel_settings(
 
     if payload.external_id is not None:
         row.external_id = payload.external_id.strip() or None
-        if row.external_id and channel in ("instagram", "messenger"):
-            clash = (
-                await db.execute(
-                    select(ChannelSettings.id).where(
-                        ChannelSettings.channel == channel,
-                        ChannelSettings.external_id == row.external_id,
-                        ChannelSettings.tenant_id != ctx.tenant_id,
-                    )
-                )
-            ).first()
-            if clash:
-                raise HTTPException(409, "That account id is already connected to another workspace")
 
     if channel in svc.PUBLIC_KEY_CHANNELS and (row.public_key is None or payload.rotate_public_key):
         row.public_key = svc.new_public_key()
 
     if payload.enabled is not None:
         if payload.enabled:
-            _require_ready(channel, row)
+            await _require_ready(db, channel, row)
             # A business with exactly one AI agent gets it here automatically (as on WhatsApp). Without
             # this, switching a channel on left visitors talking to nobody and nothing said why.
             if row.ai_agent_id is None and not payload.clear_ai_agent:
@@ -380,24 +358,15 @@ async def update_channel_settings(
     return _settings_read(channel, row, rows)
 
 
-def _require_ready(channel: str, row: ChannelSettings) -> None:
-    creds = svc.load_credentials(row)
-    if channel in ("instagram", "messenger"):
-        missing = [
-            n
-            for n, ok in (
-                ("external_id", row.external_id),
-                ("page_access_token", creds.get("page_access_token")),
-                ("app_secret", creds.get("app_secret") or get_settings().meta_webhook_secret),
+async def _require_ready(db: AsyncSession, channel: str, row: ChannelSettings) -> None:
+    if channel == "email" and not get_settings().smtp_host and not get_settings().email_api_key:
+        from app.services.mailbox import connected_mailbox
+
+        if await connected_mailbox(db, row.tenant_id) is None:
+            raise HTTPException(
+                422,
+                "Cannot enable email yet: connect Gmail, Microsoft, or your own SMTP mailbox first.",
             )
-            if not ok
-        ]
-        if missing:
-            raise HTTPException(422, f"Cannot enable {channel}: missing {', '.join(missing)}")
-    if channel == "email" and not get_settings().smtp_host:
-        raise HTTPException(
-            422, "Cannot enable email: the platform SMTP server is not configured (SMTP_HOST)"
-        )
 
 
 # ------------------------------------------------------------------ SMS (Twilio)
@@ -464,7 +433,12 @@ async def email_webhook(public_key: str, request: Request, db: AsyncSession = De
     mail = parse_email_payload(await _read_payload(request))
     if mail is None:
         return {"status": "ignored", "reason": "no sender or body"}
+    from app.services.mailbox import get_mailbox
+
+    mailbox = await get_mailbox(db, row.tenant_id)
     ours = {get_settings().smtp_from_email.lower(), str((row.config or {}).get("reply_to_address", "")).lower()}
+    if mailbox is not None:
+        ours.add(mailbox.from_email.lower())
     if mail.is_automated or mail.from_address in ours:
         return {"status": "ignored", "reason": "automated message"}
     tenant_id = row.tenant_id
@@ -503,105 +477,6 @@ async def email_webhook(public_key: str, request: Request, db: AsyncSession = De
         source="email",
     )
     return {"status": "ok", "conversation_id": str(conversation.id), **await svc.send_ai_reply(db, outcome)}
-
-
-# ------------------------------------------------------------------ Instagram + Messenger (Meta)
-
-
-@router.get("/meta/webhook")
-async def meta_verify(
-    hub_mode: str = Query(alias="hub.mode"),
-    hub_verify_token: str = Query(alias="hub.verify_token"),
-    hub_challenge: str = Query(alias="hub.challenge"),
-    db: AsyncSession = Depends(get_db),
-) -> Response:
-    """Meta's subscribe handshake: echo hub.challenge when the verify token
-    matches the platform's or any tenant's configured one."""
-    tokens = {get_settings().meta_whatsapp_verify_token}
-    rows = (
-        await db.execute(
-            select(ChannelSettings).where(ChannelSettings.channel.in_(("instagram", "messenger")))
-        )
-    ).scalars().all()
-    for row in rows:
-        token = svc.load_credentials(row).get("verify_token")
-        if token:
-            tokens.add(token)
-    if hub_mode != "subscribe" or not any(secrets.compare_digest(hub_verify_token, t) for t in tokens):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid verify token")
-    return PlainTextResponse(hub_challenge)
-
-
-@router.post("/meta/webhook")
-async def meta_webhook(request: Request, db: AsyncSession = Depends(get_db)) -> dict:
-    raw = await request.body()
-    try:
-        body = json.loads(raw)
-    except ValueError as exc:
-        raise HTTPException(400, "Invalid JSON") from exc
-    signature = request.headers.get("X-Hub-Signature-256")
-    handled = 0
-    for message in parse_meta_messages(body):
-        row = (
-            await db.execute(
-                select(ChannelSettings).where(
-                    ChannelSettings.channel == message.channel,
-                    ChannelSettings.external_id == message.account_id,
-                )
-            )
-        ).scalar_one_or_none()
-        if row is None or not row.enabled:
-            continue
-        creds = svc.load_credentials(row)
-        secret = creds.get("app_secret") or get_settings().meta_webhook_secret
-        if not secret:
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                f"{message.channel} app secret is not configured; cannot verify the webhook",
-            )
-        if not verify_meta_signature(raw, signature, secret):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid webhook signature")
-        if await svc.message_already_seen(db, row.tenant_id, message.message_id):
-            continue
-
-        channel = ConversationChannel(message.channel)
-        thread = await svc.find_thread(db, row.tenant_id, channel, message.sender_id)
-        created = False
-        if thread is None:
-            customer = Customer(
-                tenant_id=row.tenant_id,
-                name=f"{_CHANNEL_LABELS[message.channel]} user {message.sender_id[-6:]}",
-                extra={f"{message.channel}_user_id": message.sender_id},
-            )
-            db.add(customer)
-            await db.flush()
-            created = True
-            customer_id = customer.id
-        else:
-            customer_id = None
-        conversation, _, _ = await svc.ensure_thread(
-            db,
-            row.tenant_id,
-            channel,
-            message.sender_id,
-            customer_id=customer_id,
-            contact_address=message.sender_id,
-            via_address=message.account_id,
-        )
-        agent = await svc.resolve_agent(db, row.tenant_id, row.ai_agent_id)
-        outcome = await svc.process_inbound_text(
-            db,
-            tenant_id=row.tenant_id,
-            agent=agent,
-            conversation=conversation,
-            text=message.text,
-            provider_message_id=message.message_id,
-            customer_created=created,
-            source=message.channel,
-        )
-        await svc.send_ai_reply(db, outcome)
-        handled += 1
-    return {"status": "ok", "handled": handled}
 
 
 class KnowledgeCheckPayload(BaseModel):

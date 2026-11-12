@@ -69,10 +69,6 @@ class ResetPasswordRequest(BaseModel):
     _password_bytes = field_validator("new_password")(_check_password_bytes)
 
 
-class VerifyEmailRequest(BaseModel):
-    token: str
-
-
 class MessageResponse(BaseModel):
     message: str
 

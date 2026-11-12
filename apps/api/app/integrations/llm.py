@@ -8,6 +8,11 @@ import httpx
 # Presets for the "bring your own language model" form. Every one speaks the OpenAI chat-completions format, so
 # one client serves them all. The model name is editable because providers rename models often.
 LLM_PRESETS: dict[str, dict[str, str]] = {
+    "claude": {
+        "label": "Claude",
+        "url": "https://api.anthropic.com/v1/chat/completions",
+        "model": "claude-sonnet-5",
+    },
     "openai": {"label": "OpenAI", "url": "https://api.openai.com/v1/chat/completions", "model": "gpt-4.1-mini"},
     "gemini": {
         "label": "Google Gemini",

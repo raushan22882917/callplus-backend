@@ -22,6 +22,7 @@ class ProfileRead(BaseModel):
     call_disclosure_enabled: bool
     call_disclosure_text: str
     request_sla_days: int
+    email_marketing_requires_consent: bool = False
     notice_lines: list[str] = []
     public_url: str = ""
 
@@ -39,6 +40,7 @@ class ProfileUpdate(BaseModel):
     call_disclosure_enabled: bool = True
     call_disclosure_text: str = Field(min_length=10, max_length=300)
     request_sla_days: int = Field(default=30, ge=1, le=90)
+    email_marketing_requires_consent: bool = False
 
     @field_validator("purposes")
     @classmethod

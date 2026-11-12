@@ -656,7 +656,10 @@ async def create_follow_up(
     customer = await db.get(Customer, payload.customer_id)
     if customer is None or customer.tenant_id != ctx.tenant_id:
         raise NotFoundError("Customer not found")
-    if payload.channel != "call" and not (payload.message or payload.template_name):
+    if payload.channel == "auto":
+        if not (payload.goal or payload.message):
+            raise BadRequest("Say what the AI should achieve (goal)")
+    elif payload.channel != "call" and not (payload.message or payload.template_name):
         raise BadRequest("A message (or WhatsApp template_name) is required for this channel")
     body = {
         k: v
@@ -665,6 +668,9 @@ async def create_follow_up(
             "subject": payload.subject,
             "template_name": payload.template_name,
             "ai_agent_id": str(payload.ai_agent_id) if payload.ai_agent_id else None,
+            "goal": payload.goal,
+            "fallback_after_minutes": payload.fallback_after_minutes,
+            "purpose": payload.purpose if payload.channel == "auto" else None,
         }.items()
         if v
     }

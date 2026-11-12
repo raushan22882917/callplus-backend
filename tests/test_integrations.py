@@ -28,15 +28,18 @@ def _auth(tokens: dict) -> dict:
     return {"Authorization": f"Bearer {tokens['access_token']}"}
 
 
-async def test_a_workspace_does_not_receive_the_platform_sarvam_key(
+async def test_the_platform_sarvam_key_is_used_only_when_the_platform_switches_it_on(
     db_session: AsyncSession, monkeypatch
 ) -> None:
     tenant = Tenant(name="Acme", slug=f"acme-{uuid.uuid4().hex[:8]}")
     db_session.add(tenant)
     await db_session.commit()
 
-    monkeypatch.setattr(get_settings(), "sarvam_api_key", "platform-key")
+    # No platform key set and no key of its own: the workspace gets nothing, never a shared account.
     assert await get_sarvam_api_key(db_session, tenant.id) == ""
+    # Setting SARVAM_API_KEY is the platform switching CallPlus's Sarvam account on for workspaces.
+    monkeypatch.setattr(get_settings(), "sarvam_api_key", "platform-key")
+    assert await get_sarvam_api_key(db_session, tenant.id) == "platform-key"
     monkeypatch.setattr(get_settings(), "twilio_account_sid", "ACplatform")
     monkeypatch.setattr(get_settings(), "twilio_auth_token", "platform-token")
     with pytest.raises(SharedAccountError):

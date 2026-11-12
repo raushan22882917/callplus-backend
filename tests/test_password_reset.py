@@ -84,20 +84,12 @@ async def test_forgot_password_reset_password_then_login(client: AsyncClient) ->
     assert new_login.status_code == 200
 
 
-async def test_verify_email_and_resend(client: AsyncClient) -> None:
+async def test_signup_does_not_ask_for_email_confirmation(client: AsyncClient) -> None:
     tokens = await _signup(client, slug="verify-co", email="owner@verify-co.com")
-
-    me_before = await client.get("/api/v1/users/me", headers=_auth(tokens))
-    assert me_before.status_code == 200
-
     user = await _load_user_by_email("owner@verify-co.com")
-    token = create_purpose_token(
-        user_id=user.id, purpose="email_verify", expires_delta=timedelta(hours=24)
-    )
+    assert user.email_verified_at is not None
 
-    verify_resp = await client.post("/api/v1/auth/verify-email", json={"token": token})
-    assert verify_resp.status_code == 200
-
-    resend_resp = await client.post("/api/v1/auth/resend-verification", headers=_auth(tokens))
-    assert resend_resp.status_code == 200
-    assert "already verified" in resend_resp.json()["message"]
+    me = await client.get("/api/v1/users/me", headers=_auth(tokens))
+    assert me.status_code == 200
+    assert (await client.post("/api/v1/auth/verify-email", json={"token": "unused"})).status_code == 404
+    assert (await client.post("/api/v1/auth/resend-verification", headers=_auth(tokens))).status_code == 404

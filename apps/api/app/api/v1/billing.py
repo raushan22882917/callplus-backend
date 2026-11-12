@@ -219,33 +219,54 @@ async def checkout_invoice(
     if invoice.status != InvoiceStatus.PENDING or invoice.amount_paise <= 0:
         raise HTTPException(status.HTTP_409_CONFLICT, "This invoice is not waiting for a payment.")
     description = (invoice.description or "CallPlus invoice")[:255]
-    try:
-        order = await razorpay_create_order(
-            amount_paise=invoice.amount_paise,
-            receipt=str(invoice.id),
-            notes={"invoice_id": str(invoice.id), "tenant_id": str(ctx.tenant_id)},
-        )
-    except RazorpayAPIError as exc:
-        raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(exc)) from exc
+    settings = get_settings()
+    money = (invoice.currency or "INR").upper()
+    order = None
+    razorpay_error: RazorpayAPIError | None = None
+    if money == "INR":
+        try:
+            order = await razorpay_create_order(
+                amount_paise=invoice.amount_paise,
+                receipt=str(invoice.id),
+                notes={"invoice_id": str(invoice.id), "tenant_id": str(ctx.tenant_id)},
+            )
+        except RazorpayAPIError as exc:
+            razorpay_error = exc
+    elif money != "USD":
+        razorpay_error = RazorpayAPIError(f"This invoice is in {money}. Razorpay charges rupees and PayPal charges dollars.")
     paypal_id = None
     paypal_url = None
-    settings = get_settings()
-    if settings.paypal_client_id and settings.paypal_client_secret:
+    paypal_amount = None
+    paypal_error: paypal_client.PayPalAPIError | None = None
+    if settings.paypal_client_id and settings.paypal_client_secret and money in ("INR", "USD"):
         try:
+            return_url, cancel_url = paypal_client.checkout_urls("invoice", invoice=str(invoice.id))
             paypal = await paypal_client.create_order(
-                amount_paise=invoice.amount_paise, receipt=str(invoice.id), custom_id=str(invoice.id)
+                amount_paise=invoice.amount_paise,
+                receipt=str(invoice.id),
+                custom_id=str(invoice.id),
+                return_url=return_url,
+                cancel_url=cancel_url,
+                currency=money,
             )
         except paypal_client.PayPalAPIError as exc:
-            raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(exc)) from exc
-        paypal_id, paypal_url = paypal["id"], paypal.get("approve_url")
+            paypal_error = exc
+        else:
+            paypal_id, paypal_url = paypal["id"], paypal.get("approve_url")
+            paypal_amount = paypal.get("value")
+    if order is None and paypal_id is None:
+        failed = paypal_error or razorpay_error
+        raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(failed) if failed else "No payment method is configured")
     return InvoiceCheckout(
-        key_id=settings.razorpay_key_id,
-        order_id=order["id"],
+        key_id=settings.razorpay_key_id if order else None,
+        order_id=order["id"] if order else None,
         amount_paise=invoice.amount_paise,
         currency=invoice.currency,
         description=description,
         paypal_order_id=paypal_id,
         paypal_approve_url=paypal_url,
+        paypal_amount=paypal_amount,
+        paypal_currency="USD" if paypal_id else None,
     )
 
 
@@ -313,12 +334,11 @@ async def confirm_invoice_paypal(
         order = await paypal_client.capture_order(order_id)
     except paypal_client.PayPalAPIError as exc:
         raise HTTPException(status.HTTP_424_FAILED_DEPENDENCY, str(exc)) from exc
-    captured = paypal_client.capture_from_order(order)
-    if captured is None or captured[2] != invoice.currency:
+    payment_id = paypal_client.capture_payment_id(
+        order, invoice.amount_paise, currency=invoice.currency or "INR"
+    )
+    if payment_id is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "PayPal has not completed this payment.")
-    payment_id, paid_paise, _currency = captured
-    if paid_paise != invoice.amount_paise:
-        raise HTTPException(status.HTTP_409_CONFLICT, "PayPal captured a different amount.")
     units = (order.get("purchase_units") or [{}])
     custom = str((units[0] or {}).get("custom_id") or "")
     if custom != str(invoice.id):

@@ -1076,9 +1076,8 @@ async def test_super_admin_access_and_tenant_status(
     other_tokens = await _signup(client, "victim-co")
     ah, oh = _auth(admin_tokens), _auth(other_tokens)
 
-    assert (await client.get("/api/v1/platform/admin/me", headers=ah)).json() == {
-        "is_platform_admin": False
-    }
+    first = (await client.get("/api/v1/platform/admin/me", headers=ah)).json()
+    assert first["is_platform_admin"] is False and first["claim_open"] is True
     assert (await client.get("/api/v1/platform/admin/tenants", headers=ah)).status_code == 403
 
     admin_user = (
@@ -1087,9 +1086,8 @@ async def test_super_admin_access_and_tenant_status(
     db_session.add(PlatformAdmin(user_id=admin_user.id))
     await db_session.commit()
 
-    assert (await client.get("/api/v1/platform/admin/me", headers=ah)).json() == {
-        "is_platform_admin": True
-    }
+    second = (await client.get("/api/v1/platform/admin/me", headers=ah)).json()
+    assert second["is_platform_admin"] is True and second["claim_open"] is False
     assert (await client.get("/api/v1/platform/admin/tenants", headers=oh)).status_code == 403
     rows = (await client.get("/api/v1/platform/admin/tenants", headers=ah)).json()
     assert {r["slug"] for r in rows} == {"root-co", "victim-co"}

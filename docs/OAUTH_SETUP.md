@@ -117,35 +117,6 @@ Needs provider approval: none for installing into any workspace once
 distribution is activated; the Slack Marketplace listing is optional. To post
 to a private channel, invite the bot (`/invite @app`).
 
-## Meta: Facebook Messenger + Instagram (Facebook Login for Business)
-
-1. developers.facebook.com > **Create app** (type *Business*). Add the products
-   *Facebook Login for Business*, *Messenger* and *Instagram* (Messaging).
-2. **Facebook Login > Settings > Valid OAuth Redirect URIs**:
-   `.../api/v1/oauth/meta/callback`. App domain: your API/frontend domain.
-3. Permissions requested: `pages_show_list`, `pages_messaging`,
-   `pages_manage_metadata` (needed to subscribe a Page to webhooks),
-   `instagram_basic`, `instagram_manage_messages`. Optionally create a Login
-   for Business *configuration* and set `META_LOGIN_CONFIG_ID` (then it is sent
-   instead of `scope`).
-4. **Messenger / Instagram > Webhooks**: callback URL
-   `{PUBLIC_BASE_URL}/api/v1/channels/meta/webhook`, verify token =
-   `META_WHATSAPP_VERIFY_TOKEN`; subscribe objects *Page* and *Instagram*, field `messages`.
-5. `META_APP_ID`, `META_APP_SECRET` (falls back to `META_WHATSAPP_APP_SECRET`).
-
-Flow: tenant clicks Connect, we exchange the code for a long-lived token, the
-hub lists their Pages and the Instagram professional account linked to each,
-the tenant picks one, and we write the `messenger` / `instagram` channel rows
-(page token encrypted), enable them and call `POST /{page-id}/subscribed_apps`.
-No token pasting. Page tokens derived from a long-lived user token do not
-expire; the user token itself lasts about 60 days (the hub shows the expiry).
-
-Needs provider approval: **Meta App Review + Business Verification** for
-Advanced Access to `pages_messaging`, `instagram_manage_messages`,
-`pages_manage_metadata`, `instagram_basic` before anyone other than your own
-app's admins/testers can connect. Until approved, only people with a role on
-the app (developers/testers) can complete the flow.
-
 ## Meta: WhatsApp Embedded Signup
 
 Implemented: `GET /oauth/whatsapp/config` (app id + config id for the JS SDK)
@@ -190,7 +161,6 @@ orders) requires a *Protected customer data access* request; `read_all_orders`
 | Google / Microsoft | Appointment booked / rescheduled / cancelled creates / updates / deletes a calendar event (best effort, never breaks booking). Optional `block_busy` hides slots that clash with their calendar. |
 | HubSpot / Zoho / Salesforce | Creating a CRM lead (UI or AI tool) upserts the contact / lead; `POST /crm/leads/{id}/push-to-crm` pushes on demand. Result stored in `lead.custom_fields.crm_sync`. |
 | Slack | `ticket.created` and `sla.breached` (selectable) post to the chosen channel via the connector dispatch. |
-| Meta | Creates the Messenger / Instagram channel rows and webhook subscription. |
 | Shopify | Order lookup tool. |
 
 ## Security notes
@@ -203,3 +173,41 @@ orders) requires a *Protected customer data access* request; `read_all_orders`
 * The OAuth callback is public by necessity; tenant identity comes only from the signed state.
 * Sign in with Google / Microsoft never creates users or tenants and refuses
   accounts with two-factor enabled (use password + code there).
+
+## Connecting with an API token instead of sign-in
+
+Sign-in (OAuth) needs the platform to register an app with the provider. When
+that has not been done, or the provider has no sign-in for private accounts,
+a workspace owner can paste a token instead. It is the same connection from
+then on: CRM push, Slack alerts and the Shopify connector do not know the
+difference.
+
+| Provider | What the user pastes | How it is checked |
+| --- | --- | --- |
+| HubSpot | Private app access token | `GET /account-info/v3/details` |
+| Shopify | Admin API access token + store domain | `GET /admin/api/.../shop.json` |
+| Slack | Bot token (`xoxb-…`) | `auth.test` |
+
+`POST /oauth/{provider}/token` verifies the token against the provider first.
+A refused token (401/403) returns `invalid_token` (422); an unreachable
+provider returns `provider_unreachable` (502). Nothing is saved in either
+case. A good token is stored encrypted (`encrypt_secret`) as an
+`OAuthConnection` with `extra.manual = true`, is never returned by any
+endpoint, and the card shows "Connected with an API token you pasted".
+Disconnecting deletes it locally; the provider-side token is not revoked
+(we cannot), so the owner should remove it in the provider's dashboard too.
+
+## Workspace email sending key (Resend or Brevo)
+
+`POST /integrations/email-sender` stores a workspace's own Resend or Brevo
+API key (encrypted) with the address and name to send as. It is checked live
+first: Resend must list the sending domain as verified; Brevo must list the
+sender as active. Campaigns and customer-facing email use this key when the
+workspace has no connected mailbox; otherwise the platform sender is used.
+
+Known limits:
+- Bounce and complaint webhooks for a workspace's own Resend/Brevo account
+  are not received (the webhook secret is platform-level), so those bounces
+  are not auto-suppressed. Unsubscribes and manual suppression still work.
+- System mail (post-call summaries, operations follow-ups) still uses the
+  platform sender.

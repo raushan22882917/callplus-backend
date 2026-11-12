@@ -155,7 +155,7 @@ async def test_a_failing_embedder_leaves_the_document_searchable_by_keywords(cli
         def embed(self, texts):
             raise RuntimeError("embedder down")
 
-    monkeypatch.setattr(embeddings, "_embedder", Broken())
+    monkeypatch.setattr(embeddings, "get_embedder", lambda: Broken())
     auth = await _signup(client, "broken-co")
     doc = await _add(client, auth, "Hours", "Open every day from ten to eight.")
     assert doc["status"] == "ready" and "keyword search only" in doc["error"]

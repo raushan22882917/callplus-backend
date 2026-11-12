@@ -18,7 +18,7 @@ Legend: YES built, PARTIAL exists with limits, NO not built.
 | Voice | Voice cloning / custom voice upload | NO (provider voice selection only) |
 | Campaigns | Batch outbound voice + WhatsApp campaigns, throttling, retries | YES |
 | Campaigns | Calling windows / blocklist / spam protection | YES |
-| Channels | WhatsApp, SMS, email, web chat widget, web forms, Meta (IG/Messenger) | YES |
+| Channels | WhatsApp, SMS, email, web chat widget, web forms | YES |
 | Agent | Tool/function calling, workflows, guardrails, flow + scenario testing | YES |
 | Agent | Knowledge base (full-text search) | YES |
 | Agent | Semantic/vector search, PDF/DOCX ingestion | NO |

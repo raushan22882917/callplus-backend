@@ -1,5 +1,5 @@
 """Per-provider "which one do you want to use" pickers: Google/Outlook
-calendars, Slack channels, Facebook Pages + linked Instagram accounts."""
+calendars and Slack channels."""
 
 import uuid
 from dataclasses import dataclass, field
@@ -20,8 +20,6 @@ SLACK_DEFAULT_EVENTS = ["ticket.created", "sla.breached"]
 class SelectPayload:
     resource_id: str | None = None
     block_busy: bool | None = None
-    messenger: bool | None = None
-    instagram: bool | None = None
     events: list[str] | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
@@ -135,10 +133,6 @@ async def list_resources(
             items = await _microsoft_calendars(http, token)
         elif provider_key == "slack":
             items = await _slack_channels(http, token)
-        elif provider_key == "meta":
-            from app.services import meta_channels
-
-            items = meta_channels.public_pages(await meta_channels.fetch_pages(http, token))
         else:  # pragma: no cover - guarded by resources_kind
             items = []
     finally:
@@ -196,20 +190,6 @@ async def select_resource(
                     raise OAuthError("invalid_selection", f"Unsupported event(s): {', '.join(unknown)}")
                 selected = {**selected, "events": sorted(set(payload.events))}
             selected.setdefault("events", list(SLACK_DEFAULT_EVENTS))
-        elif provider_key == "meta":
-            from app.services import meta_channels
-
-            if not payload.resource_id:
-                raise OAuthError("invalid_selection", "Choose a Facebook Page")
-            selected = await meta_channels.connect_page(
-                db,
-                tenant_id,
-                token,
-                payload.resource_id,
-                messenger=True if payload.messenger is None else payload.messenger,
-                instagram=bool(payload.instagram),
-                client=http,
-            )
         else:  # pragma: no cover
             raise OAuthError("select_not_supported", f"{provider_key} has nothing to select")
     finally:

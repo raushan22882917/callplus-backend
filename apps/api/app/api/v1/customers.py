@@ -8,7 +8,7 @@ from app.schemas.customer import CustomerCreate, CustomerDossier, CustomerRead, 
 from app.services.platform_masking import masked_customers
 from app.workflows.dispatch import enqueue_workflow_trigger
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.database.models import (
@@ -33,10 +33,20 @@ class CustomerRepository(TenantScopedRepository[Customer]):
 async def list_customers(
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
+    has_email: bool = Query(default=False),
+    has_phone: bool = Query(default=False),
     ctx: RequestContext = Depends(require_permission(Permissions.CUSTOMERS_READ)),
     db: AsyncSession = Depends(get_db),
 ) -> list[CustomerRead]:
-    rows = await CustomerRepository(db, ctx.tenant_id).list(limit=limit, offset=offset)
+    if has_email or has_phone:
+        query = select(Customer).where(Customer.tenant_id == ctx.tenant_id)
+        if has_email:
+            query = query.where(Customer.email.isnot(None), func.length(func.trim(Customer.email)) > 0)
+        if has_phone:
+            query = query.where(Customer.phone.isnot(None), func.length(func.trim(Customer.phone)) > 0)
+        rows = list((await db.execute(query.order_by(Customer.created_at.desc()).limit(limit).offset(offset))).scalars().all())
+    else:
+        rows = await CustomerRepository(db, ctx.tenant_id).list(limit=limit, offset=offset)
     return await masked_customers(db, ctx, rows)
 
 

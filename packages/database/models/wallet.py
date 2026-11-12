@@ -31,6 +31,13 @@ class Wallet(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     billing_name: Mapped[str | None] = mapped_column(String(255))
     gstin: Mapped[str | None] = mapped_column(String(15))
     state_code: Mapped[str | None] = mapped_column(String(2))
+    # Which services this workspace wants billed and allowed. Missing keys stay on.
+    services: Mapped[dict] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default='{"calls": true, "whatsapp": true, "sms": true, "email": true}',
+        nullable=False,
+    )
 
     __table_args__ = (UniqueConstraint("tenant_id", name="uq_wallet_tenant"),)
 
@@ -73,6 +80,9 @@ class WalletTopup(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     sgst_paise: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     igst_paise: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_paise: Mapped[int] = mapped_column(Integer, nullable=False)  # charged: amount + GST
+    # What PayPal collected, in US cents, and the rupees-per-dollar rate used. Empty for Razorpay.
+    charged_cents: Mapped[int | None] = mapped_column(Integer)
+    fx_inr_per_usd: Mapped[int | None] = mapped_column(Integer)
     inbound_rate_paise: Mapped[int] = mapped_column(Integer, nullable=False)
     outbound_rate_paise: Mapped[int] = mapped_column(Integer, nullable=False)
     invoice_number: Mapped[str | None] = mapped_column(String(32), unique=True)

@@ -3,7 +3,8 @@
 Each recipe is a plain-words sentence ("when this happens, do that"), at most one or two simple
 questions, and the definition the workflow engine (engine.py) runs. Owners never see the definition.
 A recipe only does things that work for every workspace as it is: add a task to the Tickets page,
-ask for a call-back, or write a note on a customer. Nothing here sends a message to a customer.
+ask for a call-back, write a note on a customer, or (the AI follow-up recipes) have the AI reach the customer by
+itself. Those only ever message people who have not opted out, inside business hours (services/outreach.py).
 """
 
 from dataclasses import dataclass, field
@@ -55,6 +56,23 @@ def _missed_call(a: dict[str, str]) -> list[dict]:
             "type": "action",
             "action": "schedule_callback",
             "params": {"requested_time": a["when"], "note": "They did not pick up our call"},
+        },
+    ]
+
+
+def _missed_call_ai(a: dict[str, str]) -> list[dict]:
+    return [
+        {"key": "nobody_answered", "type": "condition", "field": "status", "op": "eq", "value": "no_answer"},
+        {
+            "key": "ai_reaches_out",
+            "type": "action",
+            "action": "reach_out_to_customer",
+            "params": {
+                "goal": "We tried to call them and nobody picked up. Say sorry we missed them, ask how we can help "
+                "and invite them to reply here or tell us a good time to call.",
+                "customer_id": "{{customer_id}}",
+                "delay_minutes": a["delay"],
+            },
         },
     ]
 
@@ -128,6 +146,22 @@ RECIPES: tuple[Recipe, ...] = (
             ),
         ),
         nodes=_missed_call,
+    ),
+    Recipe(
+        id="missed_call_ai_message",
+        title="Message people who did not pick up",
+        when="A call to a customer ends and nobody answers",
+        then="The AI writes to them on WhatsApp, SMS or email (whichever works) and tries the next one if they do not answer",
+        trigger=WorkflowTrigger.CALL_ENDED,
+        questions=(
+            Question(
+                "delay",
+                "How soon after the missed call?",
+                (Choice("5", "In 5 minutes"), Choice("60", "In an hour"), Choice("240", "In 4 hours")),
+                "5",
+            ),
+        ),
+        nodes=_missed_call_ai,
     ),
     Recipe(
         id="failed_call_ticket",

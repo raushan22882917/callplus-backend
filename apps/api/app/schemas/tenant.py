@@ -21,6 +21,9 @@ class TenantRead(BaseModel):
     spam_call_window_minutes: int
     spam_call_threshold: int
     call_recording_enabled: bool
+    # When the business told its phone company which numbers place automated calls.
+    # Voice campaigns cannot start until this is set.
+    a2p_declared_at: datetime | None = None
     created_at: datetime
 
 

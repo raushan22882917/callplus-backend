@@ -67,9 +67,8 @@ healthy (migrations run when the API starts). Run the same command for every lat
   Media streams use `wss://rt.yourdomain.com/ws/twilio` (the API tells Twilio this itself).
 - **Razorpay:** webhook `https://api.yourdomain.com/api/v1/webhooks/payment/razorpay` with the same
   secret as `RAZORPAY_WEBHOOK_SECRET`; enable `payment.captured`, `order.paid` and the subscription events.
-- **Meta:** WhatsApp callback `https://api.yourdomain.com/api/v1/webhooks/whatsapp/meta`;
-  Instagram and Messenger callback `https://api.yourdomain.com/api/v1/channels/meta/webhook`; both with
-  your verify token.
+- **Meta:** WhatsApp callback `https://api.yourdomain.com/api/v1/webhooks/whatsapp/meta`
+  with your verify token.
 - **Twilio SMS** (if used): `https://api.yourdomain.com/api/v1/channels/sms/webhook`.
 - **Chat widgets** already on customers' sites load `widget.js` from the old API address. Keep the old
   address answering (or have customers paste the new snippet) until they are moved.

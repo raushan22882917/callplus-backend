@@ -287,8 +287,54 @@ async def withdraw_consent(
             .where(WidgetLead.tenant_id == tenant_id, WidgetLead.phone == phone)
             .values(consent_call=False)
         )
+    suppressed = 0
+    if not purposes or {"call_back", "marketing"} & set(purposes):
+        more_numbers, suppressed = await _opt_out_everywhere(db, tenant_id, phone, email, via)
+        blocked += more_numbers
     await db.flush()
-    return {"consents_withdrawn": withdrawn, "numbers_blocked": blocked}
+    return {"consents_withdrawn": withdrawn, "numbers_blocked": blocked, "emails_suppressed": suppressed}
+
+
+async def _opt_out_everywhere(
+    db: AsyncSession, tenant_id: uuid.UUID, phone: str | None, email: str | None, via: str
+) -> tuple[int, int]:
+    """One opt-out covers every channel: the phone numbers and email addresses on the same customer
+    record (and the ones given) all stop getting marketing, whichever channel the person used to say so.
+    Returns (numbers newly blocked, emails newly suppressed)."""
+    from app.services import email_compliance
+
+    conditions = []
+    if phone:
+        conditions.append(Customer.phone.in_({phone, phone.lstrip("+")}))
+    if email:
+        conditions.append(func.lower(Customer.email) == email)
+    emails = {email} if email else set()
+    phones: set[str] = set()
+    if conditions:
+        rows = await db.execute(
+            select(Customer.phone, Customer.email).where(Customer.tenant_id == tenant_id, or_(*conditions))
+        )
+        for row_phone, row_email in rows.all():
+            if _clean_phone(row_phone):
+                phones.add(_clean_phone(row_phone))
+            if (row_email or "").strip():
+                emails.add(row_email.strip().lower())
+    numbers = 0
+    for number in phones - {phone}:  # the given number was handled above
+        exists = (
+            await db.execute(select(DndEntry.id).where(DndEntry.tenant_id == tenant_id, DndEntry.e164_number == number))
+        ).first()
+        if not exists:
+            db.add(DndEntry(tenant_id=tenant_id, e164_number=number, source="opt_out_linked",
+                            note="Opted out on another channel"))
+            numbers += 1
+    suppressed = 0
+    for address in emails:
+        if email_compliance.normalize_email(address) and await email_compliance.suppress(
+            db, tenant_id, address, reason="unsubscribed", source=via[:24]
+        ):
+            suppressed += 1
+    return numbers, suppressed
 
 
 async def consent_summary(db: AsyncSession, tenant_id: uuid.UUID) -> dict:

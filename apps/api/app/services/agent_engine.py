@@ -65,16 +65,54 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_ITERATIONS = 4
 MAX_HISTORY_MESSAGES = 20
 
-# Tools the internal staff assistant may use. Deliberately excludes the
-# customer-channel-only tools (send_whatsapp_message, create_customer_payment_link,
-# transfer_call) — those don't mean anything outside a live customer conversation.
+# Tools the internal staff assistant may use. Phone-call tools (send a WhatsApp,
+# take a payment, transfer the call) stay off. Staff-only tools live in
+# app/tools/staff_tools.py and are refused everywhere else.
 ASSISTANT_TOOL_NAMES = (
+    "search_customers",
     "get_customer",
+    "create_customer",
+    "update_customer",
+    "delete_customer",
     "list_open_tickets",
     "list_recent_tickets",
     "create_ticket",
+    "update_ticket",
+    "add_ticket_comment",
     "add_customer_note",
     "schedule_callback",
+    "list_agents",
+    "create_agent",
+    "update_agent",
+    "delete_agent",
+    "list_campaigns",
+    "create_campaign",
+    "update_campaign",
+    "create_lead",
+    "list_leads",
+    "update_lead",
+    "delete_lead",
+    "list_deals",
+    "create_deal",
+    "update_deal",
+    "list_tasks",
+    "create_task",
+    "update_task",
+    "search_knowledge_base",
+    "list_knowledge",
+    "create_knowledge",
+    "delete_knowledge",
+    "list_blocklist",
+    "add_blocklist",
+    "remove_blocklist",
+    "list_phone_numbers",
+    "assign_phone_number",
+    "list_recent_calls",
+    "list_appointments",
+    "check_availability",
+    "book_appointment",
+    "reschedule_appointment",
+    "cancel_appointment",
 )
 
 # Tools an agent gets when nobody has ever configured its tools (no AIAgentTool
@@ -554,14 +592,17 @@ async def _actions_this_conversation(db: AsyncSession, conversation: Conversatio
 
 
 ASSISTANT_SYSTEM_PROMPT = (
-    "You are the internal AI assistant for this company's staff. You can look up "
-    "customers, tickets, and notes using the tools available to you, and you can "
-    "also just answer general questions, draft text, or help think something "
-    "through — like a general-purpose assistant. If a question has nothing to do "
-    "with this business's data, just answer it directly without trying to force "
-    "a tool call. When staff ask what is open, urgent, or waiting, call "
-    "list_open_tickets (pass priority only if they named one) and answer from "
-    "those rows, including each customer's name. Never say you cannot see tickets."
+    "You are the internal AI assistant for this company's staff. You help on whatever "
+    "page they are looking at. You can look up, create, update and delete the records "
+    "your tools cover: customers, tickets, agents, campaigns, leads, deals, tasks, "
+    "knowledge, the block list, phone-number assignments, calls and appointments. "
+    "Also answer general questions and draft text. "
+    "Never say you deleted, created or changed something unless the matching tool "
+    "call succeeded. Never pass confirm=true on a delete unless the person clearly "
+    "asked to delete that record in this conversation. Do not start a campaign and "
+    "do not buy phone numbers. When they ask what is open or waiting, call "
+    "list_open_tickets and answer from those rows. If a tool returns an error, say "
+    "what went wrong in plain words."
 )
 
 STAFF_MODEL_UNAVAILABLE = (
@@ -651,6 +692,7 @@ async def _run_tool_loop(
     executor: ToolExecutor = execute_tool,
     on_event: EventHook | None = None,
     reasoning_effort: str | None = None,
+    max_iterations: int = MAX_TOOL_ITERATIONS,
 ) -> tuple[str, bool, str | None]:
     """Runs the chat-completion / tool-call loop to a final answer.
 
@@ -667,7 +709,7 @@ async def _run_tool_loop(
     reply_text = MODEL_TROUBLE
 
     try:
-        for _ in range(MAX_TOOL_ITERATIONS):
+        for _ in range(max_iterations):
             started = time.perf_counter()
             completion = await chat_completion(
                 messages=messages,
@@ -1073,6 +1115,7 @@ async def run_assistant_turn(
     tenant_id: uuid.UUID,
     conversation: Conversation,
     user_text: str,
+    page: str | None = None,
 ) -> str:
     """The staff-facing counterpart to `run_turn` — not tied to any `AIAgent`
     row, uses a fixed built-in prompt/tool set instead of a tenant-configured
@@ -1091,7 +1134,10 @@ async def run_assistant_turn(
         TOOL_REGISTRY[name].as_llm_tool() for name in ASSISTANT_TOOL_NAMES if name in TOOL_REGISTRY
     ]
     sarvam_api_key = await get_llm_key(db, tenant_id)
-    messages: list[dict] = [{"role": "system", "content": ASSISTANT_SYSTEM_PROMPT}, *history]
+    where = ""
+    if page and page.strip():
+        where = f"\n\nThe staff member is on the page {page.strip()[:200]}. Help with that page first."
+    messages: list[dict] = [{"role": "system", "content": ASSISTANT_SYSTEM_PROMPT + where}, *history]
 
     tool_ctx = ToolContext(
         db=db,
@@ -1100,11 +1146,16 @@ async def run_assistant_turn(
         call_id=None,
         conversation_id=conversation.id,
         customer_id=None,
+        staff=True,
     )
 
     try:
         reply_text, _transfer_requested, _transfer_reason = await _run_tool_loop(
-            messages=messages, llm_tools=llm_tools, tool_ctx=tool_ctx, sarvam_api_key=sarvam_api_key
+            messages=messages,
+            llm_tools=llm_tools,
+            tool_ctx=tool_ctx,
+            sarvam_api_key=sarvam_api_key,
+            max_iterations=8,
         )
     except SarvamAPIError:
         reply_text = STAFF_MODEL_UNAVAILABLE

@@ -42,6 +42,10 @@ class PrivacyProfile(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixi
     call_disclosure_text: Mapped[str] = mapped_column(String(300), default=DEFAULT_CALL_DISCLOSURE, nullable=False)
     # The business's own target for answering a request, in days (the law sets the outer limit).
     request_sla_days: Mapped[int] = mapped_column(Integer, default=30, server_default="30", nullable=False)
+    # When on, marketing email goes only to people with a granted "marketing" consent on record.
+    email_marketing_requires_consent: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=expression.false(), nullable=False
+    )
 
     __table_args__ = (UniqueConstraint("tenant_id", name="uq_privacy_profile_tenant"),)
 

@@ -22,9 +22,11 @@ from app.schemas.oauth import (
     OAuthProviderRead,
     ResourcesResponse,
     SelectRequest,
+    TokenConnectRequest,
     WhatsAppSignupRequest,
     WhatsAppSignupResponse,
 )
+from app.services import connection_health, manual_token
 from app.services import whatsapp_signup
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -99,6 +101,12 @@ def _read(provider, conn: OAuthConnection | None) -> OAuthProviderRead:
         selected=(conn.extra or {}).get("selected") if conn else None,
         redirect_uri=redirect_uri(provider.key),
         supports_login=provider.login,
+        token_supported=provider.key in manual_token.SUPPORTED,
+        token_label=manual_token.HELP[provider.key].label if provider.key in manual_token.HELP else None,
+        token_steps=manual_token.HELP[provider.key].steps if provider.key in manual_token.HELP else None,
+        token_url=manual_token.HELP[provider.key].url if provider.key in manual_token.HELP else None,
+        token_placeholder=manual_token.HELP[provider.key].placeholder if provider.key in manual_token.HELP else None,
+        via_token=bool(conn and (conn.extra or {}).get("manual")),
     )
 
 
@@ -142,6 +150,7 @@ async def whatsapp_embedded_signup(
             resource_id=account.id,
         )
         await db.commit()
+        connection_health.forget(ctx.tenant_id)
     except OAuthError as exc:
         await db.rollback()
         raise _http(exc) from exc
@@ -181,6 +190,36 @@ async def authorize(
     return AuthorizeResponse(authorization_url=result.authorization_url, expires_in=result.expires_in)
 
 
+@router.post("/{provider}/token", status_code=201)
+async def connect_with_token(
+    provider: str,
+    payload: TokenConnectRequest,
+    ctx: RequestContext = Depends(can_manage),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Connect with a pasted API token (HubSpot, Shopify, Slack). Checked with the provider first, saved encrypted."""
+    _provider_or_404(provider)
+    try:
+        conn = await manual_token.connect_with_token(
+            db, tenant_id=ctx.tenant_id, user_id=ctx.user_id, provider=provider, token=payload.token, shop=payload.shop
+        )
+    except OAuthError as exc:
+        await db.rollback()
+        raise _http(exc) from exc
+    await log_audit_event(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_user_id=ctx.user_id,
+        action="oauth.connected_with_token",
+        resource_type="oauth_connection",
+        resource_id=conn.id,
+        extra={"provider": provider},
+    )
+    await db.commit()
+    connection_health.forget(ctx.tenant_id)
+    return {"provider": provider, "account_label": conn.account_label}
+
+
 def _hub_redirect(return_url: str, **params: str) -> RedirectResponse:
     base = get_settings().frontend_base_url.rstrip("/")
     path = return_url or DEFAULT_RETURN_URL
@@ -209,6 +248,7 @@ async def callback(
             extra={"provider": provider},
         )
         await db.commit()
+        connection_health.forget(result.connection.tenant_id)
     except OAuthError as exc:
         return _hub_redirect(
             getattr(exc, "return_url", DEFAULT_RETURN_URL),
@@ -245,6 +285,7 @@ async def disconnect(
         extra={"provider": provider},
     )
     await db.commit()
+    connection_health.forget(ctx.tenant_id)
 
 
 @router.get("/{provider}/resources", response_model=ResourcesResponse)
@@ -275,8 +316,6 @@ async def provider_select(
             resources.SelectPayload(
                 resource_id=payload.resource_id,
                 block_busy=payload.block_busy,
-                messenger=payload.messenger,
-                instagram=payload.instagram,
                 events=payload.events,
             ),
         )

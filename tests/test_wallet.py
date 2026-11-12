@@ -26,6 +26,7 @@ from packages.database.models import (
     Message,
     MessageDirection,
     MessageSender,
+    PhoneNumber,
     Tenant,
     UsageEvent,
     User,
@@ -45,8 +46,8 @@ CALL_INBOUND, CALL_OUTBOUND = CallDirection.INBOUND, CallDirection.OUTBOUND
 
 @pytest.mark.parametrize(
     "paise, expected",
-    [(0, (500, 900)), (10_000, (500, 900)), (99_999, (500, 900)), (100_000, (450, 800)), (499_999, (450, 800)),
-     (500_000, (400, 750)), (1_999_999, (400, 750)), (2_000_000, (350, 700)), (5_000_000, (350, 700))],
+    [(0, (500, 900)), (10_000, (500, 900)), (99_999, (500, 900)), (100_000, (450, 850)), (499_999, (450, 850)),
+     (500_000, (400, 800)), (1_999_999, (400, 800)), (2_000_000, (400, 800)), (5_000_000, (400, 800))],
 )
 def test_a_bigger_top_up_buys_a_lower_rate(paise, expected):
     assert wallet.rates_for_topup(paise) == expected
@@ -57,7 +58,26 @@ def test_the_rate_table_covers_every_amount_without_gaps():
     assert table[0]["from_paise"] == wallet.TOPUP_MIN_PAISE and table[-1]["to_paise"] == wallet.TOPUP_MAX_PAISE
     for earlier, later in zip(table, table[1:], strict=False):
         assert later["from_paise"] == earlier["to_paise"] + 100
-        assert later["inbound_paise"] < earlier["inbound_paise"] and later["outbound_paise"] < earlier["outbound_paise"]
+        assert later["inbound_paise"] <= earlier["inbound_paise"] and later["outbound_paise"] <= earlier["outbound_paise"]
+
+
+def test_every_call_rate_still_clears_what_the_minute_costs_us():
+    for amount in (0, 10_000, 100_000, 500_000, 2_000_000, 5_000_000):
+        inbound, outbound = wallet.rates_for_topup(amount)
+        assert inbound >= wallet.MIN_INBOUND_PAISE and outbound >= wallet.MIN_OUTBOUND_PAISE
+        assert wallet.price_clears_cost(inbound, wallet.CALL_COST_INBOUND_PAISE)
+        assert wallet.price_clears_cost(outbound, wallet.CALL_COST_OUTBOUND_PAISE)
+    assert wallet.price_clears_cost(wallet.OWN_LINE_PAISE, 209)
+    assert wallet.price_clears_cost(wallet.WHATSAPP_MESSAGE_PAISE, 87)
+    assert not wallet.price_clears_cost(700, wallet.CALL_COST_OUTBOUND_PAISE)
+
+
+def test_a_service_the_workspace_did_not_choose_stays_available_until_they_turn_it_off():
+    assert wallet.services_from(None) == {
+        "calls": True, "whatsapp": True, "sms": True, "email": True,
+    }
+    assert wallet.services_from({"calls": False})["calls"] is False
+    assert wallet.services_from({"calls": False})["whatsapp"] is True
 
 
 def test_gst_is_split_by_state_and_always_adds_up():
@@ -156,7 +176,7 @@ async def test_a_new_workspace_sees_an_empty_wallet_and_the_rate_table(client: A
     assert summary["balance_paise"] == 0 and summary["can_topup"] and summary["active"] is False
     assert summary["inbound_rate_paise"] == 500 and summary["outbound_rate_paise"] == 900
     assert summary["min_topup_paise"] == 10_000 and summary["gst_percent"] == 18
-    assert [r["inbound_paise"] for r in summary["rate_table"]] == [500, 450, 400, 350]
+    assert [r["inbound_paise"] for r in summary["rate_table"]] == [500, 450, 400]
     assert (await client.get("/api/v1/wallet")).status_code == 401
 
 
@@ -257,6 +277,51 @@ async def test_the_webhook_credits_a_payment_the_browser_never_confirmed(client:
     assert (await client.get("/api/v1/wallet", headers=auth)).json()["balance_paise"] == 50_000
 
 
+def _rupees_left(cents: int, rate: int) -> int:
+    """Paise left after PayPal's receiving fee, GST on that fee, and the 3% conversion cut."""
+    return ((cents * paypal_client._FEE_KEEP - paypal_client._FIXED_DRAG) * rate * paypal_client._FX_KEEP) // paypal_client._SCALE
+
+
+def test_rupees_convert_to_dollars_and_a_dollar_amount_is_not_converted_again(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "paypal_inr_per_usd", 88)
+    charged = paypal_client.charge_cents(8_800, "INR")
+    assert charged == 147
+    assert _rupees_left(charged, 88) >= 8_800
+    assert _rupees_left(charged - 1, 88) < 8_800
+    quote = paypal_client.charge_cents(11_800, "INR")
+    assert quote == 184
+    assert paypal_client.usd_value(11_800) == "1.84"
+    assert paypal_client.charge_cents(134, "USD") == 134
+    assert paypal_client.order_payload(amount_paise=134, receipt="r", custom_id="c", currency="USD")[
+        "purchase_units"
+    ][0]["amount"] == {"currency_code": "USD", "value": "1.34"}
+
+
+def test_a_paypal_invoice_states_the_dollars_collected_and_keeps_tax_in_rupees() -> None:
+    from types import SimpleNamespace
+
+    topup = SimpleNamespace(
+        invoice_number="CP/26/000001",
+        paid_at=datetime(2026, 11, 11, tzinfo=UTC),
+        billing_name="Acme",
+        gstin=None,
+        state_code="27",
+        amount_paise=100_000,
+        igst_paise=18_000,
+        cgst_paise=0,
+        sgst_paise=0,
+        total_paise=118_000,
+        provider="paypal",
+        provider_payment_id="CAP1",
+        charged_cents=1_341,
+        fx_inr_per_usd=88,
+    )
+    page = wallet.invoice_html(topup, {"name": "CallPlus", "gstin": "x", "address": "a"})
+    assert "$13.41" in page
+    assert "₹88 = $1" in page
+    assert "₹1,180.00" in page
+
+
 def test_paypal_amounts_reject_anything_that_is_not_rupees_and_paise() -> None:
     assert paypal_client.paise_from_amount({"value": "118.00"}) == 11800
     assert paypal_client.paise_from_amount({"value": "0.5"}) == 50
@@ -272,8 +337,9 @@ async def test_a_paypal_top_up_is_captured_and_a_webhook_cannot_credit_it_twice(
     monkeypatch.setattr(get_settings(), "paypal_client_secret", "paypal-secret")
     asked: dict = {}
 
-    async def create_order(*, amount_paise, receipt, custom_id):
+    async def create_order(*, amount_paise, receipt, custom_id, return_url=None, cancel_url=None):
         asked["paise"] = amount_paise
+        asked["return_url"] = return_url
         return {"id": "PAYORDER1", "approve_url": "https://www.sandbox.paypal.com/checkoutnow?token=PAYORDER1"}
 
     def _order(order_id: str) -> dict:
@@ -284,7 +350,7 @@ async def test_a_paypal_top_up_is_captured_and_a_webhook_cannot_credit_it_twice(
                 "payments": {"captures": [{
                     "id": "CAP1",
                     "status": "COMPLETED",
-                    "amount": {"currency_code": "INR", "value": f"{asked['paise'] / 100:.2f}"},
+                    "amount": {"currency_code": "USD", "value": paypal_client.usd_value(asked["paise"])},
                 }]},
             }],
         }
@@ -315,6 +381,7 @@ async def test_a_paypal_top_up_is_captured_and_a_webhook_cannot_credit_it_twice(
     assert body["client_id"] == "paypal-client"
     assert body["order_id"] == "PAYORDER1"
     assert body["approve_url"].startswith("https://www.sandbox.paypal.com/")
+    assert asked["return_url"] and "paypal=topup" in asked["return_url"]
     assert (await client.get("/api/v1/wallet", headers=auth)).json()["balance_paise"] == 0
     razorpay_confirm = await client.post(
         f"/api/v1/wallet/topups/{body['topup_id']}/verify",
@@ -333,7 +400,7 @@ async def test_a_paypal_top_up_is_captured_and_a_webhook_cannot_credit_it_twice(
         "event_type": "PAYMENT.CAPTURE.COMPLETED",
         "resource": {
             "id": "CAP1",
-            "amount": {"currency_code": "INR", "value": f"{body['amount_paise'] / 100:.2f}"},
+            "amount": {"currency_code": "USD", "value": paypal_client.usd_value(body["amount_paise"])},
             "supplementary_data": {"related_ids": {"order_id": "PAYORDER1"}},
         },
     }
@@ -366,7 +433,7 @@ async def test_an_approved_paypal_order_is_captured_by_the_webhook(
     monkeypatch.setattr(get_settings(), "paypal_client_secret", "paypal-secret")
     asked: dict = {}
 
-    async def create_order(*, amount_paise, receipt, custom_id):
+    async def create_order(*, amount_paise, receipt, custom_id, return_url=None, cancel_url=None):
         asked["paise"] = amount_paise
         return {"id": "PAYORDER2", "approve_url": "https://www.sandbox.paypal.com/checkoutnow?token=PAYORDER2"}
 
@@ -378,7 +445,7 @@ async def test_an_approved_paypal_order_is_captured_by_the_webhook(
                 "payments": {"captures": [{
                     "id": "CAP2",
                     "status": "COMPLETED",
-                    "amount": {"currency_code": "INR", "value": f"{asked['paise'] / 100:.2f}"},
+                    "amount": {"currency_code": "USD", "value": paypal_client.usd_value(asked["paise"])},
                 }]},
             }],
         }
@@ -414,13 +481,14 @@ async def test_paypal_without_credentials_is_refused(client: AsyncClient) -> Non
     assert "PAYPAL_CLIENT_ID" in refused.json()["detail"]
 
 
-async def test_only_free_and_pay_as_you_go_workspaces_can_top_up_and_nobody_else_can_see_a_top_up(client: AsyncClient, razorpay):
+async def test_a_paid_plan_can_buy_credit_and_legacy_cannot_and_nobody_else_can_see_a_top_up(client: AsyncClient, razorpay):
     legacy, _ = await _workspace(client, "w-legacy", tier="legacy")
+    assert (await client.get("/api/v1/wallet", headers=legacy)).json()["can_topup"] is False
+    await _profile(client, legacy)
+    assert (await client.post("/api/v1/wallet/topups", headers=legacy, json={"amount_rupees": 500})).status_code == 409
+
     growth, _ = await _workspace(client, "w-growth", tier="growth")
-    for auth in (legacy, growth):
-        assert (await client.get("/api/v1/wallet", headers=auth)).json()["can_topup"] is False
-        await _profile(client, auth)
-        assert (await client.post("/api/v1/wallet/topups", headers=auth, json={"amount_rupees": 500})).status_code == 409
+    assert (await client.get("/api/v1/wallet", headers=growth)).json()["can_topup"] is True
 
     mine, _ = await _workspace(client, "w-mine")
     other, _ = await _workspace(client, "w-other")
@@ -445,10 +513,11 @@ async def test_the_invoice_escapes_what_the_customer_typed(client: AsyncClient, 
 # ---- charging usage -------------------------------------------------------------------------
 
 
-async def _call(tenant_id, agent_id, *, seconds: int, direction=CALL_OUTBOUND, when=None, with_agent=True, multiplier=1) -> uuid.UUID:
+async def _call(tenant_id, agent_id, *, seconds: int, direction=CALL_OUTBOUND, when=None, with_agent=True, multiplier=1, from_number=None, to_number=None) -> uuid.UUID:
     async with session_scope() as db:
         call = Call(tenant_id=tenant_id, direction=direction, status=CallStatus.COMPLETED,
                     ai_agent_id=uuid.UUID(agent_id) if with_agent else None, duration_seconds=seconds,
+                    from_number=from_number, to_number=to_number,
                     started_at=when or datetime.now(UTC), cost_multiplier=multiplier)
         db.add(call)
         await db.commit()
@@ -482,6 +551,30 @@ async def test_calls_are_charged_by_whole_minutes_at_the_rate_for_their_directio
     assert min(t["balance_after_paise"] for t in txs) == 98_300
 
 
+async def test_a_browser_or_exotel_call_is_charged_the_cheap_rate(client: AsyncClient, razorpay):
+    auth, tenant_id = await _workspace(client, "w-cheap")
+    await _profile(client, auth)
+    await _top_up(client, auth, 1_000, razorpay)  # Twilio rates would be 450 in / 800 out
+    agent = await _agent(client, auth)
+    await _call(tenant_id, agent, seconds=61, direction=CALL_OUTBOUND, from_number="web", to_number="web")
+    async with session_scope() as db:
+        db.add(PhoneNumber(tenant_id=tenant_id, e164_number="+912233445566", provider="exotel"))
+        await db.commit()
+    await _call(tenant_id, agent, seconds=30, direction=CALL_OUTBOUND, from_number="+912233445566", to_number="+919800000000")
+    await _call(tenant_id, agent, seconds=60, direction=CALL_OUTBOUND, from_number="+14155550100", to_number="+919800000000")
+
+    summary = (await client.get("/api/v1/wallet", headers=auth)).json()
+    # 2 browser minutes at 250, 1 Exotel minute at 250, 1 Twilio outbound minute at 800
+    assert summary["own_line_paise"] == 250
+    assert summary["balance_paise"] == 100_000 - 500 - 250 - 800
+    txs = (await client.get("/api/v1/wallet/transactions", headers=auth)).json()
+    assert {t["description"] for t in txs if t["kind"] == "call"} == {
+        "Browser call, 2 min",
+        "Own-line call, 1 min",
+        "Outbound call, 1 min",
+    }
+
+
 async def test_a_call_on_a_premium_provider_of_the_platform_costs_extra_minutes(client: AsyncClient, razorpay):
     auth, tenant_id = await _workspace(client, "w-premium")
     await _profile(client, auth)
@@ -508,15 +601,10 @@ async def test_messages_are_charged_from_message_rows_and_usage_events(client: A
                            text="hi"))
         db.add(UsageEvent(tenant_id=tenant_id, metric="whatsapp_messages", quantity=1, occurred_at=datetime.now(UTC)))
         db.add(UsageEvent(tenant_id=tenant_id, metric="sms", quantity=3, occurred_at=datetime.now(UTC)))
-        db.add(UsageEvent(tenant_id=tenant_id, metric="social", quantity=2, occurred_at=datetime.now(UTC)))
         db.add(UsageEvent(tenant_id=tenant_id, metric="storage_bytes", quantity=999, occurred_at=datetime.now(UTC)))
         await db.commit()
-    # 2 WhatsApp rows + 1 WhatsApp event, 3 SMS, 2 Instagram/Messenger. Storage is not a charge.
-    spent = (
-        3 * wallet.WHATSAPP_MESSAGE_PAISE
-        + 3 * wallet.SMS_PAISE
-        + 2 * wallet.SOCIAL_PAISE
-    )
+    # 2 WhatsApp rows + 1 WhatsApp event, 3 SMS. Storage is not a charge.
+    spent = 3 * wallet.WHATSAPP_MESSAGE_PAISE + 3 * wallet.SMS_PAISE
     assert (await client.get("/api/v1/wallet", headers=auth)).json()["balance_paise"] == 50_000 - spent
     assert (await client.get("/api/v1/wallet", headers=auth)).json()["balance_paise"] == 50_000 - spent
 

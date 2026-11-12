@@ -871,6 +871,11 @@ async def execute_follow_up(db: AsyncSession, follow_up: FollowUp, *, now: datet
     try:
         if customer is None or customer.tenant_id != follow_up.tenant_id:
             raise FollowUpError("customer no longer exists", permanent=True)
+        if follow_up.channel == "auto":
+            from app.services import outreach  # the AI picks the channel, writes the message and falls back
+
+            await outreach.run_step(db, follow_up, customer, now)
+            return
         await _dispatch_follow_up(db, follow_up, customer)
     except FollowUpError as exc:
         follow_up.last_error = str(exc)[:1000]

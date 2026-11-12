@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -10,9 +8,7 @@ from app.integrations.channel_payloads import (
     build_voicemail_twiml,
     chunk_text,
     parse_email_payload,
-    parse_meta_messages,
     strip_quoted_reply,
-    verify_meta_signature,
 )
 from app.main import app
 from app.services.channels import evaluate_form_spam
@@ -127,31 +123,7 @@ def test_parse_email_payload_mailgun_sendgrid_and_automated() -> None:
     assert strip_quoted_reply("hi\n> quoted") == "hi"
 
 
-def test_parse_meta_messages_skips_echoes_and_non_text() -> None:
-    body = {
-        "object": "instagram",
-        "entry": [
-            {
-                "id": "IG1",
-                "messaging": [
-                    {"sender": {"id": "U1"}, "message": {"mid": "m1", "text": "hello"}},
-                    {"sender": {"id": "IG1"}, "message": {"mid": "m2", "text": "echo", "is_echo": True}},
-                    {"sender": {"id": "U2"}, "message": {"mid": "m3", "attachments": []}},
-                ],
-            }
-        ],
-    }
-    msgs = parse_meta_messages(body)
-    assert [(m.channel, m.account_id, m.sender_id, m.text) for m in msgs] == [("instagram", "IG1", "U1", "hello")]
-    assert parse_meta_messages({"object": "whatsapp_business_account", "entry": []}) == []
-
-
-def test_meta_signature_and_chunking() -> None:
-    raw = b'{"a":1}'
-    good = "sha256=" + hmac.new(b"sekret", raw, hashlib.sha256).hexdigest()
-    assert verify_meta_signature(raw, good, "sekret")
-    assert not verify_meta_signature(raw, good, "other")
-    assert not verify_meta_signature(raw, None, "sekret")
+def test_chunk_text_splits_on_words() -> None:
     parts = chunk_text("word " * 100, 120)
     assert all(len(p) <= 120 for p in parts) and " ".join(parts).split() == ("word " * 100).split()
 
@@ -365,40 +337,6 @@ async def test_web_form_creates_customer_and_ticket_and_blocks_spam(
 # ------------------------------------------------------------------ Meta
 
 
-async def test_meta_webhook_handshake_signature_and_reply(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, fake_ai: list[str]
-) -> None:
-    auth = await _signup(client, slug="meta-co")
-    agent_id = await _agent(client, auth)
-
-    no_creds = await client.put("/api/v1/channels/settings/instagram", headers=auth, json={"enabled": True})
-    assert no_creds.status_code == 422 and "page_access_token" in no_creds.json()["detail"]
-
-    await _enable(
-        client, auth, "instagram", ai_agent_id=agent_id, external_id="IG42",
-        credentials={"page_access_token": "tok", "app_secret": "appsec", "verify_token": "vt-1"},
-    )
-    ok = await client.get("/api/v1/channels/meta/webhook", params={"hub.mode": "subscribe", "hub.verify_token": "vt-1", "hub.challenge": "777"})
-    assert ok.status_code == 200 and ok.text == "777"
-    assert (await client.get("/api/v1/channels/meta/webhook", params={"hub.mode": "subscribe", "hub.verify_token": "no", "hub.challenge": "1"})).status_code == 403
-
-    sent = []
-
-    async def fake_meta_send(*, page_access_token, recipient_id, text, channel, **_ignored):
-        sent.append((page_access_token, recipient_id, text, channel))
-        return "mid.out"
-
-    monkeypatch.setattr("app.services.channels.send_meta_message", fake_meta_send)
-    body = json.dumps({"object": "instagram", "entry": [{"id": "IG42", "messaging": [{"sender": {"id": "USER9"}, "message": {"mid": "mid.1", "text": "price?"}}]}]}).encode()
-    sig = "sha256=" + hmac.new(b"appsec", body, hashlib.sha256).hexdigest()
-    assert (await client.post("/api/v1/channels/meta/webhook", content=body, headers={"X-Hub-Signature-256": "sha256=bad"})).status_code == 403
-    resp = await client.post("/api/v1/channels/meta/webhook", content=body, headers={"X-Hub-Signature-256": sig})
-    assert resp.json()["handled"] == 1
-    assert sent == [("tok", "USER9", "AI says hi", "instagram")]
-    again = await client.post("/api/v1/channels/meta/webhook", content=body, headers={"X-Hub-Signature-256": sig})
-    assert again.json()["handled"] == 0
-
-
 # ------------------------------------------------------------------ inbox merge + reply routing
 
 
@@ -576,7 +514,7 @@ async def test_click_to_call_modes(client: AsyncClient, monkeypatch: pytest.Monk
 async def test_settings_list_hides_secrets_and_validates_keys(client: AsyncClient) -> None:
     auth = await _signup(client, slug="set-co")
     listing = (await client.get("/api/v1/channels/settings", headers=auth)).json()
-    assert [c["channel"] for c in listing] == ["sms", "email", "web_chat", "instagram", "messenger", "web_form", "voicemail"]
+    assert [c["channel"] for c in listing] == ["sms", "email", "web_chat", "web_form", "voicemail"]
     assert next(c for c in listing if c["channel"] == "sms")["webhook_url"].endswith("/api/v1/channels/sms/webhook")
     bad = await client.put("/api/v1/channels/settings/sms", headers=auth, json={"config": {"nope": 1}})
     assert bad.status_code == 422

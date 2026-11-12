@@ -6,9 +6,7 @@ when it was not."""
 import math
 import uuid
 
-import httpx
 from app.core.config import get_settings
-from app.integrations.channel_payloads import chunk_text
 from app.integrations.credentials import SharedAccountError, get_twilio_credentials, require_own_twilio
 from app.integrations.email_client import send_email
 from app.integrations.twilio_client import TwilioClientError, send_sms
@@ -60,59 +58,6 @@ async def send_sms_message(
     return sid
 
 
-async def send_meta_message(
-    *,
-    page_access_token: str,
-    recipient_id: str,
-    text: str,
-    channel: str,
-    db: AsyncSession | None = None,
-    tenant_id: uuid.UUID | None = None,
-) -> str | None:
-    """Messenger/Instagram Send API. Returns the id of the last message sent.
-
-    One reply counts once against the plan, even when the text is split into
-    several Send API calls. The reservation is dropped if Meta rejects it.
-    """
-    if not page_access_token:
-        raise ChannelSendError(f"{channel} page access token is not configured")
-    event = None
-    try:
-        if db is not None and tenant_id is not None:
-            event = await plans.reserve_social(db, tenant_id)
-    except plans.PlanLimitError as exc:
-        raise ChannelSendError(exc.message) from exc
-    settings = get_settings()
-    url = f"https://graph.facebook.com/{settings.meta_graph_api_version}/me/messages"
-    limit = 950 if channel == "instagram" else 1900
-    message_id: str | None = None
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            for part in chunk_text(text, limit):
-                response = await client.post(
-                    url,
-                    headers={"Authorization": f"Bearer {page_access_token}"},
-                    json={
-                        "recipient": {"id": recipient_id},
-                        "message": {"text": part},
-                        "messaging_type": "RESPONSE",
-                    },
-                )
-                if response.status_code >= 400:
-                    raise ChannelSendError(
-                        f"{channel} send failed ({response.status_code}): {response.text[:300]}"
-                    )
-                message_id = response.json().get("message_id")
-    except Exception:
-        if event is not None and db is not None and message_id is None:
-            await db.delete(event)
-            await db.flush()
-        raise
-    if event is not None and db is not None and tenant_id is not None:
-        await plans.sync_overage_invoice(db, tenant_id)
-    return message_id
-
-
 def new_message_id() -> str:
     domain = get_settings().smtp_from_email.rpartition("@")[2] or "localhost"
     return f"<{uuid.uuid4().hex}@{domain}>"
@@ -128,6 +73,7 @@ async def send_email_message(
     reply_to: str | None,
     db: AsyncSession | None = None,
     tenant_id: uuid.UUID | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> str:
     """Returns the Message-ID given to the outgoing mail.
 
@@ -135,9 +81,49 @@ async def send_email_message(
     plan. Mail the platform sends on its own (verification, password reset)
     does not come through here.
     """
+    if db is not None and tenant_id is not None:
+        from app.services.mailbox import MailboxError, connected_mailbox, deliver
+
+        box = await connected_mailbox(db, tenant_id)
+        if box is not None:
+            event = None
+            try:
+                event = await plans.reserve_email(db, tenant_id)
+            except plans.PlanLimitError as exc:
+                raise ChannelSendError(exc.message) from exc
+            escaped = (
+                body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+            )
+            try:
+                sent = await deliver(
+                    db,
+                    box,
+                    to_email=to_email,
+                    subject=subject,
+                    text=body,
+                    html=escaped,
+                    reply_to=reply_to,
+                    in_reply_to=in_reply_to,
+                    references=references,
+                    extra_headers=extra_headers,
+                )
+            except (MailboxError, Exception) as exc:
+                if event is not None:
+                    await db.delete(event)
+                    await db.flush()
+                message = str(exc) if isinstance(exc, MailboxError) else f"Email not sent: {exc}"
+                raise ChannelSendError(message) from exc
+            await plans.sync_overage_invoice(db, tenant_id)
+            return sent
+
     settings = get_settings()
-    if not settings.smtp_host:
-        raise ChannelSendError("Email not sent: SMTP is not configured (SMTP_HOST is empty)")
+    own_sender = None
+    if db is not None and tenant_id is not None:
+        from app.integrations.credentials import get_email_sender
+
+        own_sender = await get_email_sender(db, tenant_id)
+    if own_sender is None and not settings.smtp_host and not settings.email_api_key:
+        raise ChannelSendError("Email not sent: connect a mailbox or an email sending key, or set EMAIL_API_KEY / SMTP_HOST")
     event = None
     try:
         if db is not None and tenant_id is not None:
@@ -145,7 +131,7 @@ async def send_email_message(
     except plans.PlanLimitError as exc:
         raise ChannelSendError(exc.message) from exc
     message_id = new_message_id()
-    headers = {"Message-ID": message_id}
+    headers = {"Message-ID": message_id, **(extra_headers or {})}
     if in_reply_to:
         headers["In-Reply-To"] = in_reply_to
         headers["References"] = " ".join([*references, in_reply_to][-10:])
@@ -155,7 +141,10 @@ async def send_email_message(
         body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
     )
     try:
-        await send_email(to_email=to_email, subject=subject, html_body=escaped, headers=headers)
+        await send_email(
+            to_email=to_email, subject=subject, html_body=escaped, headers=headers,
+            tenant_id=str(tenant_id) if (own_sender is not None and tenant_id is not None) else None, credentials=own_sender,
+        )
     except Exception as exc:
         if event is not None and db is not None:
             await db.delete(event)

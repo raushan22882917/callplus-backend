@@ -13,6 +13,8 @@ from packages.database.mixins import TenantScopedMixin, TimestampMixin, UUIDPrim
 class CampaignChannel(str, enum.Enum):
     VOICE = "voice"
     WHATSAPP = "whatsapp"
+    EMAIL = "email"
+    SMS = "sms"
 
 
 class CampaignStatus(str, enum.Enum):
@@ -46,6 +48,13 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # For a WhatsApp campaign, an approved template name (Meta requires a
     # template to message outside the 24h customer-service window).
     whatsapp_template_name: Mapped[str | None] = mapped_column(String(255))
+    # Email campaigns. The body is plain text; {{name}}, {{first_name}},
+    # {{email}} and {{phone}} are filled in per customer at send time.
+    email_subject: Mapped[str | None] = mapped_column(String(200))
+    email_body: Mapped[str | None] = mapped_column(Text)
+    email_reply_to: Mapped[str | None] = mapped_column(String(255))
+    # SMS campaigns: plain text with the same {{name}} / {{first_name}} blanks. "Reply STOP to opt out." is added.
+    sms_body: Mapped[str | None] = mapped_column(Text)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # What the AI is calling about, and what it must find out. Answers are saved per contact.
     goal: Mapped[str | None] = mapped_column(Text)

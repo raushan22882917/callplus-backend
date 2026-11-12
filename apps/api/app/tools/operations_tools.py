@@ -4,7 +4,7 @@ handler) so the registry can do `ToolSpec(**spec)` for each. Handlers only
 flush; the agent engine commits the turn."""
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
@@ -316,6 +316,37 @@ async def schedule_follow_up(
     return {"scheduled": True, "follow_up_id": str(follow_up.id), "due_at": follow_up.due_at.isoformat()}
 
 
+async def reach_out_to_customer(
+    ctx: ToolContext,
+    *,
+    goal: str,
+    customer_id: str | None = None,
+    delay_minutes: int = 5,
+    purpose: str = "marketing",
+) -> dict:
+    """The AI reaches the customer on whichever channel works (WhatsApp, SMS or email), writes the message,
+    and tries the next channel if they do not answer. Opt-outs and quiet hours are enforced when it runs."""
+    if not goal.strip():
+        return {"error": "goal is required"}
+    target = _customer_id(ctx, customer_id)
+    if target is None:
+        return {"error": "no customer on this conversation"}
+    customer = await ctx.db.get(Customer, target)
+    if customer is None or customer.tenant_id != ctx.tenant_id:
+        return {"error": "customer not found"}
+    follow_up = FollowUp(
+        tenant_id=ctx.tenant_id,
+        customer_id=target,
+        channel="auto",
+        due_at=datetime.now(UTC) + timedelta(minutes=max(0, min(int(delay_minutes), 10080))),
+        payload={"goal": goal.strip()[:1000], "purpose": "service" if purpose == "service" else "marketing"},
+        created_by="ai",
+    )
+    ctx.db.add(follow_up)
+    await ctx.db.flush()
+    return {"scheduled": True, "follow_up_id": str(follow_up.id), "due_at": follow_up.due_at.isoformat()}
+
+
 async def record_promise_to_pay(
     ctx: ToolContext,
     *,
@@ -436,6 +467,24 @@ TOOL_SPECS: dict[str, dict] = {
             "required": ["appointment_id"],
         },
         "handler": cancel_appointment,
+    },
+    "reach_out_to_customer": {
+        "name": "reach_out_to_customer",
+        "description": "Reach the customer later on whichever channel works best (WhatsApp, SMS or "
+        "email). Say what you want to achieve; the message is written and the channel chosen "
+        "automatically, and the next channel is tried if they do not answer. Never use it for "
+        "someone who asked not to be contacted.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "description": "What the message should achieve, in plain words"},
+                "customer_id": {"type": "string"},
+                "delay_minutes": {"type": "integer", "description": "Wait this long first (default 5)"},
+                "purpose": {"type": "string", "enum": ["marketing", "service"]},
+            },
+            "required": ["goal"],
+        },
+        "handler": reach_out_to_customer,
     },
     "schedule_follow_up": {
         "name": "schedule_follow_up",

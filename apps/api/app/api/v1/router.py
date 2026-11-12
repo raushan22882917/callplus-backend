@@ -11,6 +11,9 @@ from app.api.v1 import (
     blocklist,
     calls,
     campaigns,
+    email_compliance,
+    email_mailbox,
+    email_studio,
     channels,
     cost_controls,
     crm,
@@ -28,6 +31,7 @@ from app.api.v1 import (
     knowledge,
     mcp,
     oauth,
+    packs,
     operations,
     payments,
     platform,
@@ -42,6 +46,7 @@ from app.api.v1 import (
     users,
     wallet,
     whatsapp,
+    whatsapp_studio,
     whatsapp_templates,
     widget_leads,
     workflows,
@@ -64,10 +69,15 @@ api_router.include_router(blocklist.router)
 api_router.include_router(telephony.router)
 api_router.include_router(exotel_webhooks.router)
 api_router.include_router(whatsapp.router)
+api_router.include_router(whatsapp_studio.router)
 api_router.include_router(whatsapp_templates.router)
 api_router.include_router(payments.router)
+api_router.include_router(packs.router)
 api_router.include_router(workflows.router)
 api_router.include_router(campaigns.router)
+api_router.include_router(email_compliance.router)
+api_router.include_router(email_mailbox.router)
+api_router.include_router(email_studio.router)
 api_router.include_router(integrations.router)
 api_router.include_router(voice_clones.router)
 api_router.include_router(internal.router)

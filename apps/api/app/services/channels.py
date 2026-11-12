@@ -21,11 +21,10 @@ from app.core.rate_limit import _redis
 from app.integrations.channel_senders import (
     ChannelSendError,
     send_email_message,
-    send_meta_message,
     send_sms_message,
 )
 from app.integrations.whatsapp import WhatsAppAPIError, send_text_message
-from app.services import csat, plans
+from app.services import csat, opt_out, plans, privacy
 from app.services.agent_engine import run_turn
 from app.services.knowledge import citations as knowledge_citations
 from app.services.knowledge import search as knowledge_search
@@ -395,6 +394,33 @@ async def process_inbound_text(
     reply_text: str | None = None
     reply_message_id: uuid.UUID | None = None
 
+    # STOP is an opt-out from every channel, not a question for the AI.
+    if channel in (ConversationChannel.WHATSAPP, ConversationChannel.SMS, ConversationChannel.EMAIL) and (
+        opt_out.is_stop_message(text)
+    ):
+        customer = await db.get(Customer, conversation.customer_id) if conversation.customer_id else None
+        address = (customer.email if channel == ConversationChannel.EMAIL else customer.phone) if customer else None
+        if address:
+            await privacy.withdraw_consent(
+                db,
+                tenant_id,
+                phone=None if channel == ConversationChannel.EMAIL else address,
+                email=address if channel == ConversationChannel.EMAIL else None,
+                purposes=["marketing", "call_back"],
+                via=channel.value,
+            )
+            await record_message(
+                db, tenant_id, conversation.id, direction=MessageDirection.INBOUND,
+                sender=MessageSender.CUSTOMER, text=text, provider_message_id=provider_message_id,
+                media_url=media_url,
+            )
+            reply = await record_message(
+                db, tenant_id, conversation.id, direction=MessageDirection.OUTBOUND,
+                sender=MessageSender.AI_AGENT, text=opt_out.OPT_OUT_REPLY,
+            )
+            await db.commit()
+            return InboundOutcome(conversation, opt_out.OPT_OUT_REPLY, reply.id)
+
     # A "4" in answer to our CSAT survey is feedback, not a question for the AI.
     thanks = await csat.capture_reply(
         db,
@@ -430,7 +456,13 @@ async def process_inbound_text(
 
     extra_system = ""
     cited: list[dict] = []
-    if agent is not None and source == "web_chat" and (chat_options or {}).get("use_knowledge") is not False:
+    # Website chat and email replies both answer from the knowledge base. A phone
+    # agent still searches it with its own tool. Email has no "answer only from
+    # documents" switch, so a miss just leaves the agent to reply as usual.
+    use_knowledge = source == "email" or (
+        source == "web_chat" and (chat_options or {}).get("use_knowledge") is not False
+    )
+    if agent is not None and use_knowledge:
         extra_system, canned_reply, cited = await _knowledge_for_chat(db, tenant_id, text, chat_options or {})
         if canned_reply is not None:
             await record_message(
@@ -605,18 +637,7 @@ async def deliver_reply(
         )
 
     if channel in (ConversationChannel.INSTAGRAM, ConversationChannel.MESSENGER):
-        meta = await get_channel_settings(db, tenant_id, channel.value)
-        if meta is None or thread is None or not thread.contact_address:
-            raise ChannelSendError(f"{channel.value} is not configured for this conversation")
-        token = load_credentials(meta).get("page_access_token", "")
-        return await send_meta_message(
-            page_access_token=token,
-            recipient_id=thread.contact_address,
-            text=text,
-            channel=channel.value,
-            db=db,
-            tenant_id=tenant_id,
-        )
+        raise ChannelSendError("Instagram and Messenger are no longer available")
 
     raise ChannelSendError(f"Replies are not supported on the {channel.value} channel")
 
@@ -858,7 +879,6 @@ def webhook_urls(public_key_by_channel: dict[str, str | None]) -> dict[str, str]
     base = f"{get_settings().public_base_url}/api/v1/channels"
     urls = {
         "sms": f"{base}/sms/webhook",
-        "meta": f"{base}/meta/webhook",
         "voicemail": f"{base}/voicemail/recording",
     }
     if public_key_by_channel.get("email"):

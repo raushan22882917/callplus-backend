@@ -24,7 +24,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.database.models import Tenant
-from packages.database.models.channels import ChannelSettings
 from packages.database.models.oauth import OAuthConnection, OAuthState
 from packages.database.models.platform import IntegrationConnector
 from tests.test_call_control import _auth, _signup
@@ -260,7 +259,7 @@ async def test_provider_not_configured(client: AsyncClient, monkeypatch) -> None
     listing = await client.get("/api/v1/oauth/providers", headers=_auth(tokens))
     assert listing.status_code == 200
     by_key = {p["provider"]: p for p in listing.json()}
-    assert set(by_key) == {"google", "microsoft", "salesforce", "hubspot", "zoho", "slack", "meta", "shopify"}
+    assert set(by_key) == {"google", "gmail", "microsoft", "salesforce", "hubspot", "zoho", "slack", "shopify"}
     assert by_key["google"]["configured"] is False and by_key["google"]["connected"] is False
     resp = await client.post("/api/v1/oauth/google/authorize", headers=_auth(tokens), json={})
     assert resp.status_code == 400
@@ -286,16 +285,6 @@ async def test_authorize_requires_auth_and_builds_google_url(client: AsyncClient
         "/api/v1/oauth/google/authorize", headers=_auth(tokens), json={"options": ["nope"]}
     )
     assert bad.status_code == 400 and bad.json()["detail"]["code"] == "invalid_option"
-
-
-async def test_meta_url_uses_scopes_or_config_id(client: AsyncClient, creds, monkeypatch) -> None:
-    tokens = await _signup(client, slug="meta-url", email="o@metaurl.com")
-    q = parse_qs(urlparse(await authorize(client, tokens, "meta")).query)
-    for scope in ("pages_messaging", "pages_show_list", "instagram_basic", "instagram_manage_messages"):
-        assert scope in q["scope"][0]
-    monkeypatch.setattr(creds, "meta_login_config_id", "cfg-1")
-    q = parse_qs(urlparse(await authorize(client, tokens, "meta")).query)
-    assert q["config_id"] == ["cfg-1"] and "scope" not in q
 
 
 async def test_meta_secret_falls_back_to_whatsapp_secret(monkeypatch) -> None:
@@ -801,132 +790,6 @@ async def test_slack_connect_pick_channel_and_events(
     assert sel.json()["selected"] == {"channel_id": "C1", "channel_name": "#support", "events": ["ticket.created"]}
     nope = await client.post("/api/v1/oauth/slack/select", headers=_auth(tokens), json={"resource_id": "C9"})
     assert nope.status_code == 400 and nope.json()["detail"]["code"] == "resource_not_found"
-
-
-# ---------------------------------------------------------------- Meta: pages + instagram
-
-
-def _meta_mocks(mock: MockProviders) -> None:
-    mock.add(
-        "GET", "https://graph.facebook.com/v21.0/oauth/access_token",
-        handler=lambda req: httpx.Response(
-            200,
-            json={"access_token": "short-1", "expires_in": 3600}
-            if "code" in parse_qs(req.url.query.decode())
-            else {"access_token": "long-1", "expires_in": 5184000},
-        ),
-    )
-    mock.add("GET", "https://graph.facebook.com/v21.0/me?", {"id": "fb-1", "name": "Pat Owner", "email": "pat@acme.test"})
-    mock.add(
-        "GET", "https://graph.facebook.com/v21.0/me/accounts",
-        {"data": [
-            {"id": "P1", "name": "Acme Shop", "category": "Retail", "access_token": "page-tok-1",
-             "instagram_business_account": {"id": "IG1", "username": "acme_shop"}},
-            {"id": "P2", "name": "Acme Blog", "access_token": "page-tok-2"},
-        ]},
-    )
-    mock.add("POST", "https://graph.facebook.com/v21.0/P1/subscribed_apps", {"success": True})
-    mock.add("POST", "https://graph.facebook.com/v21.0/P2/subscribed_apps", {"success": True})
-
-
-async def test_meta_exchanges_long_lived_token_lists_pages_and_connects_channels(
-    client: AsyncClient, creds, providers: MockProviders, db_session: AsyncSession
-) -> None:
-    from app.services.channels import load_credentials
-
-    tokens = await _signup(client, slug="mt-co", email="o@mtco.com")
-    other = await _signup(client, slug="mt-other", email="o@mtother.com")
-    _meta_mocks(providers)
-    url = await authorize(client, tokens, "meta")
-    assert redirect_query(await callback(client, "meta", code="c", state=state_of(url)))["connected"] == "meta"
-
-    token_calls = providers.calls_to("GET", "https://graph.facebook.com/v21.0/oauth/access_token")
-    assert [parse_qs(c.url.query.decode()).get("grant_type") for c in token_calls] == [None, ["fb_exchange_token"]]
-    tid = await tenant_id_of(db_session, "mt-co")
-    conn = await get_connection(db_session, tid, "meta")
-    assert decrypt_secret(conn.encrypted_access_token) == "long-1" and conn.account_label == "Pat Owner"
-
-    res = await client.get("/api/v1/oauth/meta/resources", headers=_auth(tokens))
-    body = res.json()
-    assert body["kind"] == "pages" and [p["id"] for p in body["items"]] == ["P1", "P2"]
-    assert body["items"][0]["instagram"] == {"id": "IG1", "username": "acme_shop"}
-    assert body["items"][1]["instagram"] is None
-    assert "page-tok" not in res.text  # page tokens never reach the browser
-
-    # no linked IG on P2: asking for instagram is a clear 400
-    bad = await client.post(
-        "/api/v1/oauth/meta/select", headers=_auth(tokens),
-        json={"resource_id": "P2", "messenger": True, "instagram": True},
-    )
-    assert bad.status_code == 400 and bad.json()["detail"]["code"] == "no_instagram_account"
-
-    sel = await client.post(
-        "/api/v1/oauth/meta/select", headers=_auth(tokens),
-        json={"resource_id": "P1", "messenger": True, "instagram": True},
-    )
-    assert sel.status_code == 200, sel.text
-    sub = providers.calls_to("POST", "https://graph.facebook.com/v21.0/P1/subscribed_apps")[0]
-    assert "messages" in sub.content.decode() and "page-tok-1" in sub.content.decode()
-
-    rows = {
-        r.channel: r
-        for r in (
-            await db_session.execute(select(ChannelSettings).where(ChannelSettings.tenant_id == tid))
-        ).scalars()
-    }
-    assert rows["messenger"].external_id == "P1" and rows["messenger"].enabled
-    assert rows["instagram"].external_id == "IG1" and rows["instagram"].enabled
-    assert load_credentials(rows["messenger"])["page_access_token"] == "page-tok-1"
-    assert "page-tok-1" not in rows["messenger"].encrypted_credentials
-
-    # the existing channel settings API now reports them as ready, with no pasted token
-    chans = {c["channel"]: c for c in (await client.get("/api/v1/channels/settings", headers=_auth(tokens))).json()}
-    assert chans["messenger"]["enabled"] and "page_access_token" in chans["messenger"]["credentials_set"]
-
-    # another workspace cannot claim the same Page
-    google_other = await client.post(
-        "/api/v1/oauth/meta/authorize", headers=_auth(other), json={}
-    )
-    url2 = google_other.json()["authorization_url"]
-    assert redirect_query(await callback(client, "meta", code="c", state=state_of(url2)))["connected"] == "meta"
-    clash = await client.post(
-        "/api/v1/oauth/meta/select", headers=_auth(other), json={"resource_id": "P1", "messenger": True}
-    )
-    assert clash.status_code == 409 and clash.json()["detail"]["code"] == "account_in_use"
-
-    # disconnect switches the channels off and unsubscribes the page
-    providers.add("DELETE", "https://graph.facebook.com/v21.0/P1/subscribed_apps", {"success": True})
-    providers.add("DELETE", "https://graph.facebook.com/v21.0/me/permissions", {"success": True})
-    assert (await client.delete("/api/v1/oauth/meta", headers=_auth(tokens))).status_code == 204
-    db_session.expire_all()
-    rows = {
-        r.channel: r
-        for r in (
-            await db_session.execute(select(ChannelSettings).where(ChannelSettings.tenant_id == tid))
-        ).scalars()
-    }
-    assert not rows["messenger"].enabled and rows["messenger"].encrypted_credentials is None
-    assert providers.calls_to("DELETE", "https://graph.facebook.com/v21.0/P1/subscribed_apps")
-
-
-async def test_meta_subscribe_failure_does_not_write_channels(
-    client: AsyncClient, creds, providers: MockProviders, db_session: AsyncSession
-) -> None:
-    tokens = await _signup(client, slug="mf-co", email="o@mfco.com")
-    _meta_mocks(providers)
-    providers.routes = [r for r in providers.routes if "P1/subscribed_apps" not in r[1]]
-    providers.add(
-        "POST", "https://graph.facebook.com/v21.0/P1/subscribed_apps",
-        {"error": {"message": "(#200) Requires pages_manage_metadata"}}, status=400,
-    )
-    url = await authorize(client, tokens, "meta")
-    await callback(client, "meta", code="c", state=state_of(url))
-    resp = await client.post(
-        "/api/v1/oauth/meta/select", headers=_auth(tokens), json={"resource_id": "P1", "messenger": True}
-    )
-    assert resp.status_code == 400 and resp.json()["detail"]["code"] == "subscribe_failed"
-    rows = (await db_session.execute(select(ChannelSettings))).scalars().all()
-    assert rows == []
 
 
 # ---------------------------------------------------------------- Sign in with Google / Microsoft

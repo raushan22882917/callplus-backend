@@ -38,7 +38,7 @@ from app.schemas.agent import (
 from app.services import exotel as exotel_service
 from app.services import number_lifecycle, plans
 from app.services.flow_compiler import compile_flow_to_system_prompt
-from app.tools.registry import TOOL_REGISTRY
+from app.tools.registry import STAFF_ONLY_TOOLS, TOOL_REGISTRY
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -192,7 +192,7 @@ async def enable_agent_tool(
     ctx: RequestContext = Depends(require_permission(Permissions.AGENTS_MANAGE)),
     db: AsyncSession = Depends(get_db),
 ) -> AIAgentTool:
-    if payload.tool_name not in TOOL_REGISTRY:
+    if payload.tool_name not in TOOL_REGISTRY or payload.tool_name in STAFF_ONLY_TOOLS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown tool: {payload.tool_name}")
     await AIAgentRepository(db, ctx.tenant_id).get(agent_id)  # 404s if not in this tenant
 

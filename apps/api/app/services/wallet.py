@@ -7,9 +7,11 @@ usage events), each charged once through the ledger's unique reference, so a ret
 second worker can never charge twice. The balance may dip below zero by the cost of the
 call that was in progress; the next call is refused until the wallet is topped up.
 
-The rate table is the one place to change prices. The defaults leave a margin over today's
-cost (about INR 2.9 inbound and 6.6 outbound per minute, docs/BILLING.md); lower them as
-the cost per minute comes down."""
+The rate table is the one place to change prices. Twilio calls keep a margin over today's
+cost (about INR 2.9 inbound and 6.6 outbound per minute, docs/BILLING.md). A browser call
+or a call on the workspace's own Exotel number skips that carrier bill, so it uses
+OWN_LINE_PAISE, which covers Sarvam speech and the language model (about INR 1.93) and
+nothing else."""
 
 import html
 import logging
@@ -24,17 +26,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.database.models import (
     Call,
-    CallDirection,
     Conversation,
     ConversationChannel,
     Message,
     MessageDirection,
+    PhoneNumber,
     Tenant,
     UsageEvent,
     Wallet,
     WalletTopup,
     WalletTransaction,
 )
+from app.services.credits import price_card, quote_call, service_key, usage_units
 
 logger = logging.getLogger(__name__)
 
@@ -45,26 +48,72 @@ LOW_BALANCE_PAISE = 20_000
 WHATSAPP_MESSAGE_PAISE = 150
 SMS_PAISE = 75
 EMAIL_PAISE = 20
-# The workspace's own Meta token carries the message. This covers the platform, not Meta's fee.
-SOCIAL_PAISE = 20
+
+# Browser calls and calls on a number the workspace connected through Exotel. We do not pay
+# Twilio for these. Sarvam pay-as-you-go is about INR 1.93 a minute (speech-to-text 0.49,
+# Bulbul v3 at 400 characters, language model 0.24). INR 2.50 leaves the payment fee and a
+# thin margin. Do not use this for a Twilio call: outbound to an Indian mobile still costs
+# about INR 6.64 to serve.
+OWN_LINE_PAISE = 250
+
+# What one unit costs us, in paise, before the payment fee. An India inbound minute is about
+# 294 and an outbound minute about 664 (docs/BILLING.md). The fee is 4% of the price we
+# charge, which covers Razorpay and leaves room for PayPal. After cost and that fee, at
+# least 12% of the price has to remain, or the rate is too low to sell.
+CALL_COST_INBOUND_PAISE = 294
+CALL_COST_OUTBOUND_PAISE = 664
+PAYMENT_FEE_BPS = 400
+MIN_MARGIN_BPS = 1_200
+MIN_INBOUND_PAISE = 400
+MIN_OUTBOUND_PAISE = 800
+
+# Services a workspace can turn on. A missing key means on, so a wallet created before
+# this choice existed keeps every service.
+SERVICE_KEYS = ("calls", "whatsapp", "sms", "email")
 
 # (smallest top-up in paise, inbound paise per minute, outbound paise per minute)
+# Nothing here goes under the floors above. A bigger top-up can be cheaper, not cheaper
+# than the cost of an outbound Indian minute.
 RATE_TIERS: tuple[tuple[int, int, int], ...] = (
     (10_000, 500, 900),
-    (100_000, 450, 800),
-    (500_000, 400, 750),
-    (2_000_000, 350, 700),
+    (100_000, 450, 850),
+    (500_000, 400, 800),
+    (2_000_000, 400, 800),
 )
 _BATCH = 500
 
 
+def credit_prices(inbound_paise: int, outbound_paise: int) -> dict:
+    """India, international and message prices, in paise, for the billing page."""
+    return price_card(
+        inbound_paise=inbound_paise,
+        outbound_paise=outbound_paise,
+        own_line_paise=OWN_LINE_PAISE,
+        whatsapp_paise=WHATSAPP_MESSAGE_PAISE,
+        sms_paise=SMS_PAISE,
+        email_paise=EMAIL_PAISE,
+    )
+
+
+def price_clears_cost(price_paise: int, cost_paise: int) -> bool:
+    """True when this price still leaves MIN_MARGIN_BPS after our cost and the payment fee."""
+    if price_paise <= 0:
+        return False
+    fee = (price_paise * PAYMENT_FEE_BPS + 9_999) // 10_000
+    profit = price_paise - cost_paise - fee
+    return profit * 10_000 >= price_paise * MIN_MARGIN_BPS
+
+
 def rates_for_topup(amount_paise: int) -> tuple[int, int]:
-    """(inbound, outbound) paise per minute earned by a top-up of this size."""
+    """(inbound, outbound) paise per minute earned by a top-up of this size.
+
+    The table can only go down to the floors. A rate under the cost of the minute is not sold.
+    """
     chosen = RATE_TIERS[0]
     for tier in RATE_TIERS:
         if amount_paise >= tier[0]:
             chosen = tier
-    return chosen[1], chosen[2]
+    return max(chosen[1], MIN_INBOUND_PAISE), max(chosen[2], MIN_OUTBOUND_PAISE)
 
 
 def rate_table() -> list[dict]:
@@ -72,6 +121,9 @@ def rate_table() -> list[dict]:
     out = []
     for i, (low, inbound, outbound) in enumerate(RATE_TIERS):
         high = RATE_TIERS[i + 1][0] - 100 if i + 1 < len(RATE_TIERS) else top
+        if out and out[-1]["inbound_paise"] == inbound and out[-1]["outbound_paise"] == outbound:
+            out[-1]["to_paise"] = high
+            continue
         out.append(
             {"from_paise": low, "to_paise": high, "inbound_paise": inbound, "outbound_paise": outbound}
         )
@@ -116,6 +168,17 @@ def financial_year(when: datetime) -> str:
 
 
 # ---- the wallet and its ledger --------------------------------------------------------------
+
+
+def services_from(raw: dict | None) -> dict[str, bool]:
+    """Which services this workspace wants. Anything not stored is on."""
+    chosen = raw or {}
+    return {key: chosen.get(key) is not False for key in SERVICE_KEYS}
+
+
+async def services_for(db: AsyncSession, tenant_id: uuid.UUID) -> dict[str, bool]:
+    wallet = await get_wallet(db, tenant_id)
+    return services_from(wallet.services if wallet else None)
 
 
 async def get_wallet(db: AsyncSession, tenant_id: uuid.UUID, *, lock: bool = False) -> Wallet | None:
@@ -170,6 +233,66 @@ def _post(
     )
 
 
+_USAGE_LINES = (
+    ("browser", "Browser, or your own Exotel number", "minute"),
+    ("inbound", "Someone calls your number", "minute"),
+    ("outbound", "You call an Indian mobile", "minute"),
+    ("international", "Calls outside India", "minute"),
+    ("whatsapp", "WhatsApp", "message"),
+    ("sms", "SMS", "message"),
+    ("email", "Email", "message"),
+)
+
+
+def _month_start() -> datetime:
+    """First moment of this month in India. The bill the customer sees follows that month."""
+    from zoneinfo import ZoneInfo
+
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+async def usage_by_service(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
+    """What this workspace was charged this month, one line per service.
+
+    A service that was not used is still listed, at zero. That is the bill:
+    payment follows use, and an unused service adds nothing.
+    """
+    start = _month_start()
+    rows = (
+        await db.execute(
+            select(WalletTransaction).where(
+                WalletTransaction.tenant_id == tenant_id,
+                WalletTransaction.created_at >= start,
+                WalletTransaction.kind.in_(("call", "message")),
+                WalletTransaction.amount_paise < 0,
+            )
+        )
+    ).scalars().all()
+    totals = {key: {"paise": 0, "units": 0} for key, _, _ in _USAGE_LINES}
+    for row in rows:
+        key = service_key(row.kind, row.description, row.detail)
+        if key not in totals:
+            continue
+        totals[key]["paise"] += -row.amount_paise
+        totals[key]["units"] += usage_units(row.kind, row.detail)
+    services = [
+        {
+            "id": key,
+            "label": label,
+            "unit": unit,
+            "paise": totals[key]["paise"],
+            "units": totals[key]["units"],
+        }
+        for key, label, unit in _USAGE_LINES
+    ]
+    return {
+        "period_start": start.isoformat(),
+        "total_paise": sum(item["paise"] for item in services),
+        "services": services,
+    }
+
+
 async def settle(db: AsyncSession, tenant_id: uuid.UUID) -> int:
     """Charges the wallet for usage not yet charged. Returns the paise charged.
     Safe to call as often as you like, from any process."""
@@ -200,22 +323,25 @@ async def settle(db: AsyncSession, tenant_id: uuid.UUID) -> int:
             .limit(_BATCH)
         )
     ).scalars().all()
+    exotel_numbers = await _exotel_numbers(db, tenant_id) if calls else set()
     for call in calls:
         minutes = math.ceil(call.duration_seconds / 60)
         # 0 is a real price (the workspace's own AI key). Missing means one plan minute.
         raw = call.cost_multiplier
         multiplier = float(raw) if raw is not None else 1.0
-        inbound = call.direction == CallDirection.INBOUND
-        rate = wallet.inbound_rate_paise if inbound else wallet.outbound_rate_paise
-        if multiplier == 0:
-            amount = 0
-            who = "Inbound" if inbound else "Outbound"
-            description = f"{who} call, {minutes} min, own AI key, not charged"
-        else:
-            amount = -round(minutes * rate * multiplier)
-            description = f"{'Inbound' if inbound else 'Outbound'} call, {minutes} min" + (
-                f" x {multiplier:g} (premium voice)" if multiplier != 1 else ""
-            )
+        cost, description = quote_call(
+            direction=call.direction.value,
+            duration_seconds=call.duration_seconds,
+            cost_multiplier=multiplier,
+            from_number=call.from_number,
+            to_number=call.to_number,
+            exotel_numbers=exotel_numbers,
+            inbound_rate=wallet.inbound_rate_paise,
+            outbound_rate=wallet.outbound_rate_paise,
+            own_line_paise=OWN_LINE_PAISE,
+        )
+        rate = cost // minutes if minutes else 0
+        amount = -cost
         _post(
             db,
             wallet,
@@ -260,7 +386,7 @@ async def settle(db: AsyncSession, tenant_id: uuid.UUID) -> int:
             select(UsageEvent)
             .where(
                 UsageEvent.tenant_id == tenant_id,
-                UsageEvent.metric.in_(("whatsapp_messages", "sms", "email", "social")),
+                UsageEvent.metric.in_(("whatsapp_messages", "sms", "email")),
                 UsageEvent.occurred_at >= since,
                 UsageEvent.id.not_in(
                     select(WalletTransaction.reference_id).where(
@@ -278,20 +404,30 @@ async def settle(db: AsyncSession, tenant_id: uuid.UUID) -> int:
             "whatsapp_messages": WHATSAPP_MESSAGE_PAISE,
             "sms": SMS_PAISE,
             "email": EMAIL_PAISE,
-            "social": SOCIAL_PAISE,
         }[event.metric]
         count = max(1, math.ceil(float(event.quantity)))
         label = {
             "whatsapp_messages": "WhatsApp message",
             "sms": "SMS",
             "email": "Email",
-            "social": "Instagram or Messenger message",
         }[event.metric]
         _post(db, wallet, kind="message", amount_paise=-count * unit, reference_id=event.id,
               description=f"{label}{'s' if count > 1 else ''}" + (f" x{count}" if count > 1 else ""),
               detail={"channel": event.metric, "count": count})
     await db.flush()
     return before - wallet.balance_paise
+
+
+async def _exotel_numbers(db: AsyncSession, tenant_id: uuid.UUID) -> set[str]:
+    rows = (
+        await db.execute(
+            select(PhoneNumber.e164_number).where(
+                PhoneNumber.tenant_id == tenant_id,
+                PhoneNumber.provider == "exotel",
+            )
+        )
+    ).scalars().all()
+    return set(rows)
 
 
 async def credit_paid_order(
@@ -391,6 +527,20 @@ async def ensure_call_balance(db: AsyncSession, tenant_id: uuid.UUID) -> None:
 # ---- invoice --------------------------------------------------------------------------------
 
 
+def _paypal_collected(topup: WalletTopup) -> str:
+    """The dollars PayPal collected, beside an invoice whose tax lines stay in rupees."""
+    cents = getattr(topup, "charged_cents", None)
+    if topup.provider != "paypal" or not cents:
+        return ""
+    dollars = f"${cents // 100}.{cents % 100:02d}"
+    rate = getattr(topup, "fx_inr_per_usd", None)
+    rate_note = f" at ₹{rate} = $1" if rate else ""
+    return (
+        f"<p class=muted>PayPal collected {dollars}{rate_note}. "
+        "The amounts in this invoice are Indian rupees.</p>"
+    )
+
+
 def invoice_html(topup: WalletTopup, seller: dict) -> str:
     e = html.escape
 
@@ -414,5 +564,6 @@ h1{{font-size:20px;margin:0 0 4px}}table{{width:100%;border-collapse:collapse;ma
 <table><tr><th>Description</th><th class=r>Amount</th></tr>
 <tr><td>Prepaid wallet credit (AI calling and messaging)</td><td class=r>{money(topup.amount_paise)}</td></tr>{rows}
 <tr class=tot><td>Total paid</td><td class=r>{money(topup.total_paise)}</td></tr></table>
+{_paypal_collected(topup)}
 <p class=muted>Payment {e(topup.provider_payment_id or '')}. Wallet credit is used for answered call minutes and messages and does not expire.</p>
 </body></html>"""

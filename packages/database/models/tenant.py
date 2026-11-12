@@ -64,6 +64,11 @@ class Tenant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     plan_overrides: Mapped[dict] = mapped_column(
         JSONB, default=dict, server_default="{}", nullable=False
     )
+    # Live channel packs (plan_tier "packs"): {"call": {"start": iso, "end": iso, "ai_minutes": 250}, ...}.
+    # Written only by app/services/packs.py when a paid purchase is credited; never by a request body.
+    pack_state: Mapped[dict] = mapped_column(
+        JSONB, default=dict, server_default="{}", nullable=False
+    )
     # Where each provider's account comes from: {"deepgram": "managed" | "own", ...}. "managed" is the platform's
     # own account (CallPlus), "own" is one the workspace connected. Unset = the workspace's own if it has one,
     # otherwise CallPlus's when that is offered. See app/integrations/managed.py.

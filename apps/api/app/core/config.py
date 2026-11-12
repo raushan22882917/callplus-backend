@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     # messaging throughput limits. Set to 0 to disable (tests do).
     campaign_voice_interval_seconds: float = 1.0
     campaign_whatsapp_interval_seconds: float = 0.2
+    campaign_email_interval_seconds: float = 0.3
+    campaign_sms_interval_seconds: float = 0.2
     # Transient provider failures (Twilio/Meta errors) are retried this many
     # times in total per contact, waiting backoff * attempt seconds between
     # tries. Config errors (no phone number, no template) are never retried.
@@ -97,7 +99,7 @@ class Settings(BaseSettings):
     # slots are limited by that account's plan, so CallPlus's own account is rationed more tightly.
     voice_clones_managed_cap: int = 2
     voice_clones_own_cap: int = 25
-    # Text channels (web chat, WhatsApp, SMS, email, Instagram, Messenger) answer with Sarvam's fast
+    # Text channels (web chat, WhatsApp, SMS, email) answer with Sarvam's fast
     # conversational model, ~0.4s per reply instead of 8-10s on the reasoning model. Set to false to
     # roll back to the reasoning model for text.
     fast_model_for_text: bool = True
@@ -179,13 +181,9 @@ class Settings(BaseSettings):
     slack_client_id: str = ""
     slack_client_secret: str = ""
 
-    # Meta / Facebook Login for Business (developers.facebook.com > your app).
-    # Valid OAuth Redirect URI: {PUBLIC_BASE_URL}/api/v1/oauth/meta/callback
-    # Scopes: pages_show_list, pages_messaging, pages_manage_metadata,
-    #   instagram_basic, instagram_manage_messages. (Advanced access needs Meta App Review.)
+    # Meta app used by WhatsApp Cloud API and Embedded Signup.
     # META_APP_SECRET falls back to META_WHATSAPP_APP_SECRET (same Meta app).
-    # META_LOGIN_CONFIG_ID: optional Facebook Login for Business configuration id; when
-    #   set it is sent instead of `scope`. META_WHATSAPP_CONFIG_ID: Embedded Signup config id.
+    # META_WHATSAPP_CONFIG_ID: Embedded Signup configuration id.
     meta_app_id: str = ""
     meta_app_secret: str = ""
     meta_login_config_id: str = ""
@@ -209,10 +207,15 @@ class Settings(BaseSettings):
     paypal_client_secret: str = ""
     paypal_webhook_id: str = ""
     paypal_mode: str = "sandbox"
+    # Fallback when the live USD to INR rate cannot be read. PayPal collects dollars.
+    # The wallet still credits rupees. The charged order stores the rate it actually used.
+    paypal_inr_per_usd: int = 88
     # Who the GST invoice for a wallet top-up is issued by. The state code (GST numeric,
     # e.g. "08" Rajasthan) decides CGST+SGST (same state) versus IGST (another state).
     seller_legal_name: str = "CallPlus"
     seller_gstin: str = ""
+    # Taken off the price when all three channel packs are bought in one payment (0 to 50).
+    pack_bundle_discount_percent: int = 10
     seller_state_code: str = ""
     seller_address: str = ""
 
@@ -229,6 +232,11 @@ class Settings(BaseSettings):
     # When email_api_key is set it is used instead of SMTP.
     email_api_provider: str = "resend"
     email_api_key: str = ""
+    # Delivery events (bounce, spam complaint) from the email provider. Both fail closed when unset.
+    # Resend signs with Svix: paste the "whsec_..." signing secret. Brevo cannot sign, so it sends
+    # this token in an "Authorization: Bearer <token>" header you add to the webhook.
+    email_resend_webhook_secret: str = ""
+    email_brevo_webhook_token: str = ""
 
     # Base URL of the tenant-facing frontend, used to build links embedded
     # in transactional emails (password reset, email verification).

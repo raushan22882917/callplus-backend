@@ -149,6 +149,15 @@ async def _after_connect(db: AsyncSession, provider_key: str, conn: OAuthConnect
         except Exception:
             await db.rollback()
             logger.warning("could not mirror shopify connection into connectors", exc_info=True)
+    if provider_key in ("gmail", "microsoft"):
+        try:
+            from app.services.mailbox import attach_oauth
+
+            await attach_oauth(db, conn)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.warning("could not attach %s mailbox", provider_key, exc_info=True)
 
 
 async def disconnect(
@@ -163,15 +172,15 @@ async def disconnect(
     access = decrypt_secret(conn.encrypted_access_token)
     refresh = decrypt_secret(conn.encrypted_refresh_token) if conn.encrypted_refresh_token else None
     extra = dict(conn.extra)
-    if provider_key == "meta":
-        from app.services import meta_channels
-
-        await meta_channels.detach_all(db, tenant_id, access, client=client)
     if provider_key == "shopify":
         from app.services.platform_connectors import remove_shopify_connector
 
         await remove_shopify_connector(db, tenant_id)
-    if provider.revoke_supported and provider.configured():
+    if provider_key in ("gmail", "microsoft"):
+        from app.services.mailbox import detach_oauth
+
+        await detach_oauth(db, tenant_id, provider_key)
+    if provider.revoke_supported and provider.configured() and not extra.get("manual"):
         own = client is None
         http = client or new_client()
         try:
