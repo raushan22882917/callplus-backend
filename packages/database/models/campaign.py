@@ -14,7 +14,7 @@ class CampaignChannel(str, enum.Enum):
     VOICE = "voice"
     WHATSAPP = "whatsapp"
     EMAIL = "email"
-    SMS = "sms"
+    SMS = "sms"  # retired: no new SMS campaigns; kept so campaigns saved earlier still load
 
 
 class CampaignStatus(str, enum.Enum):
@@ -53,7 +53,7 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     email_subject: Mapped[str | None] = mapped_column(String(200))
     email_body: Mapped[str | None] = mapped_column(Text)
     email_reply_to: Mapped[str | None] = mapped_column(String(255))
-    # SMS campaigns: plain text with the same {{name}} / {{first_name}} blanks. "Reply STOP to opt out." is added.
+    # Left over from retired SMS campaigns: kept so old rows still load. Nothing writes or sends it any more.
     sms_body: Mapped[str | None] = mapped_column(Text)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # What the AI is calling about, and what it must find out. Answers are saved per contact.

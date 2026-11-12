@@ -11,9 +11,17 @@ Set `PUBLIC_BASE_URL` (the public https origin of this API) and
 
     {PUBLIC_BASE_URL}/api/v1/oauth/<provider>/callback
 
-Sign in with Google / Microsoft uses a second, separate redirect URI:
+Sign in with Google uses a second, separate redirect URI (Google is the only sign-in provider; Microsoft is not
+offered for sign-in, and the product no longer offers workspace SSO):
 
-    {PUBLIC_BASE_URL}/api/v1/auth/oauth/<provider>/callback
+    {PUBLIC_BASE_URL}/api/v1/auth/oauth/google/callback
+
+**Sign in and sign up.** `GET /auth/oauth/google/login` signs an *existing* user in and never
+creates anything. Adding `?mode=signup` (the sign-up page's "Continue with Google" button, optionally with
+`&company_name=…`) lets a *new* verified email create its own workspace on the signup plan, with that person as
+owner and no password (they can set one with "Forgot password"). If the email already has an account it is simply
+signed in. Google requires `email_verified`. The button only appears when `GOOGLE_CLIENT_ID` and
+`GOOGLE_CLIENT_SECRET` are set.
 
 A provider with empty credentials is simply off: `POST /oauth/<provider>/authorize`
 returns `400 {"detail": {"code": "provider_not_configured"}}` and the hub shows

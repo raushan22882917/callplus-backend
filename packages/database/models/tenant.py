@@ -75,6 +75,11 @@ class Tenant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     provider_modes: Mapped[dict] = mapped_column(
         JSONB, default=dict, server_default="{}", nullable=False
     )
+    # Weekly email autopilot: {"enabled": bool, "goal": str, "last_week": "2026-W46", "last_campaign_id": uuid}.
+    # The AI drafts a campaign and picks its send time; a person still approves it.
+    email_autopilot: Mapped[dict] = mapped_column(
+        JSONB, default=dict, server_default="{}", nullable=False
+    )
     # Set when the business tells its phone company which numbers place
     # automated calls. A voice campaign will not start until this is set.
     a2p_declared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

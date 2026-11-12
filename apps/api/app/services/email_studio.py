@@ -3,6 +3,7 @@
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
+from app.services.email_insights import engagement_by_campaign
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -106,7 +107,14 @@ async def email_overview(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
         for campaign_id, status, count in count_rows:
             tallies.setdefault(campaign_id, {})[_value(status)] = int(count)
 
+    engagement = await engagement_by_campaign(db, tenant_id, [campaign.id for campaign in campaigns])
+    total_sent = sum(
+        tallies.get(c.id, {}).get("sent", 0) + tallies.get(c.id, {}).get("completed", 0) for c in campaigns
+    )
     return {
+        "opens": sum(e["opened"] for e in engagement.values()),
+        "clicks": sum(e["clicked"] for e in engagement.values()),
+        "delivered_basis": total_sent,
         "campaigns_by_status": {_value(status): int(count) for status, count in status_rows},
         "contacts_by_status": {_value(status): int(count) for status, count in contact_rows},
         "customers_with_email": int(customers_with_email),
@@ -122,6 +130,8 @@ async def email_overview(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
                 "sent": tallies.get(campaign.id, {}).get("sent", 0) + tallies.get(campaign.id, {}).get("completed", 0),
                 "failed": tallies.get(campaign.id, {}).get("failed", 0),
                 "pending": tallies.get(campaign.id, {}).get("pending", 0),
+                "opened": engagement.get(campaign.id, {}).get("opened", 0),
+                "clicked": engagement.get(campaign.id, {}).get("clicked", 0),
             }
             for campaign in campaigns
         ],

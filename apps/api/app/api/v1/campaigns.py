@@ -14,13 +14,11 @@ from app.schemas.campaign import (
     CampaignUpdate,
     EmailDraftRequest,
     EmailDraftResponse,
-    SmsDraftRequest,
-    SmsDraftResponse,
 )
 from app.integrations.credentials import get_llm_key
 from app.integrations.sarvam import SarvamAPIError
 from app.schemas.campaign import PlanRequest, PlanResponse, FromPlanRequest
-from app.services import campaign_planner, email_ai, email_compliance, outreach, plans, sms_ai
+from app.services import campaign_planner, email_ai, email_compliance, outreach, plans
 from app.services.customer_lookup import find_or_create_customer_by_phone
 from app.worker.campaign_tasks import run_campaign_task
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -93,25 +91,6 @@ async def draft_email(
     return EmailDraftResponse(**drafted)
 
 
-@router.post("/ai-sms", response_model=SmsDraftResponse)
-async def draft_sms(
-    payload: SmsDraftRequest,
-    ctx: RequestContext = Depends(require_permission(Permissions.CAMPAIGNS_MANAGE)),
-    db: AsyncSession = Depends(get_db),
-) -> SmsDraftResponse:
-    if not payload.instruction.strip() and not payload.current_body.strip():
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Tell the AI what the message should say.")
-    try:
-        body = await sms_ai.draft_sms(
-            instruction=payload.instruction, current_body=payload.current_body, api_key=await get_llm_key(db, ctx.tenant_id)
-        )
-    except SarvamAPIError as exc:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "The AI helper is busy. Please try again.") from exc
-    except ValueError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    return SmsDraftResponse(body=body)
-
-
 @router.get("/{campaign_id}", response_model=CampaignRead)
 async def get_campaign(
     campaign_id: uuid.UUID,
@@ -159,10 +138,6 @@ async def update_campaign(
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "An email campaign needs a subject and a message.")
         changes["email_subject"] = subject
         changes["email_body"] = body
-    if campaign.channel == CampaignChannel.SMS and "sms_body" in changes:
-        changes["sms_body"] = (changes["sms_body"] or "").strip()
-        if not changes["sms_body"]:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "An SMS campaign needs a message.")
     reply_to = changes.get("email_reply_to")
     if isinstance(reply_to, str):
         reply_to = reply_to.strip()
@@ -198,9 +173,7 @@ async def enroll_audience(
         ).scalars().all()
     )
     query = select(Customer).where(Customer.tenant_id == ctx.tenant_id)
-    if campaign.channel == CampaignChannel.SMS:
-        query = query.where(Customer.phone.is_not(None), Customer.phone != "")
-    elif payload.audience == "with_email" or campaign.channel == CampaignChannel.EMAIL:
+    if payload.audience == "with_email" or campaign.channel == CampaignChannel.EMAIL:
         query = query.where(Customer.email.is_not(None), Customer.email != "")
     elif payload.audience == "with_phone":
         query = query.where(Customer.phone.is_not(None), Customer.phone != "")
@@ -211,14 +184,8 @@ async def enroll_audience(
     customers = list((await db.execute(query.limit(10000))).scalars().all())
     if campaign.channel == CampaignChannel.EMAIL:
         # Unsubscribed, bounced and complaining addresses never join; the send re-checks each one.
-        blocked = await email_compliance.suppressed_set(db, ctx.tenant_id, [c.email or "" for c in customers])
-        if (await email_compliance.profile(db, ctx.tenant_id)).email_marketing_requires_consent:
-            consented = {
-                c.id for c in customers if await email_compliance.has_marketing_consent(db, ctx.tenant_id, c.email)
-            }
-            customers = [c for c in customers if c.id in consented]
-        customers = [c for c in customers if email_compliance.normalize_email(c.email) not in blocked]
-    if campaign.channel in (CampaignChannel.SMS, CampaignChannel.WHATSAPP):
+        customers = await email_compliance.filter_audience(db, ctx.tenant_id, customers)
+    if campaign.channel == CampaignChannel.WHATSAPP:
         # Numbers on the do-not-disturb list (anyone who opted out on any channel) never join.
         customers = [c for c in customers if not await outreach.phone_opted_out(db, ctx.tenant_id, c.phone)]
     contacts = [
@@ -300,13 +267,8 @@ async def launch_campaign(
             "An email campaign needs a subject and a message before it can start.",
         )
     if campaign.channel == CampaignChannel.SMS:
-        from app.services.follow_up import _sms_from
-
-        if not (campaign.sms_body or "").strip():
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "An SMS campaign needs a message before it can start.")
-        _, why = await _sms_from(db, ctx.tenant_id)
-        if why:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, why)
+        # SMS campaigns were retired; a leftover one cannot start.
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "SMS campaigns are no longer available.")
     if campaign.channel == CampaignChannel.EMAIL:
         from app.core.config import get_settings
         from app.services.mailbox import connected_mailbox

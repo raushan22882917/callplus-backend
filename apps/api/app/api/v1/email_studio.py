@@ -31,6 +31,8 @@ class EmailCampaignStat(BaseModel):
     sent: int
     failed: int
     pending: int
+    opened: int = 0
+    clicked: int = 0
 
 
 class EmailOverview(BaseModel):
@@ -38,6 +40,9 @@ class EmailOverview(BaseModel):
     contacts_by_status: dict[str, int]
     customers_with_email: int
     customers_total: int
+    opens: int = 0
+    clicks: int = 0
+    delivered_basis: int = 0
     daily_sends: list[DailySend]
     campaigns: list[EmailCampaignStat]
 
@@ -108,6 +113,31 @@ async def create_email_template(
         name=name, subject=payload.subject.strip(), body=payload.body.strip()
     )
     await log_audit_event(db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="email_template.created", resource_type="email_template", resource_id=row.id)
+    await db.commit()
+    await db.refresh(row)
+    return _template(row)
+
+
+@router.put("/email-templates/{template_id}", response_model=EmailTemplateRead)
+async def update_email_template(
+    template_id: uuid.UUID,
+    payload: EmailTemplateIn,
+    ctx: RequestContext = Depends(require_permission(Permissions.CAMPAIGNS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> EmailTemplateRead:
+    row = await EmailTemplateRepository(db, ctx.tenant_id).get(template_id)  # 404 if it is another workspace's
+    name = payload.name.strip()
+    taken = (
+        await db.execute(
+            select(EmailTemplate.id).where(
+                EmailTemplate.tenant_id == ctx.tenant_id, EmailTemplate.name == name, EmailTemplate.id != template_id
+            )
+        )
+    ).first()
+    if taken:
+        raise HTTPException(status.HTTP_409_CONFLICT, "A template with this name already exists.")
+    row.name, row.subject, row.body = name, payload.subject.strip(), payload.body.strip()
+    await log_audit_event(db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="email_template.updated", resource_type="email_template", resource_id=row.id)
     await db.commit()
     await db.refresh(row)
     return _template(row)

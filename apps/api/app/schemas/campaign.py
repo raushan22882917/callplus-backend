@@ -15,7 +15,6 @@ class CampaignCreate(BaseModel):
     email_subject: str | None = Field(default=None, max_length=200)
     email_body: str | None = Field(default=None, max_length=20000)
     email_reply_to: str | None = Field(default=None, max_length=255)
-    sms_body: str | None = Field(default=None, max_length=640)
     scheduled_at: datetime | None = None
     goal: str | None = Field(default=None, max_length=2000)
     questions: list[str] = Field(default_factory=list, max_length=20)
@@ -32,9 +31,7 @@ class CampaignCreate(BaseModel):
             self.email_body = self.email_body.strip()
             self.email_reply_to = reply_to or None
         if self.channel == CampaignChannel.SMS:
-            if not (self.sms_body or "").strip():
-                raise ValueError("An SMS campaign needs a message")
-            self.sms_body = self.sms_body.strip()
+            raise ValueError("SMS campaigns are not available. Use email, WhatsApp or a voice campaign.")
         return self
 
 
@@ -62,7 +59,6 @@ class CampaignUpdate(BaseModel):
     email_subject: str | None = Field(default=None, max_length=200)
     email_body: str | None = Field(default=None, max_length=20000)
     email_reply_to: str | None = Field(default=None, max_length=255)
-    sms_body: str | None = Field(default=None, max_length=640)
     scheduled_at: datetime | None = None
 
 
@@ -79,15 +75,6 @@ class EmailDraftRequest(BaseModel):
 
 class EmailDraftResponse(BaseModel):
     subject: str
-    body: str
-
-
-class SmsDraftRequest(BaseModel):
-    instruction: str = Field(default="", max_length=2000)
-    current_body: str = Field(default="", max_length=640)
-
-
-class SmsDraftResponse(BaseModel):
     body: str
 
 

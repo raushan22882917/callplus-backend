@@ -1,4 +1,4 @@
-"""Channel packs: Call, WhatsApp, and Email + SMS, each paid for on its own, or all three together.
+"""Channel packs: Call, WhatsApp, and Email, each paid for on its own, or all three together.
 
 A pack is a 30 day allowance for one channel. A workspace holds any mix of them. Buying all three in one
 payment takes `pack_bundle_discount_percent` (10) off the sum, and nothing less than all three gets a discount.
@@ -43,8 +43,10 @@ class Pack:
     allowances: dict  # what it grants for one period
 
 
-# Prices are the lowest round figure at which even the worst case still earns a margin; see
-# docs/PRICING_ANALYSIS.md and `python scripts/cost_model.py`.
+# Prices are the lowest round figure at which even the worst case still earns a margin, and the email allowance is the
+# most the Email price can hold at the stress cost; see docs/PRICING_ANALYSIS.md and `python scripts/cost_model.py`.
+# The Email pack keeps the code "email_sms" because purchases and held packs are stored under it; it no longer includes SMS.
+# tests/test_pack_economics.py fails if an edit here makes a pack lose money, so change them together with the model.
 CATALOGUE: dict[str, Pack] = {
     "call": Pack(
         "call", "Call pack", 2199,
@@ -57,9 +59,9 @@ CATALOGUE: dict[str, Pack] = {
         {"whatsapp_messages": 1000},
     ),
     "email_sms": Pack(
-        "email_sms", "Email + SMS pack", 449,
-        "3,000 customer emails and 500 SMS segments.",
-        {"email_messages": 3000, "sms_messages": 500},
+        "email_sms", "Email pack", 799,
+        "5,000 customer emails.",
+        {"email_messages": 5000},
     ),
 }
 
@@ -167,7 +169,6 @@ def tier_for(tenant: Tenant, now: datetime | None = None) -> plans.Tier:
         changes["whatsapp_messages"] = int(held["whatsapp"].get("whatsapp_messages", 0))
     if "email_sms" in held:
         changes["email_messages"] = int(held["email_sms"].get("email_messages", 0))
-        changes["sms_messages"] = int(held["email_sms"].get("sms_messages", 0))
     return dataclasses.replace(plans.PACKS, **changes) if changes else plans.PACKS
 
 
@@ -209,13 +210,13 @@ async def ensure_whatsapp(db: AsyncSession, tenant: Tenant, count: int = 1) -> N
         raise _used_up("pack_whatsapp_exhausted", "whatsapp", "WhatsApp messages")
 
 
-async def ensure_sms(db: AsyncSession, tenant: Tenant, segments: int = 1) -> None:
-    held = active(tenant).get("email_sms")
-    if held is None:
-        raise _need("email_sms", "SMS")
-    used = await plans._usage_quantity(db, tenant.id, "sms", held["start"], held["end"])
-    if used + segments > int(held.get("sms_messages", 0)):
-        raise _used_up("pack_sms_exhausted", "email_sms", "SMS segments")
+def ensure_sms(tenant: Tenant) -> None:
+    """No pack includes SMS. A workspace that sends texts is on pay as you go, where each one is paid from the wallet."""
+    raise plans.PlanLimitError(
+        "sms_not_in_packs",
+        "SMS is not part of the channel packs. Switch to pay as you go under Billing to send texts.",
+        tier="packs",
+    )
 
 
 async def ensure_email(db: AsyncSession, tenant: Tenant) -> None:
@@ -245,9 +246,6 @@ async def entitlements(db: AsyncSession, tenant: Tenant, tier: plans.Tier, overa
     meters.append(meter("whatsapp_messages", "WhatsApp messages",
                         int((await aggregate_usage(db, tenant.id, wa["start"], wa["end"]))["whatsapp_messages"]) if wa else 0,
                         tier.whatsapp_messages, "whatsapp", "msg"))
-    meters.append(meter("sms", "SMS segments",
-                        await plans._usage_quantity(db, tenant.id, "sms", mail["start"], mail["end"]) if mail else 0,
-                        tier.sms_messages, "email_sms", "sms"))
     meters.append(meter("email", "Emails",
                         await plans._usage_quantity(db, tenant.id, "email", mail["start"], mail["end"]) if mail else 0,
                         tier.email_messages, "email_sms", "email"))

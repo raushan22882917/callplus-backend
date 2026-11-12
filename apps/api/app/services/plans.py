@@ -289,7 +289,7 @@ PACKS = Tier(
     api_keys=1,
     campaigns=False,
     recording=False,
-    blurb="Buy only the channels you use: Call, WhatsApp, Email + SMS, or all three together.",
+    blurb="Buy only the channels you use: Call, WhatsApp, Email, or all three together.",
 )
 _LEGACY_TIER = dataclasses.replace(
     ENTERPRISE, code=LEGACY, name="Legacy", custom=False, blurb="Pre-plan account."
@@ -723,7 +723,7 @@ async def _refuse_sms_if_needed(db: AsyncSession, tenant: Tenant, segments: int)
     if tier.code == PACKS.code:
         from app.services import packs
 
-        await packs.ensure_sms(db, tenant, segments)
+        packs.ensure_sms(tenant)
         return
     if tier.sms_messages is None or allows_overage(tenant):
         return

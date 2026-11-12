@@ -74,6 +74,7 @@ from packages.database.models.knowledge import (
 from packages.database.models.mcp import McpApiKey
 from packages.database.models.mcp_oauth import McpOAuthClient, McpOAuthCode, McpOAuthToken
 from packages.database.models.email_mailbox import EmailMailbox
+from packages.database.models.email_event import EmailEvent
 from packages.database.models.email_suppression import EmailSuppression
 from packages.database.models.email_template import EmailTemplate
 from packages.database.models.oauth import (  # noqa: E402
@@ -300,6 +301,7 @@ __all__ = [
     "PricingPlan",
     "IntegrationConnector",
     "EmailMailbox",
+    "EmailEvent",
     "EmailSuppression",
     "EmailTemplate",
     "OAuthConnection",

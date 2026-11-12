@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.database.models import Tenant
 from packages.database.models.email_suppression import EmailSuppression
+from packages.database.session import set_tenant_context
 
 router = APIRouter(tags=["email-compliance"])
 
@@ -94,6 +95,7 @@ async def unsubscribe(token: str, request: Request, db: AsyncSession = Depends(g
     if parsed is None:
         return _page("Link not valid", "This unsubscribe link is not valid. Reply to the email and we will remove you.", code=404)
     tenant_id, email = parsed
+    await set_tenant_context(db, tenant_id)  # the page has no login, so scope the write to this workspace
     one_click = "one-click" in (await request.body()).decode("utf-8", "ignore").lower()
     added = await svc.unsubscribe(db, tenant_id, email, source="one_click" if one_click else "unsubscribe_link")
     if added:

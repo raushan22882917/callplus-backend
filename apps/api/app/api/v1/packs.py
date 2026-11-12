@@ -1,4 +1,4 @@
-"""Channel packs: Call, WhatsApp, and Email + SMS, bought one at a time or all three together.
+"""Channel packs: Call, WhatsApp, and Email, bought one at a time or all three together.
 
 Every route needs the billing permission and only ever touches the caller's own workspace. The browser says
 which packs it wants and how to pay; the amount, tax and allowances are worked out in services/packs.py.

@@ -1,4 +1,4 @@
-# AI outreach and SMS campaigns
+# AI outreach
 
 How the backend reaches a customer by itself, and what stays under fixed rules.
 
@@ -29,13 +29,10 @@ Ways to start one:
 
 Progress is in the follow-up's `payload.auto`: `tried` (each channel, ok or the error), `sent_at`, `result`.
 
-## SMS campaigns
+## SMS campaigns (retired)
 
-`channel: "sms"` with `sms_body` (same `{{name}}` / `{{first_name}}` blanks). `POST /campaigns/ai-sms` drafts one with the AI.
-"Reply STOP to opt out." is added to every message. Enrolment skips numbers without a phone and numbers on the
-do-not-disturb list, and the send checks again per contact. Launch is refused until SMS is turned on under Channels with a
-number to send from. Each message is metered against the plan and filed in the customer's SMS thread, so a reply (or STOP)
-lands in the inbox.
+SMS campaigns and the `/campaigns/ai-sms` drafter were removed from email marketing. Creating a campaign with `channel: "sms"`
+returns 422, and one saved earlier cannot be started. Outreach below can still use SMS as one step in its channel order.
 
 ## Still not automatic
 

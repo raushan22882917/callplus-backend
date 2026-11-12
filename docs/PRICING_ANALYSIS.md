@@ -9,16 +9,22 @@ Written 12 Nov 2026. Rupee figures use ₹94 = $1, the live rate the app's walle
 |---|---|---|---|---|---|---|
 | Call, 250 AI minutes | ₹2,499 | **₹2,199** (≈ $23.39) | ₹1,570 | 29% | 49% | +2% |
 | WhatsApp, 1,000 messages | ₹1,499 | **₹899** (≈ $9.56) | ₹271 | 70% | 81% | +2% |
-| Email + SMS, 3,000 + 500 | ₹999 | **₹449** (≈ $4.78) | ₹139 | 69% | 81% | +2% |
-| All three, 10% off | ₹4,497 | **₹3,192** (≈ $33.96) | | | | |
+| Email, 5,000 emails | ₹999 (3,000 emails and 500 SMS) | **₹799** (≈ $8.50) | ₹66 | 92% | 94% | 74% |
+| All three, 10% off | ₹4,497 | **₹3,507** (≈ $37.31) | | | | |
 
 **How the price was chosen.** For each pack it is the lowest round price at which the worst case still earns a margin, so no
 customer can cost more than they pay. The worst case is every call outbound, every WhatsApp message a paid marketing
-message, SMS on the dearest route and email at overage rates. "Margin" is gross margin: it counts voice, messages, phone
+message and email at the stress cost. "Margin" is gross margin: it counts voice, messages, phone
 numbers and the payment fee. It does not count hosting (about ₹5,100 a month), support or tax on profit.
 
-The floors are close to the prices: about ₹2,162 for Call, ₹884 for WhatsApp and ₹439 for Email + SMS. ₹2,149 for Call
+The floors are close to the prices: about ₹2,162 for Call and ₹884 for WhatsApp. Email is held to a stricter test
+(see "Email" below): it keeps 10% of its price at the stress cost, which puts its floor at about ₹215. We price it near the market instead (about 5% under Brevo's cheapest plan) because it is a full marketing tool, not a bare sender. ₹2,149 for Call
 loses 0.6% in the worst case, which is why it is ₹2,199 and not lower.
+
+**The bundle.** Each pack clears its own worst case, and so does the 10% bundle. One workspace that uses every allowance in
+full in the same month, with every call outbound and every WhatsApp message a paid marketing message, still leaves the bundle
+about 7% of its price. At 60% use it keeps about 62%. (When the Email pack was ₹299 the bundle could lose about 6% in that
+worst month; pricing the Email pack near the market removed that risk.)
 
 ## What competitors charge
 
@@ -60,20 +66,48 @@ Sending 1,000 marketing messages elsewhere costs about ₹2,360 or more (₹1,50
 mark-up. At ₹899 we are roughly 60 to 75% cheaper. We cannot go below about ₹884 without risking a loss, because a
 workspace that sends only marketing messages costs us ₹863.
 
-### SMS and email
+### SMS
 
-| Seller | Price |
-|---|---|
-| **Us, Email + SMS pack** | **₹449 for 3,000 emails and 500 SMS** |
-| SMS in India | ₹0.10 to ₹0.35 a message on a DLT route, so 500 SMS is ₹50 to ₹175. Lowest rates need very large prepaid volumes |
-| Amazon SES | $0.10 per 1,000 emails (₹9.40) |
-| Resend | 3,000 emails a month free; $20 (₹1,880) a month for 50,000 |
-| SendGrid | $19.95 (₹1,875) a month for 50,000 |
-| Mailgun | about $35 (₹3,290) a month for 50,000 |
-| Brevo | 300 emails a day free |
+SMS in India costs ₹0.10 to ₹0.35 a message on a DLT route. SMS is no longer in any pack: it is sold only on pay as you go
+(₹0.75 a segment from the wallet), and it is not part of email marketing.
 
-Email alone is free at low volume elsewhere, so the pack is not the cheapest way to send 3,000 emails. It is priced against
-the SMS part and the convenience of one bill, and the worst case (₹429 of cost) puts the floor at about ₹439.
+### Email
+
+Prices are USD list prices on 12 Nov 2026, converted at ₹94. They come mostly from comparison sites that disagree with each
+other, so check the vendor's own page before quoting one to a customer. Each row is the cheapest **paid** plan that covers
+about 5,000 emails a month, which is what our pack includes.
+
+| Seller | Kind | ₹ a month | Emails | ₹ per 1,000 | Notes |
+|---|---|---|---|---|---|
+| **Us, Email pack** | platform | **799** | 5,000 | 159.8 | |
+| Amazon SES | sending only | 47 | 5,000 | 9.4 | Pay per email. No editor, no list tools, no reports |
+| Zoho Campaigns (India) | platform | about 225 | 500 contacts | | Cheaper at tiny lists; about ₹3,600 a month at 10,000 contacts |
+| MailerLite Growing Business | platform | about 940 | 500 subscribers | | About $15 at 1,000 subscribers (unverified) |
+| Brevo Starter | platform | about 846 | 5,000 | 169.2 | About $9 a month more to remove the Brevo logo |
+| Mailchimp Essentials | platform | about 1,222 | 5,000 | 244.4 | 500 contacts; about $75 at 5,000 contacts |
+| Postmark Basic | sending only | 1,410 | 10,000 | 141.0 | Transactional only |
+| Mailgun Basic | sending only | 1,410 | 10,000 | 141.0 | |
+| SendGrid Essentials | sending only | 1,875 | 50,000 | 37.5 | Free plan is now a 60 day trial |
+| Resend Pro | sending only | 1,880 | 50,000 | 37.6 | 3,000 a month free |
+
+Free tiers also exist: Brevo 300 emails a day, Zoho Campaigns 6,000 to 12,000 a month, Resend 3,000 a month, Juvlon
+20,000 a month, Mailchimp 500.
+
+**Where we stand.** We are the cheapest paid *marketing platform* for 5,000 emails, by design only a little under the market: about 5% under Brevo, 15% under MailerLite and 35% under Mailchimp for the same volume, and we include the AI tools. We are **not** the cheapest at everything:
+- Sending-only services (SES, SendGrid, Resend) are cheaper per email because they sell no editor, no contact tools and no
+  reports. SES is about a ninth of our per-email price.
+- Free tiers cost nothing, though they cap volume, add the vendor's logo or drop features.
+- Zoho Campaigns is cheaper for a very small list (500 contacts).
+We also price by emails sent, not by contacts, so a larger list costs the same until the sends run out.
+
+**What email costs us.** Per 1,000 emails: ₹9.4 sending through Amazon SES (it works through the app's existing SMTP route),
+₹37.6 on Resend Pro with its 50,000 plan full, and ₹84.6 on Resend beyond its plan. The pack is sized so that at ₹37.6 per
+1,000 it still keeps 74% of its price (the floor is 10%, which pays for hosting, support and
+tax). Up to about 18,600 emails would still clear that floor, so 5,000 leaves a cushion.
+
+**Fixed cost.** A Resend Pro plan is a flat ₹1,880 a month however little is sent. Each Email pack customer leaves about
+₹733 after sending and the payment fee, so about three customers pay for the plan. Until then, or if total sends across all
+workspaces could pass 50,000 a month (at which point Resend charges ₹85 per 1,000), send through SES instead.
 
 ### Phone systems (for reference)
 
@@ -94,7 +128,7 @@ Per AI minute, at ₹94 = $1 (`scripts/cost_model.py`):
 | **Total** | **₹2.99** | **₹6.94** |
 
 Blended at 60% inbound it is ₹4.57. Other costs: a phone number about ₹188 a month (a Call pack unlocks two), WhatsApp
-₹0.25 average and ₹0.8631 worst, SMS ₹0.20 average and ₹0.35 worst, email ₹0.009 average and ₹0.085 worst, and the payment
+₹0.25 average and ₹0.8631 worst, SMS ₹0.20 average and ₹0.35 worst, email ₹0.009 average (SES), ₹0.038 stress (Resend Pro, plan full) and ₹0.085 beyond a Resend plan, and the payment
 fee of about 2.4%.
 
 ## Assumptions that could move the margins
@@ -127,5 +161,5 @@ These are marked ASSUMPTION in the cost model. Measure them from real usage and 
 - Our suppliers: [Sarvam voice agents](https://docs.sarvam.ai/voice-agents/pricing), [Sarvam API pricing](https://docs.sarvam.ai/api/getting-started/pricing), [Twilio India voice](https://www.twilio.com/en-us/voice/pricing/in)
 - WhatsApp: [Meta pricing](https://developers.facebook.com/documentation/business-messaging/whatsapp/pricing), [AiSensy](https://m.aisensy.com/blog/whatsapp-api-new-pricing/), [MyOperator guide](https://myoperator.com/blog/whatsapp-business-api-pricing-india-2026), [WATI pricing audit](https://codingclave.com/blog/wati-pricing-india-2026), [BSP comparison](https://go4whatsup.com/blog/aisensy-vs-wati-vs-interakt-pricing-showdown-2026/)
 - SMS: [MessageCentral A2P SMS India](https://www.messagecentral.com/en-in/blog/a2p-sms-pricing-india), [mTalkz](https://www.mtalkz.com/blog/bulk-sms-pricing)
-- Email: [Dupple email services](https://dupple.com/learn/best-transactional-email-services), [MakerKit email providers](https://makerkit.dev/blog/saas/best-transactional-email-provider-saas)
+- Email: [Dupple email services](https://dupple.com/learn/best-transactional-email-services), [MakerKit email providers](https://makerkit.dev/blog/saas/best-transactional-email-provider-saas), [Mailchimp](https://tinycommand.com/blogs/mailchimp-pricing-explained), [Brevo](https://dev.to/techsifted/brevo-pricing-2026-every-plan-explained-with-the-hidden-costs-4oe3), [Resend](https://www.withorb.com/pricing-atlas/resend), [Amazon SES](https://www.usecarly.com/blog/amazon-ses-pricing/), [SendGrid](https://www.usecarly.com/blog/sendgrid-pricing/), [Postmark](https://automationatlas.io/answers/postmark-pricing-explained-2026/), [MailerLite](https://sendx.io/blog/mailerlite-pricing), [Zoho Campaigns India](https://itforsme.in/pricing/zoho-campaigns-india)
 - Phone systems: [Exotel vs Knowlarity](https://prospeo.io/s/exotel-vs-knowlarity), [Exotel vs MyOperator](https://tomba.io/blog/exotel-vs-myoperator)

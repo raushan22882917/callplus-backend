@@ -1,4 +1,4 @@
-"""'Sign in with Google / Microsoft': identity only, never provisioning.
+"""'Sign in with Google': identity only; this module never provisions anything.
 
 The id_token is read straight from the token endpoint over TLS (server to
 server), where OIDC Core 3.1.3.7 lets us skip signature verification; we still
@@ -6,13 +6,12 @@ validate issuer, audience, expiry and the nonce that is bound to our signed
 state. The email must be verified by the identity provider, and must already
 belong to an active user: we never create users or tenants here."""
 
-import re
 import time
 from typing import Any
 
 import jwt
 from app.integrations.oauth.errors import OAuthError
-from app.integrations.oauth.providers import MS_CONSUMER_TENANT, get_provider, login_redirect_uri
+from app.integrations.oauth.providers import get_provider, login_redirect_uri
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,10 +23,9 @@ from packages.database.models import (
     User,
 )
 
-LOGIN_PROVIDERS = ("google", "microsoft")
+LOGIN_PROVIDERS = ("google",)
 LOGIN_SCOPES = ["openid", "email", "profile"]
 _GOOGLE_ISSUERS = {"https://accounts.google.com", "accounts.google.com"}
-_MS_ISSUER_RE = re.compile(r"^https://login\.microsoftonline\.com/([0-9a-f\-]{36})/v2\.0$")
 
 
 def login_redirect(provider: str) -> str:
@@ -58,25 +56,10 @@ def claims_from_id_token(
     if "@" not in email:
         raise OAuthError("email_missing", "The identity provider did not share an email address")
 
-    if provider_key == "google":
-        if claims.get("iss") not in _GOOGLE_ISSUERS:
-            raise OAuthError("invalid_id_token", "Unexpected token issuer")
-        if claims.get("email_verified") is not True:
-            raise OAuthError("email_not_verified", "Your Google email address is not verified")
-    else:
-        match = _MS_ISSUER_RE.match(claims.get("iss") or "")
-        if not match or match.group(1) != claims.get("tid"):
-            raise OAuthError("invalid_id_token", "Unexpected token issuer")
-        # Microsoft does not guarantee that `email` is verified for work/school
-        # tenants (nOAuth). Trust it only for personal accounts, or when the
-        # app registration enables the `xms_edov` optional claim.
-        verified = claims.get("tid") == MS_CONSUMER_TENANT or claims.get("xms_edov") in (True, 1, "1", "true")
-        if not verified:
-            raise OAuthError(
-                "email_not_verified",
-                "Microsoft did not confirm ownership of this email address "
-                "(enable the xms_edov optional claim, see docs/OAUTH_SETUP.md)",
-            )
+    if claims.get("iss") not in _GOOGLE_ISSUERS:
+        raise OAuthError("invalid_id_token", "Unexpected token issuer")
+    if claims.get("email_verified") is not True:
+        raise OAuthError("email_not_verified", "Your Google email address is not verified")
     claims["email"] = email
     return claims
 

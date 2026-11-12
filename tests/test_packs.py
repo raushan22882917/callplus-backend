@@ -1,4 +1,4 @@
-"""Channel packs: Call, WhatsApp and Email + SMS bought one by one or all three together. Server-side pricing,
+"""Channel packs: Call, WhatsApp and Email bought one by one or all three together. Server-side pricing,
 payment proof before any allowance, one-time crediting, per-pack windows, and the plan checks that refuse a
 channel nobody paid for."""
 
@@ -20,7 +20,7 @@ from packages.database.session import session_scope
 
 SECRET = "test-key-secret"
 GSTIN_MH = "27AAPFU0939F1ZV"  # well-formed, Maharashtra (state 27)
-CALL, WA, MAIL = 219_900, 89_900, 44_900  # paise, before GST
+CALL, WA, MAIL = 219_900, 89_900, 79_900  # paise, before GST
 
 
 # ---- prices ---------------------------------------------------------------------------------
@@ -76,8 +76,8 @@ def test_the_tier_only_grants_what_was_paid_for_and_ignores_expired_packs() -> N
     assert tier.whatsapp_messages == 0  # that pack ended yesterday
     assert tier.email_messages == 0
 
-    mail = plans.effective(_tenant({"email_sms": _entry(5, email_messages=3000, sms_messages=500)}))
-    assert (mail.email_messages, mail.sms_messages, mail.ai_minutes) == (3000, 500, 0)
+    mail = plans.effective(_tenant({"email_sms": _entry(5, email_messages=3000)}))
+    assert (mail.email_messages, mail.sms_messages, mail.ai_minutes) == (3000, 0, 0)  # the Email pack has no SMS
 
 
 # ---- crediting ------------------------------------------------------------------------------
@@ -180,8 +180,7 @@ async def test_a_channel_nobody_paid_for_is_refused_with_the_pack_to_buy() -> No
         tenant.pack_state = {"whatsapp": _entry(20, whatsapp_messages=1000)}
         await db.commit()
         await plans.ensure_whatsapp_available(db, tenant.id)  # paid for: allowed
-        for call, pack_name in ((plans.ensure_email_available(db, tenant.id), "Email + SMS pack"),
-                                (plans.ensure_sms_available(db, tenant.id), "Email + SMS pack"),
+        for call, pack_name in ((plans.ensure_email_available(db, tenant.id), "Email pack"),
                                 (plans.ensure_minutes_available(db, tenant.id), "Call pack")):
             with pytest.raises(plans.PlanLimitError) as err:
                 await call
@@ -207,21 +206,27 @@ async def test_the_allowance_counts_only_inside_the_packs_own_window(monkeypatch
         await plans.ensure_whatsapp_available(db, tenant.id)
 
 
-async def test_email_and_sms_share_one_pack_but_have_their_own_counts() -> None:
+async def test_the_email_pack_counts_emails_and_no_pack_includes_sms() -> None:
     async with session_scope() as db:
         tenant = await _free_tenant(db, "packs")
-        entry = _entry(20, email_messages=2, sms_messages=1)
+        entry = _entry(20, email_messages=2)
         tenant.pack_state = {"email_sms": entry}
         when = datetime.fromisoformat(entry["start"]) + timedelta(hours=1)
         await _event(db, tenant.id, "email", when, 2)
-        await _event(db, tenant.id, "sms", when, 1)
         await db.commit()
         with pytest.raises(plans.PlanLimitError) as err:
             await plans.ensure_email_available(db, tenant.id)
         assert err.value.code == "pack_email_exhausted"
+        # Holding the Email pack does not buy texts: SMS belongs to pay as you go.
         with pytest.raises(plans.PlanLimitError) as err:
             await plans.ensure_sms_available(db, tenant.id)
-        assert err.value.code == "pack_sms_exhausted"
+        assert err.value.code == "sms_not_in_packs" and "pay as you go" in str(err.value)
+
+
+def test_the_email_pack_is_email_only() -> None:
+    pack = packs.CATALOGUE["email_sms"]
+    assert pack.name == "Email pack" and pack.allowances == {"email_messages": 5000}
+    assert "sms" not in pack.blurb.lower()
 
 
 async def test_call_minutes_are_the_packs_minutes_and_an_expired_pack_allows_none(monkeypatch: pytest.MonkeyPatch) -> None:

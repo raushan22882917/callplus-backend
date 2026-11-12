@@ -16,7 +16,7 @@ from app.integrations.credentials import SharedAccountError, require_own_twilio
 from app.integrations.email_client import send_email
 from app.integrations.twilio_client import TwilioClientError, place_outbound_call
 from app.integrations.whatsapp import WhatsAppAPIError, send_template_message
-from app.services import dialer, email_compliance, exotel, plans, privacy, telephony_plus
+from app.services import dialer, email_compliance, email_tracking, exotel, plans, privacy, telephony_plus
 from app.services.cost_controls import SpendGuardError, guard_outbound
 from app.services.voicemail_detection import amd_callback_for_agent
 from app.services.webhooks import enqueue_webhook_event
@@ -125,7 +125,7 @@ async def _run_campaign(campaign_id: str) -> None:
                     contact.attempted_at = datetime.now(UTC)
                     continue
 
-            if campaign.channel in (CampaignChannel.WHATSAPP, CampaignChannel.SMS):
+            if campaign.channel == CampaignChannel.WHATSAPP:
                 # A number that opted out, on any channel, is on the do-not-disturb list.
                 numbers = {customer.phone, privacy._clean_phone(customer.phone)} - {None}
                 on_dnd = (
@@ -149,7 +149,7 @@ async def _run_campaign(campaign_id: str) -> None:
                     elif campaign.channel == CampaignChannel.WHATSAPP:
                         await _send_campaign_whatsapp(db, campaign, whatsapp_account, customer)
                     elif campaign.channel == CampaignChannel.SMS:
-                        sent = await _send_campaign_sms(db, campaign, customer)
+                        raise ValueError("SMS campaigns are no longer available")
                     else:
                         sent = await _send_campaign_email(db, campaign, customer)
                     contact.status = CampaignContactStatus.SENT
@@ -410,8 +410,6 @@ def _campaign_interval(settings, channel: CampaignChannel) -> float:
         return settings.campaign_voice_interval_seconds
     if channel == CampaignChannel.EMAIL:
         return settings.campaign_email_interval_seconds
-    if channel == CampaignChannel.SMS:
-        return settings.campaign_sms_interval_seconds
     return settings.campaign_whatsapp_interval_seconds
 
 
@@ -461,7 +459,9 @@ async def _send_campaign_email(db, campaign: Campaign, customer: Customer) -> di
     unsubscribe_link = email_compliance.unsubscribe_url(campaign.tenant_id, customer.email or "")
     unsubscribe_headers = email_compliance.unsubscribe_headers(unsubscribe_link)
     text_body = body + email_compliance.footer_text(sender, unsubscribe_link)
-    html_body = _email_html(body) + email_compliance.footer_html(sender, unsubscribe_link)
+    html_body = email_tracking.link_and_track(_email_html(body), campaign.tenant_id, campaign.id, customer.id) + email_compliance.footer_html(
+        sender, unsubscribe_link
+    )
     # The reservation counts against the plan. A refused allowance pauses the
     # campaign (SpendGuardError). A provider failure deletes the reservation
     # so a retry is not charged twice.
@@ -530,34 +530,6 @@ async def _record_campaign_email(db, campaign: Campaign, customer: Customer, sub
         logger.exception("campaign email sent but the inbox thread was not saved")
 
 
-async def _send_campaign_sms(db, campaign: Campaign, customer: Customer) -> dict:
-    """One SMS from the workspace's own number, filed in the customer's SMS thread so a reply (or STOP) lands there."""
-    from app.integrations.channel_senders import send_sms_message
-    from app.services import channels as channel_svc
-    from app.services import follow_up as follow_up_svc
-    from app.services.outreach import SMS_FOOTER
-
-    if not (campaign.sms_body or "").strip():
-        raise ValueError("campaign has no SMS message")
-    from_, why = await follow_up_svc._sms_from(db, campaign.tenant_id)
-    if from_ is None:
-        raise ValueError(why or "SMS is not ready")
-    body = render_campaign_email(campaign.sms_body or "", customer).strip() + SMS_FOOTER
-    provider_id = await send_sms_message(db, campaign.tenant_id, to=customer.phone, from_=from_, body=body)
-    try:
-        conversation, _, _ = await channel_svc.ensure_thread(
-            db, campaign.tenant_id, ConversationChannel.SMS, f"{customer.phone}|{from_}",
-            customer_id=customer.id, contact_address=customer.phone, via_address=from_,
-        )
-        await channel_svc.record_message(
-            db, campaign.tenant_id, conversation.id, direction=MessageDirection.OUTBOUND,
-            sender=MessageSender.AI_AGENT, text=body, provider_message_id=provider_id,
-        )
-    except Exception:
-        logger.exception("campaign SMS sent but the inbox thread was not saved")
-    return {"to": customer.phone, "message_id": provider_id}
-
-
 async def _send_campaign_whatsapp(db, campaign: Campaign, whatsapp_account, customer: Customer) -> None:
     if whatsapp_account is None:
         raise ValueError("no WhatsApp account connected for this tenant")
@@ -611,3 +583,12 @@ async def _start_due_campaigns() -> int:
 @celery_app.task(name="campaigns.start_due")
 def start_due_campaigns_task() -> int:
     return asyncio.run(_start_due_campaigns())
+
+
+@celery_app.task(name="email.autopilot")
+def email_autopilot_task() -> int:
+    """Each workspace with the weekly autopilot on gets its AI-drafted campaign when its day comes round."""
+    from app.services import email_autopilot
+
+    ensure_engine()
+    return asyncio.run(email_autopilot.run_due(session_scope))

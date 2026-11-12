@@ -66,7 +66,6 @@ class Settings(BaseSettings):
     campaign_voice_interval_seconds: float = 1.0
     campaign_whatsapp_interval_seconds: float = 0.2
     campaign_email_interval_seconds: float = 0.3
-    campaign_sms_interval_seconds: float = 0.2
     # Transient provider failures (Twilio/Meta errors) are retried this many
     # times in total per contact, waiting backoff * attempt seconds between
     # tries. Config errors (no phone number, no template) are never retried.
@@ -232,6 +231,8 @@ class Settings(BaseSettings):
     # When email_api_key is set it is used instead of SMTP.
     email_api_provider: str = "resend"
     email_api_key: str = ""
+    # Opens (a one-pixel image) and clicks (a signed redirect) on campaign email. Switch off to send plain links.
+    email_tracking_enabled: bool = True
     # Delivery events (bounce, spam complaint) from the email provider. Both fail closed when unset.
     # Resend signs with Svix: paste the "whsec_..." signing secret. Brevo cannot sign, so it sends
     # this token in an "Authorization: Bearer <token>" header you add to the webhook.

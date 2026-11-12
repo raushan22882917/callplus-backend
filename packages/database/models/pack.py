@@ -10,7 +10,7 @@ from packages.database.mixins import TenantScopedMixin, TimestampMixin, UUIDPrim
 
 
 class PackPurchase(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
-    """One payment for one or more channel packs (Call, WhatsApp, Email + SMS).
+    """One payment for one or more channel packs (Call, WhatsApp, Email).
 
     Prices, allowances and tax are fixed here when the order is made and never read from the
     request. `items` is what was bought, `allowances` is what each pack grants for its period.

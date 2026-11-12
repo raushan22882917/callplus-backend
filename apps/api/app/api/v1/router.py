@@ -12,6 +12,8 @@ from app.api.v1 import (
     calls,
     campaigns,
     email_compliance,
+    email_intelligence,
+    email_tracking,
     email_mailbox,
     email_studio,
     channels,
@@ -76,6 +78,8 @@ api_router.include_router(packs.router)
 api_router.include_router(workflows.router)
 api_router.include_router(campaigns.router)
 api_router.include_router(email_compliance.router)
+api_router.include_router(email_intelligence.router)
+api_router.include_router(email_tracking.router)
 api_router.include_router(email_mailbox.router)
 api_router.include_router(email_studio.router)
 api_router.include_router(integrations.router)

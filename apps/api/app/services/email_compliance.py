@@ -209,3 +209,13 @@ def footer_html(sender: Sender, url: str) -> str:
         f"{html.escape(sender.name)}<br>{html.escape(sender.address)}<br>"
         f'<a href="{html.escape(url, quote=True)}">Unsubscribe</a></p>'
     )
+
+
+async def filter_audience(db: AsyncSession, tenant_id: uuid.UUID, customers: list) -> list:
+    """Drops everyone a marketing email must not reach: suppressed addresses, and (when the workspace requires
+    consent) people who have not given it. The send checks each address again."""
+    blocked = await suppressed_set(db, tenant_id, [c.email or "" for c in customers])
+    if (await profile(db, tenant_id)).email_marketing_requires_consent:
+        consented = {c.id for c in customers if await has_marketing_consent(db, tenant_id, c.email)}
+        customers = [c for c in customers if c.id in consented]
+    return [c for c in customers if normalize_email(c.email) not in blocked]

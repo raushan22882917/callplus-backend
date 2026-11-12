@@ -1,6 +1,9 @@
-"""'Sign in with Google / Microsoft'. Identity only: finds the user by the
-provider-verified email and issues the normal JWT pair. It never creates a
-user or a tenant; an unknown email is sent back to /login with a clear error.
+"""'Sign in with Google / Microsoft'. Finds the user by the provider-verified
+email and issues the normal JWT pair. A plain sign-in never creates a user or a
+tenant: an unknown email is sent back to /login with a clear error. Only the
+sign-up form's button (mode=signup) may create a workspace, and only for an
+email the provider has verified; if that email already has an account it is
+simply signed in.
 
 Redirect URI to register at the provider (separate from the connect flow):
   {PUBLIC_BASE_URL}/api/v1/auth/oauth/{provider}/callback
@@ -13,17 +16,22 @@ from urllib.parse import quote, urlencode
 from app.core.audit import log_audit_event
 from app.core.config import get_settings
 from app.core.deps import get_db
+from app.core.rate_limit_ip import ip_rate_limit
 from app.core.security import create_access_token, create_refresh_token
 from app.integrations.oauth import login as login_mod
 from app.integrations.oauth import state as state_mod
 from app.integrations.oauth.errors import OAuthError
 from app.integrations.oauth.http import new_client
 from app.integrations.oauth.providers import get_provider
+from app.services import workspace_signup
 from app.services.platform_totp import get_enabled_totp
 from app.services.user_sessions import alert_new_sign_in, create_session
 from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy import select
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from packages.database.models import User
 
 router = APIRouter(prefix="/auth/oauth", tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -49,10 +57,12 @@ async def login_providers() -> dict[str, list[str]]:
     }
 
 
-@router.get("/{provider}/login")
+@router.get("/{provider}/login", dependencies=[Depends(ip_rate_limit("oauth-login", limit=30))])
 async def oauth_login(
     provider: str,
     tenant_slug: str | None = Query(default=None, max_length=100),
+    mode: str = Query(default="login", pattern="^(login|signup)$"),
+    company_name: str | None = Query(default=None, max_length=120),
     db: AsyncSession = Depends(get_db),
 ) -> RedirectResponse:
     try:
@@ -65,7 +75,11 @@ async def oauth_login(
             tenant_id=None,
             user_id=None,
             return_url="/",
-            extra={"tenant_slug": tenant_slug} if tenant_slug else None,
+            extra={
+                **({"tenant_slug": tenant_slug} if tenant_slug else {}),
+                **({"mode": "signup", **({"company_name": company_name.strip()} if (company_name or "").strip() else {})} if mode == "signup" else {}),
+            }
+            or None,
             use_pkce=prov.pkce,
         )
         redirect = login_mod.login_redirect(provider)
@@ -109,15 +123,23 @@ async def oauth_callback(
         if not id_token:
             raise OAuthError("invalid_id_token", "The identity provider returned no id_token")
         idc = login_mod.claims_from_id_token(provider, id_token, nonce=claims.nonce)
-        user, membership = await login_mod.find_login_membership(
-            db, idc["email"], claims.extra.get("tenant_slug")
-        )
-        if await get_enabled_totp(db, user.id) is not None:
-            raise OAuthError(
-                "two_factor_required",
-                "This account uses two-factor authentication; sign in with your password and code.",
-                status_code=403,
+        created = False
+        existing = (await db.execute(select(User.id).where(User.email == idc["email"]))).first()
+        if claims.extra.get("mode") == "signup" and existing is None:
+            _, user, membership = await workspace_signup.create_from_identity(
+                db, email=idc["email"], name=idc.get("name"), company_name=claims.extra.get("company_name")
             )
+            created = True
+        else:
+            user, membership = await login_mod.find_login_membership(
+                db, idc["email"], claims.extra.get("tenant_slug")
+            )
+            if await get_enabled_totp(db, user.id) is not None:
+                raise OAuthError(
+                    "two_factor_required",
+                    "This account uses two-factor authentication; sign in with your password and code.",
+                    status_code=403,
+                )
         if user.email_verified_at is None:
             from datetime import UTC, datetime
 
@@ -126,7 +148,7 @@ async def oauth_callback(
             db,
             tenant_id=membership.tenant_id,
             actor_user_id=user.id,
-            action="oauth.login",
+            action="oauth.signup" if created else "oauth.login",
             resource_type="user",
             resource_id=user.id,
             extra={"provider": provider},

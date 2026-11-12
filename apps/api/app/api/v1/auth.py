@@ -1,6 +1,6 @@
 import logging
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from app.core.audit import log_audit_event
 from app.core.config import get_settings
@@ -35,7 +35,7 @@ from app.schemas.auth import (
     TenantOption,
     TokenPair,
 )
-from app.services import plans
+from app.services import workspace_signup
 from app.services.platform_totp import get_enabled_totp, verify_second_factor
 from app.services.user_sessions import (
     alert_new_sign_in,
@@ -55,7 +55,6 @@ from sqlalchemy.orm import joinedload
 
 from packages.database.models import (
     MembershipStatus,
-    Role,
     Tenant,
     TenantStatus,
     TenantUser,
@@ -137,37 +136,23 @@ async def _load_active_membership(db: AsyncSession, membership_id: uuid.UUID) ->
 async def signup(
     payload: SignupRequest, request: Request, db: AsyncSession = Depends(get_db)
 ) -> TokenPair:
-    owner_role = (
-        await db.execute(select(Role).where(Role.tenant_id.is_(None), Role.name == "OWNER"))
-    ).scalar_one_or_none()
-    if owner_role is None:
+    try:
+        _, _, membership = await workspace_signup.create_workspace(
+            db,
+            company_name=payload.company_name,
+            slug=payload.tenant_slug,
+            full_name=payload.full_name,
+            email=payload.email,
+            hashed_password=hash_password(payload.password),
+        )
+    except workspace_signup.SystemRolesMissing as exc:
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "System roles are not seeded — run migrations before accepting signups",
-        )
-
-    tier = get_settings().signup_plan_tier
-    tenant = Tenant(
-        name=payload.company_name,
-        slug=payload.tenant_slug,
-        plan_tier=tier if tier in plans.TIERS else "free",
-    )
-    user = User(
-        email=payload.email.lower(),
-        hashed_password=hash_password(payload.password),
-        full_name=payload.full_name,
-        email_verified_at=datetime.now(UTC),
-    )
-    db.add_all([tenant, user])
-    try:
-        await db.flush()
+        ) from exc
     except IntegrityError as exc:
         await db.rollback()
         raise ConflictError("tenant_slug or email is already in use") from exc
-
-    membership = TenantUser(tenant_id=tenant.id, user_id=user.id, role_id=owner_role.id)
-    db.add(membership)
-    await db.flush()
     await db.commit()
 
     return await _issue_tokens(db, membership, request)

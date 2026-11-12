@@ -902,26 +902,15 @@ async def test_login_rejects_unverified_email_bad_nonce_and_wrong_audience(
     assert await attempt() == "ok"
 
 
-async def test_login_microsoft_requires_verified_email_claim(
-    client: AsyncClient, creds, providers: MockProviders
+async def test_microsoft_is_not_offered_for_sign_in_even_when_it_is_configured(
+    client: AsyncClient, creds, db_session: AsyncSession
 ) -> None:
-    await _signup(client, slug="ms-co", email="owner@logintest.com")
-
-    async def attempt(**claims) -> str:
-        state, nonce = await _login_start(client, "microsoft")
-        providers.routes.clear()
-        _login_token_mock(providers, "microsoft", nonce, **claims)
-        out = await client.get(
-            "/api/v1/auth/oauth/microsoft/callback", params={"code": "c", "state": state}, follow_redirects=False
-        )
-        loc = out.headers["location"]
-        return "ok" if "/sso/callback#" in loc else parse_qs(urlparse(loc).query)["oauth_error"][0]
-
-    assert await attempt() == "ok"  # xms_edov true
-    assert await attempt(xms_edov=None) == "email_not_verified"  # nOAuth: unverified work email
-    assert await attempt(tid="9188040d-6c67-4c5b-b112-36a304b66dad",
-                         iss="https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0",
-                         xms_edov=None) == "ok"  # personal Microsoft account
+    assert (await client.get("/api/v1/auth/oauth/providers")).json() == {"providers": ["google"]}
+    for params in ({}, {"mode": "signup", "company_name": "Contoso"}):
+        out = await client.get("/api/v1/auth/oauth/microsoft/login", params=params, follow_redirects=False)
+        assert out.status_code == 302 and out.headers["location"].startswith(f"{FRONT}/login?")
+        assert parse_qs(urlparse(out.headers["location"]).query)["oauth_error"] == ["unknown_provider"]
+    assert (await db_session.execute(select(Tenant))).scalars().all() == []
 
 
 async def test_login_multiple_workspaces_needs_slug_and_unconfigured_provider(
@@ -956,7 +945,7 @@ async def test_login_multiple_workspaces_needs_slug_and_unconfigured_provider(
     monkeypatch.setattr(creds, "google_client_id", "")
     off = await client.get("/api/v1/auth/oauth/google/login", follow_redirects=False)
     assert parse_qs(urlparse(off.headers["location"]).query)["oauth_error"] == ["provider_not_configured"]
-    assert (await client.get("/api/v1/auth/oauth/providers")).json() == {"providers": ["microsoft"]}
+    assert (await client.get("/api/v1/auth/oauth/providers")).json() == {"providers": []}
     assert (await client.get("/api/v1/auth/oauth/hubspot/login", follow_redirects=False)).status_code == 302
 
 
@@ -975,3 +964,83 @@ async def test_empty_env_placeholders_fall_back_to_defaults(
     assert (await authorize(client, tokens, "microsoft")).startswith(
         "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?"
     )
+
+
+# ---------------------------------------------------------------- Sign up with Google / Microsoft
+
+
+async def _finish_login(client: AsyncClient, providers: MockProviders, provider: str = "google", start_params=None, **claims):
+    state, nonce = await _login_start(client, provider, **(start_params or {}))
+    providers.routes.clear()  # each sign-in has its own nonce, so only the latest token answer may match
+    _login_token_mock(providers, provider, nonce, **claims)
+    out = await client.get(
+        f"/api/v1/auth/oauth/{provider}/callback", params={"code": "c", "state": state}, follow_redirects=False
+    )
+    return out.headers["location"]
+
+
+async def test_google_signup_creates_a_workspace_on_the_signup_plan_for_a_new_verified_email(
+    client: AsyncClient, creds, providers: MockProviders, db_session: AsyncSession
+) -> None:
+    from packages.database.models import AuditLog, TenantUser, User
+
+    location = await _finish_login(
+        client, providers, start_params={"mode": "signup", "company_name": "Lotus Salon"},
+        email="meera@lotus.example.com", name="Meera Rao",
+    )
+    assert location.startswith(f"{FRONT}/sso/callback#access_token=")
+    frag = parse_qs(urlparse(location).fragment)
+    me = await client.get("/api/v1/users/me", headers={"Authorization": f"Bearer {frag['access_token'][0]}"})
+    assert me.status_code == 200 and me.json()["email"] == "meera@lotus.example.com" and me.json()["full_name"] == "Meera Rao"
+    tenant = (await db_session.execute(select(Tenant))).scalar_one()
+    assert tenant.name == "Lotus Salon" and tenant.slug == "lotus-salon" and tenant.plan_tier == get_settings().signup_plan_tier
+    user = (await db_session.execute(select(User))).scalar_one()
+    assert user.email_verified_at is not None and user.hashed_password  # no usable password was chosen by anyone
+    membership = (await db_session.execute(select(TenantUser))).scalar_one()
+    assert membership.user_id == user.id and membership.tenant_id == tenant.id
+    actions = [row.action for row in (await db_session.execute(select(AuditLog))).scalars().all()]
+    assert "oauth.signup" in actions
+
+
+async def test_google_signup_without_a_company_name_uses_their_name_and_never_collides(
+    client: AsyncClient, creds, providers: MockProviders, db_session: AsyncSession
+) -> None:
+    await _finish_login(client, providers, start_params={"mode": "signup"}, email="a@one.example.com", name="Priya Shah")
+    await _finish_login(client, providers, start_params={"mode": "signup"}, email="b@two.example.com", name="Priya Shah")
+    tenants = (await db_session.execute(select(Tenant))).scalars().all()
+    assert len(tenants) == 2 and {t.name for t in tenants} == {"Priya's workspace"}
+    assert len({t.slug for t in tenants}) == 2 and any(t.slug == "priya-s-workspace" for t in tenants)
+
+
+async def test_google_signup_for_an_email_that_already_has_an_account_just_signs_in(
+    client: AsyncClient, creds, providers: MockProviders, db_session: AsyncSession
+) -> None:
+    from packages.database.models import User
+
+    tokens = await _signup(client, slug="have-co", email="owner@logintest.com")
+    location = await _finish_login(client, providers, start_params={"mode": "signup", "company_name": "Another"})
+    frag = parse_qs(urlparse(location).fragment)
+    claims = jwt.decode(frag["access_token"][0], options={"verify_signature": False})
+    original = jwt.decode(tokens["access_token"], options={"verify_signature": False})
+    assert claims["sub"] == original["sub"] and claims["tenant_id"] == original["tenant_id"]
+    assert len((await db_session.execute(select(Tenant))).scalars().all()) == 1
+    assert len((await db_session.execute(select(User))).scalars().all()) == 1
+
+
+async def test_signup_never_runs_for_an_unverified_email_or_without_the_signup_mode(
+    client: AsyncClient, creds, providers: MockProviders, db_session: AsyncSession
+) -> None:
+    from packages.database.models import User
+
+    unverified = await _finish_login(client, providers, start_params={"mode": "signup"}, email="x@y.example.com", email_verified=False)
+    assert parse_qs(urlparse(unverified).query)["oauth_error"] == ["email_not_verified"]
+    plain = await _finish_login(client, providers, email="x@y.example.com")  # an ordinary sign-in
+    assert parse_qs(urlparse(plain).query)["oauth_error"] == ["no_account"]
+    assert (await db_session.execute(select(User))).scalars().all() == []
+    assert (await db_session.execute(select(Tenant))).scalars().all() == []
+
+
+async def test_signup_mode_inputs_are_validated(client: AsyncClient, creds) -> None:
+    assert (await client.get("/api/v1/auth/oauth/google/login", params={"mode": "admin"}, follow_redirects=False)).status_code == 422
+    too_long = await client.get("/api/v1/auth/oauth/google/login", params={"mode": "signup", "company_name": "x" * 200}, follow_redirects=False)
+    assert too_long.status_code == 422

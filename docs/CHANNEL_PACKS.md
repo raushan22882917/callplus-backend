@@ -6,15 +6,15 @@ Three packs, each paid for on its own, or all three together at a discount. A wo
 |---|---|---|---|
 | **Call** | ₹2,199 | 250 AI call minutes | outbound campaigns, call recording, 2 phone numbers, 2 calls at once, 100 outbound calls a day, 15 minute calls |
 | **WhatsApp** | ₹899 | 1,000 WhatsApp messages | |
-| **Email + SMS** | ₹449 | 3,000 customer emails and 500 SMS segments | |
-| **All three** | ₹3,192.30 (10% off ₹3,547) | the three allowances | |
+| **Email** | ₹799 | 5,000 customer emails | SMS is not in any pack |
+| **All three** | ₹3,507.30 (10% off ₹3,897) | the three allowances | |
 
 Any pack also gives the workspace 3 AI agents, 5 team members, 25 knowledge documents and 3 API keys.
 The prices and allowances are in `CATALOGUE` in `app/services/packs.py`. The bundle discount is
 `PACK_BUNDLE_DISCOUNT_PERCENT` (default 10, capped at 50). Only the full set of three gets it.
 The prices are the lowest round figures at which even the worst case (every call outbound, every WhatsApp message a
-marketing message) still earns a margin. At full use the margins are 29% (Call), 70% (WhatsApp) and 69% (Email + SMS), and
-49%, 81% and 81% at 60% use. Competitors, costs and assumptions are in `docs/PRICING_ANALYSIS.md`; rerun
+marketing message) still earns a margin. At full use the margins are 29% (Call), 70% (WhatsApp) and 92% (Email), and
+49%, 81% and 94% at 60% use. Email keeps 74% even at the stress cost (email at Resend Pro's per-email price with the plan full); `tests/test_pack_economics.py` fails if any pack stops covering its cost. Competitors, costs and assumptions are in `docs/PRICING_ANALYSIS.md`; rerun
 `python scripts/cost_model.py` whenever a provider's price or the exchange rate moves.
 
 ## How a workspace buys
@@ -35,9 +35,9 @@ allowance to the same window. A pack that has ended allows nothing until it is b
 ## What is enforced
 
 * A workspace with no Call pack cannot place or answer AI calls; with no WhatsApp pack it cannot send WhatsApp;
-  with no Email + SMS pack it cannot send customer email or SMS. The 402 says which pack to buy
+  with no Email pack it cannot send customer email. Texts (SMS) are not in any pack: a packs workspace that sends one gets `sms_not_in_packs` and must switch to pay as you go. The 402 says which pack to buy
   (`pack_required`) or that the allowance is used up (`pack_minutes_exhausted`, `pack_whatsapp_exhausted`,
-  `pack_email_exhausted`, `pack_sms_exhausted`). They are hard caps: nothing is billed past the allowance.
+  `pack_email_exhausted`). They are hard caps: nothing is billed past the allowance.
 * Usage is counted inside each pack's own 30 days, so what was used before buying never counts.
 * Only a workspace on **Free** (or already on packs) can buy. A workspace on a monthly plan, pay-as-you-go or legacy gets a
   409: two billing models never run at the same time. The first purchase moves a Free workspace onto packs.

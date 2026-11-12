@@ -101,6 +101,10 @@ celery_app.conf.beat_schedule = {
         "task": "campaigns.start_due",
         "schedule": 60.0,
     },
+    "email-autopilot": {
+        "task": "email.autopilot",
+        "schedule": 15 * 60.0,
+    },
     "mailbox-poll": {
         "task": "mailbox.poll",
         "schedule": 2 * 60.0,

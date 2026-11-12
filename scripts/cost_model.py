@@ -92,14 +92,22 @@ def free_tier_worst_case(minutes: int = 10, wa: int = 50) -> dict[str, float]:
 
 
 # --- Channel packs (docs/CHANNEL_PACKS.md) ---------------------------------
-# Email and SMS costs. Email through an SES-class API is $0.10 per 1,000; Resend's overage is
-# $0.90 per 1,000 and is the worst case. India SMS on a DLT route is about ₹0.11 to ₹0.35 a
-# segment (published 2026 rate cards).
-EMAIL_INR_EXPECTED = 0.10 / 1000 * USD_INR
-EMAIL_INR_WORST = 0.90 / 1000 * USD_INR
-SMS_INR_EXPECTED = 0.20
-SMS_INR_WORST = 0.35
+# What one customer email costs us depends on who sends it, so three cases are kept apart:
+#   expected  Amazon SES-class sending, $0.10 per 1,000 (SES works through the app's existing SMTP route)
+#   stress    Resend Pro with the whole plan used: $20 for 50,000 emails, so $0.40 per 1,000
+#   overage   Resend beyond its plan, $0.90 per 1,000. This only happens when ALL workspaces together send more
+#             than the plan holds, so it is a signal to move sending to SES, not a per-pack cost.
+# A pack must still earn a margin at the stress cost. SMS is not in any pack any more (it is pay as you go).
+SES_USD_PER_1K = 0.10
+RESEND_PRO_USD = 20.0
+RESEND_PRO_EMAILS = 50_000
+RESEND_OVERAGE_USD_PER_1K = 0.90
+EMAIL_INR_EXPECTED = SES_USD_PER_1K / 1000 * USD_INR
+EMAIL_INR_WORST = RESEND_PRO_USD / RESEND_PRO_EMAILS * USD_INR  # the stress case
+EMAIL_INR_OVERAGE = RESEND_OVERAGE_USD_PER_1K / 1000 * USD_INR
 PACK_NUMBERS = 2  # a Call pack unlocks two phone numbers
+# Every pack must keep at least this much of its price in the stress case: it pays for hosting, support and tax.
+STRESS_MARGIN_FLOOR = 0.10
 
 
 @dataclass(frozen=True)
@@ -109,7 +117,6 @@ class Pack:
     minutes: int = 0
     whatsapp: int = 0
     emails: int = 0
-    sms: int = 0
     numbers: int = 0
 
 
@@ -120,8 +127,7 @@ def pack_cost(
     minute = INBOUND * inbound_share + OUTBOUND * (1 - inbound_share)
     wa = WA_MARKETING_INR if worst else WA_BLENDED_INR
     email = EMAIL_INR_WORST if worst else EMAIL_INR_EXPECTED
-    sms = SMS_INR_WORST if worst else SMS_INR_EXPECTED
-    variable = pack.minutes * minute + pack.whatsapp * wa + pack.emails * email + pack.sms * sms
+    variable = pack.minutes * minute + pack.whatsapp * wa + pack.emails * email
     return variable * use + pack.numbers * NUMBER_INR + pack.price * RAZORPAY_FEE
 
 
@@ -132,12 +138,12 @@ def pack_margin(pack: Pack, use: float, **kw) -> float:
 CURRENT_PACKS = [
     Pack("Call", 2499, minutes=250, numbers=PACK_NUMBERS),
     Pack("WhatsApp", 1499, whatsapp=1000),
-    Pack("Email + SMS", 999, emails=3000, sms=500),
+    Pack("Email", 999, emails=3000),
 ]
 PROPOSED_PACKS = [
     Pack("Call", 2199, minutes=250, numbers=PACK_NUMBERS),
     Pack("WhatsApp", 899, whatsapp=1000),
-    Pack("Email + SMS", 449, emails=3000, sms=500),
+    Pack("Email", 799, emails=5000),
 ]
 
 
@@ -207,11 +213,69 @@ def main() -> None:
     print("  Sarvam voice-agent bundle is 3.50 plus 0.40 telephony = 3.90, dearer than this")
 
 
+# --- Email competitors (USD list prices, 12 Nov 2026) ---------------------------------------------
+# Mostly from comparison sites, which disagree with each other; check the vendor page before quoting one to a
+# customer. Each row is the cheapest PAID plan that covers at least 5,000 emails a month (so our 5,000 compares
+# like for like). "kind": api = sending only, no campaign editor or reports; platform = a full marketing tool.
+EMAIL_COMPARE_EMAILS = 5000
+EMAIL_COMPETITORS = [
+    # name, kind, price (USD unless inr), emails covered, note
+    ("Amazon SES", "api", 0.10 * EMAIL_COMPARE_EMAILS / 1000, EMAIL_COMPARE_EMAILS, "pay per email; no editor, no list tools"),
+    ("Zoho Campaigns (India)", "platform", None, 500, "about ₹225 a month for 500 contacts; ₹150 for 2,000 on some resellers"),
+    ("Mailchimp Essentials", "platform", 13.0, 5000, "500 contacts; $75 at 5,000 contacts"),
+    ("MailerLite Growing Business", "platform", 10.0, 5000, "500 subscribers; about $15 at 1,000 (unverified)"),
+    ("Brevo Starter", "platform", 9.0, 5000, "plus about $9 a month to remove the Brevo logo"),
+    ("Postmark Basic", "api", 15.0, 10000, "transactional only"),
+    ("Mailgun Basic", "api", 15.0, 10000, "sending only"),
+    ("SendGrid Essentials", "api", 19.95, 50000, "free plan is now a 60 day trial"),
+    ("Resend Pro", "api", 20.0, 50000, "3,000 a month free"),
+]
+ZOHO_INR = 225.0
+
+
+def competitor_inr(row) -> float:
+    name, _, usd, _, _ = row
+    return ZOHO_INR if usd is None else usd * USD_INR
+
+
+def print_email_comparison() -> None:
+    ours = next(p for p in PROPOSED_PACKS if p.emails)
+    print("EMAIL: WHAT OTHERS CHARGE FOR THEIR CHEAPEST PAID PLAN THAT COVERS ABOUT 5,000 EMAILS")
+    print(f"  {'seller':30s}{'kind':>10s}{'₹ / month':>11s}{'emails':>9s}{'₹ per 1,000':>13s}")
+    print(f"  {'Us, Email pack':30s}{'platform':>10s}{ours.price:11,.0f}{ours.emails:9,d}{ours.price / ours.emails * 1000:13.1f}")
+    for row in EMAIL_COMPETITORS:
+        inr = competitor_inr(row)
+        print(f"  {row[0]:30s}{row[1]:>10s}{inr:11,.0f}{row[3]:9,d}{inr / row[3] * 1000:13.1f}   {row[4]}")
+    print()
+
+    print("EMAIL: WHAT SENDING COSTS US PER 1,000 (₹)")
+    print(f"  expected (SES) {EMAIL_INR_EXPECTED * 1000:6.1f}   stress (Resend Pro, plan full) {EMAIL_INR_WORST * 1000:6.1f}   "
+          f"Resend overage {EMAIL_INR_OVERAGE * 1000:6.1f}")
+    for p in PROPOSED_PACKS:
+        if not p.emails:
+            continue
+        stress = pack_margin(p, 1.0, worst=True, inbound_share=INBOUND_SHARE)
+        expected = pack_margin(p, 1.0)
+        spare = p.price * (1 - STRESS_MARGIN_FLOOR) - p.price * RAZORPAY_FEE
+        print(f"  {p.name}: margin at full use {expected:.0%} expected, {stress:.0%} stress "
+              f"(floor {STRESS_MARGIN_FLOOR:.0%}). At this price, up to "
+              f"{int(spare / EMAIL_INR_WORST):,d} emails still clear the floor.")
+    resend_plan_inr = RESEND_PRO_USD * USD_INR
+    mail = next(p for p in PROPOSED_PACKS if p.emails)
+    contribution = mail.price - mail.emails * EMAIL_INR_EXPECTED - mail.price * RAZORPAY_FEE
+    print(f"  A Resend Pro plan is a flat ₹{resend_plan_inr:,.0f} a month however little is sent. Each Email pack customer "
+          f"leaves ₹{contribution:,.0f} after sending and the payment fee, so {resend_plan_inr / contribution:.1f} customers pay for it. "
+          f"Below that, send through SES (no monthly fee).")
+    print(f"  Total volume across all workspaces beyond {RESEND_PRO_EMAILS:,d} a month is billed at ₹{EMAIL_INR_OVERAGE * 1000:.0f} per 1,000 "
+          f"on Resend: move to SES before that.\n")
+
+
 if __name__ == "__main__":
     main()
     print()
     print("CHANNEL PACKS: gross margin by use of the allowance")
     print("  (worst case: every call outbound, every WhatsApp a marketing message,")
-    print("   SMS at 0.35, email at overage rates)")
+    print("   email at the stress cost: Resend Pro with its plan full)")
     print_packs("  Current prices", CURRENT_PACKS)
     print_packs("  Proposed prices", PROPOSED_PACKS)
+    print_email_comparison()
