@@ -46,6 +46,7 @@ from packages.database.models import (
     MessageDirection,
     MessageSender,
     Tenant,
+    TenantUser,
     User,
 )
 from packages.database.models import platform as platform_models  # noqa: F401
@@ -1017,6 +1018,50 @@ async def test_sso_config_and_provisioning(client: AsyncClient, db_session: Asyn
         await sso.provision_user(db_session, tenant, config, {"email": "x@evil.com"})
 
 
+async def test_workspace_sso_cannot_take_over_accounts_outside_the_workspace(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """The workspace admin picks the identity provider, so it can claim any email. It must not sign in
+    someone else's account, a platform admin, or count as proof of the address."""
+    await _signup(client, "victim-co", email="victim@victim-co.com")
+    h = _auth(await _signup(client, "attacker-co", email="boss@attacker-co.com"))
+    put = await client.put(
+        "/api/v1/platform/sso/config",
+        headers=h,
+        json={"issuer": "https://idp.attacker.example", "client_id": "cid", "client_secret": "shh",
+              "default_role_name": "AGENT"},
+    )
+    assert put.status_code == 200, put.text
+    tenant, config = await sso.load_config(db_session, "attacker-co")
+
+    victim = (await db_session.execute(select(User).where(User.email == "victim@victim-co.com"))).scalar_one()
+    old_hash = victim.hashed_password
+    with pytest.raises(sso.SsoError, match="outside this workspace"):
+        await sso.provision_user(db_session, tenant, config, {"email": "victim@victim-co.com"})
+    await db_session.refresh(victim)
+    assert victim.hashed_password == old_hash and victim.email_verified_at is None
+
+    # Its own owner (only this workspace) may sign in, but that proves nothing about the address.
+    own = await sso.provision_user(db_session, tenant, config, {"email": "boss@attacker-co.com"})
+    boss = await db_session.get(User, own.user_id)
+    assert boss.email_verified_at is None
+
+    # A new account made through the workspace's provider is not proven either.
+    fresh = await sso.provision_user(db_session, tenant, config, {"email": "operator@platform.example"})
+    assert (await db_session.get(User, fresh.user_id)).email_verified_at is None
+
+    # A member who also belongs elsewhere: the session could switch workspaces, so SSO refuses.
+    db_session.add(TenantUser(tenant_id=tenant.id, user_id=victim.id, role_id=own.role_id))
+    await db_session.flush()
+    with pytest.raises(sso.SsoError, match="another workspace"):
+        await sso.provision_user(db_session, tenant, config, {"email": "victim@victim-co.com"})
+
+    boss.is_platform_admin = True
+    await db_session.flush()
+    with pytest.raises(sso.SsoError, match="cannot sign in with workspace SSO"):
+        await sso.provision_user(db_session, tenant, config, {"email": "boss@attacker-co.com"})
+
+
 async def test_usage_endpoint_and_pricing_plan_crud(client: AsyncClient) -> None:
     tokens = await _signup(client, "usage-co")
     h = _auth(tokens)
@@ -1077,7 +1122,8 @@ async def test_super_admin_access_and_tenant_status(
     ah, oh = _auth(admin_tokens), _auth(other_tokens)
 
     first = (await client.get("/api/v1/platform/admin/me", headers=ah)).json()
-    assert first["is_platform_admin"] is False and first["claim_open"] is True
+    # Nobody is an admin yet, but being first is not enough: this account is not on the allowlist.
+    assert first["is_platform_admin"] is False and first["claim_open"] is False
     assert (await client.get("/api/v1/platform/admin/tenants", headers=ah)).status_code == 403
 
     admin_user = (
@@ -1211,3 +1257,33 @@ async def test_non_admin_role_cannot_manage_security(client: AsyncClient) -> Non
     # Unauthenticated callers are rejected before any handler runs.
     assert (await client.get("/api/v1/platform/security/settings")).status_code == 401
     assert (await client.get("/api/v1/platform/usage")).status_code == 401
+
+
+async def test_platform_admin_claim_needs_the_allowlist_and_a_proven_email(
+    client: AsyncClient, db_session: AsyncSession, monkeypatch
+) -> None:
+    from app.core.config import get_settings
+
+    stranger = _auth(await _signup(client, "stranger-co"))
+    operator = _auth(await _signup(client, "operator-co"))
+
+    # Fresh system, empty allowlist: nobody can take control, however early they sign up.
+    assert (await client.post("/api/v1/platform/admin/claim", headers=stranger)).status_code == 403
+
+    monkeypatch.setattr(get_settings(), "platform_admin_emails", " Owner@Operator-Co.com , other@example.com")
+    assert (await client.post("/api/v1/platform/admin/claim", headers=stranger)).status_code == 403
+    assert (await client.get("/api/v1/platform/admin/me", headers=stranger)).json()["claim_open"] is False
+
+    # Listed, but a password signup has not proved the address: someone else could have registered it first.
+    assert (await client.post("/api/v1/platform/admin/claim", headers=operator)).status_code == 403
+    assert (await client.get("/api/v1/platform/admin/me", headers=operator)).json()["claim_open"] is False
+
+    user = (await db_session.execute(select(User).where(User.email == "owner@operator-co.com"))).scalar_one()
+    user.email_verified_at = datetime.now(UTC)
+    await db_session.commit()
+
+    assert (await client.get("/api/v1/platform/admin/me", headers=operator)).json()["claim_open"] is True
+    claimed = await client.post("/api/v1/platform/admin/claim", headers=operator)
+    assert claimed.status_code == 200 and claimed.json() == {"is_platform_admin": True}
+    assert (await client.get("/api/v1/platform/admin/tenants", headers=operator)).status_code == 200
+    assert (await client.post("/api/v1/platform/admin/claim", headers=stranger)).status_code == 403

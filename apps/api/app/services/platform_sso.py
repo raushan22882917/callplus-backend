@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.database.models import MembershipStatus, Role, Tenant, TenantUser, User
-from packages.database.models.platform import SsoConfig
+from packages.database.models.platform import PlatformAdmin, SsoConfig
 
 STATE_TYPE = "sso_state"
 HTTP_TIMEOUT = 10.0
@@ -181,11 +181,25 @@ async def verify_id_token(
     return claims
 
 
+async def _is_platform_admin(db: AsyncSession, user: User) -> bool:
+    if user.is_platform_admin:
+        return True
+    return (
+        await db.execute(select(PlatformAdmin.id).where(PlatformAdmin.user_id == user.id))
+    ).scalar_one_or_none() is not None
+
+
 async def provision_user(
     db: AsyncSession, tenant: Tenant, config: SsoConfig, claims: dict[str, Any]
 ) -> TenantUser:
     """Find or create the user by email and make sure they are an active
-    member of this tenant (new members get config.default_role_name)."""
+    member of this tenant (new members get config.default_role_name).
+
+    The identity provider here is one the workspace's own admin set up, so it can name any email it
+    likes. It is trusted only for accounts that live entirely inside this workspace: a brand-new
+    account, or one whose only membership is this workspace. It never signs in a platform admin or an
+    account that belongs to another workspace (the session could switch there), and it does not count
+    as proof of who owns the address (see app/services/email_proof.py)."""
     email = claims["email"].lower()
     domains = [d.lower().lstrip("@") for d in config.allowed_email_domains]
     if domains and email.rsplit("@", 1)[-1] not in domains:
@@ -199,12 +213,28 @@ async def provision_user(
             # (it can still use password reset to set one).
             hashed_password=hash_password(secrets.token_urlsafe(32)),
             full_name=claims.get("name") or email.split("@")[0],
-            email_verified_at=datetime.now(UTC),
+            # Not marked verified: a workspace's own provider is not proof for the whole platform.
         )
         db.add(user)
         await db.flush()
     elif not user.is_active:
         raise SsoError("This account is disabled")
+    else:
+        if await _is_platform_admin(db, user):
+            raise SsoError("This account cannot sign in with workspace SSO; use your password")
+        tenant_ids = set(
+            (await db.execute(select(TenantUser.tenant_id).where(TenantUser.user_id == user.id))).scalars().all()
+        )
+        if tenant.id not in tenant_ids:
+            raise SsoError(
+                "An account with this email already exists outside this workspace. "
+                "Ask a workspace admin to invite you, then sign in with SSO."
+            )
+        if tenant_ids != {tenant.id}:
+            raise SsoError(
+                "This account also belongs to another workspace, so workspace SSO cannot sign it in. "
+                "Sign in with your password, Google or Microsoft."
+            )
 
     membership = (
         await db.execute(
