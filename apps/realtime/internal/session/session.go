@@ -32,6 +32,9 @@ type Config struct {
 	DefaultLanguage string
 	StreamReplies   bool
 	TTSWebSocket    bool
+	// AllowUnsignedStreams turns off the signature check on carrier streams (see streamauth.go).
+	// Only for local development and load tests against a stub backend; never in production.
+	AllowUnsignedStreams bool
 }
 
 type Session struct {
@@ -56,6 +59,7 @@ type Session struct {
 	// is what lets that carrier's flow move on to its hang-up step.
 	closeOnFinalize bool
 
+	started   bool // a start message was accepted; a second one is ignored
 	streamSID string
 	callID    string
 	startedAt time.Time
@@ -138,9 +142,15 @@ const readIdleTimeout = 30 * time.Second
 // the peer goes idle for readIdleTimeout.
 func (s *Session) Run() {
 	defer s.cleanup()
+	defer s.recoverPanic("read loop")
+	s.conn.SetReadLimit(maxFrameBytes)
 
 	for {
-		_ = s.conn.SetReadDeadline(time.Now().Add(readIdleTimeout))
+		timeout := readIdleTimeout
+		if !s.started {
+			timeout = startTimeout // a socket that never starts a call must not hold a slot
+		}
+		_ = s.conn.SetReadDeadline(time.Now().Add(timeout))
 		_, raw, err := s.conn.ReadMessage()
 		if err != nil {
 			log.Printf("[session %s] twilio read error: %v", s.callID, err)
@@ -155,7 +165,9 @@ func (s *Session) Run() {
 
 		switch msg.Event {
 		case "start":
-			s.handleStart(msg.Start)
+			if !s.handleStart(msg.Start) {
+				return
+			}
 		case "media":
 			s.handleMedia(msg.Media)
 		case "mark":
@@ -184,9 +196,26 @@ func (s *Session) sendTestEvent(event string, data any) {
 	}
 }
 
-func (s *Session) handleStart(start *twilio.StartPayload) {
+// handleStart sets the call up. It returns false when the stream must be dropped: a start message
+// with no body, or a carrier stream that does not carry the API's signature for its call.
+func (s *Session) handleStart(start *twilio.StartPayload) bool {
+	if s.started {
+		return true // one call per socket: a repeated start is ignored
+	}
+	if start == nil {
+		log.Printf("[session] start message without a body, closing")
+		return false
+	}
 	s.streamSID = start.StreamSID
 	s.callID = start.CustomParameters["callId"]
+	// Web calls and browser tests were checked before the socket opened (see main.go) and take their
+	// id from the signed address, so only a carrier stream is checked here.
+	if s.webCallID == "" && !s.browserTest && !s.streamAuthorized(start.CustomParameters) {
+		log.Printf("[session %s] stream rejected: missing or invalid signature", s.callID)
+		s.callID = "" // not a call we accepted: nothing to finalize
+		return false
+	}
+	s.started = true
 	s.closeOnFinalize = start.CustomParameters["closeOnFinalize"] == "1"
 	if s.webCallID != "" {
 		s.callID = s.webCallID
@@ -209,7 +238,7 @@ func (s *Session) handleStart(start *twilio.StartPayload) {
 		log.Printf("[session %s] browser test rejected: %v", s.callID, err)
 		s.sendTestEvent("cb_error", map[string]any{"message": "This test session is invalid or expired. Start the test again."})
 		_ = s.conn.Close()
-		return
+		return false
 	}
 	if err != nil {
 		log.Printf("[session %s] failed to fetch call config, using gateway defaults: %v", s.callID, err)
@@ -263,7 +292,7 @@ func (s *Session) handleStart(start *twilio.StartPayload) {
 			"I'm sorry, we're having technical difficulties. Please call back in a few minutes.",
 			"stt_unavailable",
 		)
-		return
+		return true
 	}
 	s.stt = stt
 
@@ -272,10 +301,12 @@ func (s *Session) handleStart(start *twilio.StartPayload) {
 	// Off the Twilio read loop: synthesizing the greeting must not stop us
 	// reading (and forwarding) the caller's audio.
 	go func() {
+		defer s.recoverPanic("greeting")
 		s.speak(callConfig.Greeting)
 		s.touchActivity()
 	}()
 	s.touchActivity()
+	return true
 }
 
 func (s *Session) handleMedia(media *twilio.MediaPayload) {
@@ -288,6 +319,7 @@ func (s *Session) handleMedia(media *twilio.MediaPayload) {
 }
 
 func (s *Session) readTranscripts() {
+	defer s.recoverPanic("transcripts")
 	for {
 		ev, err := s.stt.Next()
 		if err != nil {
@@ -368,6 +400,7 @@ func (s *Session) touchActivity() {
 // bounded, and so is total call length even if every turn otherwise
 // succeeds.
 func (s *Session) runWatchdog() {
+	defer s.recoverPanic("watchdog")
 	ticker := time.NewTicker(watchdogInterval)
 	defer ticker.Stop()
 	for {

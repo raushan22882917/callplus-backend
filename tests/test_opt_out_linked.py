@@ -132,6 +132,11 @@ async def test_whatsapp_campaign_skips_numbers_on_the_do_not_disturb_list(
     for cid in (customer_id, other_id):
         db_session.add(CampaignContact(tenant_id=tenant_id, campaign_id=campaign_id, customer_id=cid))
     db_session.add(DndEntry(tenant_id=tenant_id, e164_number=PHONE, source="opt_out_linked"))
+    # A marketing template goes only to people who opted in, so "Other" has agreed.
+    from app.services import privacy
+
+    await privacy.record_consent(db_session, tenant_id, purposes=["marketing"], source="staff", business="Biz",
+                                 phone="+919800000002")
     await db_session.commit()
     sent: list[str] = []
 

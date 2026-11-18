@@ -17,6 +17,11 @@
 	request_body {
 		max_size 12MB
 	}
+	# security.txt is a page of the website, so it goes to the dashboard app even though the rest of /.well-known/ is the API's
+	@securitytxt path /.well-known/security.txt
+	handle @securitytxt {
+		reverse_proxy frontend:3000
+	}
 	@backend path /api/* /mcp /mcp/* /oauth/* /.well-known/* /healthz
 	handle @backend {
 		reverse_proxy api:8000 {
@@ -30,6 +35,8 @@
 
 # Twilio's live-call audio stream (a WebSocket; Caddy proxies upgrades by itself)
 {$REALTIME_DOMAIN} {
+	# /statz (calls now, peak, turned away) is for the server itself, not the internet
+	respond /statz 404
 	reverse_proxy realtime:9000 {
 		header_up X-Forwarded-For {remote_host}
 	}

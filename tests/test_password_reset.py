@@ -87,9 +87,25 @@ async def test_forgot_password_reset_password_then_login(client: AsyncClient) ->
 async def test_signup_does_not_ask_for_email_confirmation(client: AsyncClient) -> None:
     tokens = await _signup(client, slug="verify-co", email="owner@verify-co.com")
     user = await _load_user_by_email("owner@verify-co.com")
-    assert user.email_verified_at is not None
+    # Nobody is asked to confirm, and nobody has: the address is not recorded as proven.
+    assert user.email_verified_at is None
 
     me = await client.get("/api/v1/users/me", headers=_auth(tokens))
     assert me.status_code == 200
     assert (await client.post("/api/v1/auth/verify-email", json={"token": "unused"})).status_code == 404
     assert (await client.post("/api/v1/auth/resend-verification", headers=_auth(tokens))).status_code == 404
+
+
+async def test_finishing_a_password_reset_proves_the_email(client: AsyncClient) -> None:
+    await _signup(client, slug="proof-co", email="owner@proof-co.com")
+    user = await _load_user_by_email("owner@proof-co.com")
+    assert user.email_verified_at is None
+    token = create_purpose_token(
+        user_id=user.id,
+        purpose="password_reset",
+        expires_delta=timedelta(minutes=30),
+        fingerprint=password_fingerprint(user.hashed_password),
+    )
+    resp = await client.post("/api/v1/auth/reset-password", json={"token": token, "new_password": "newpass123"})
+    assert resp.status_code == 200, resp.text
+    assert (await _load_user_by_email("owner@proof-co.com")).email_verified_at is not None

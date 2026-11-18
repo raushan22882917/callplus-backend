@@ -1044,3 +1044,35 @@ async def test_signup_mode_inputs_are_validated(client: AsyncClient, creds) -> N
     assert (await client.get("/api/v1/auth/oauth/google/login", params={"mode": "admin"}, follow_redirects=False)).status_code == 422
     too_long = await client.get("/api/v1/auth/oauth/google/login", params={"mode": "signup", "company_name": "x" * 200}, follow_redirects=False)
     assert too_long.status_code == 422
+
+
+async def test_provider_sign_in_takes_an_unproven_account_away_from_whoever_registered_it(
+    client: AsyncClient, creds, providers: MockProviders, db_session: AsyncSession
+) -> None:
+    """Someone registers another person's address with a password before that person arrives. When the
+    real owner signs in with Google, the earlier password and sessions must stop working."""
+    from packages.database.models import AuditLog, User
+
+    squatter = await _signup(client, slug="have-co", email="owner@logintest.com")
+    assert (await client.get("/api/v1/users/me", headers=_auth(squatter))).status_code == 200
+
+    location = await _finish_login(client, providers)
+    frag = parse_qs(urlparse(location).fragment)
+    owner = {"Authorization": f"Bearer {frag['access_token'][0]}"}
+    assert (await client.get("/api/v1/users/me", headers=owner)).status_code == 200
+
+    assert (await client.get("/api/v1/users/me", headers=_auth(squatter))).status_code == 401
+    old_login = await client.post(
+        "/api/v1/auth/login", json={"email": "owner@logintest.com", "password": "supersecret1"}
+    )
+    assert old_login.status_code == 401
+    user = (await db_session.execute(select(User))).scalar_one()
+    assert user.email_verified_at is not None
+    actions = [row.action for row in (await db_session.execute(select(AuditLog))).scalars().all()]
+    assert "account.secured_on_first_proof" in actions
+
+    # A second provider sign-in changes nothing more: the address is proven now.
+    await _finish_login(client, providers)
+    assert (await client.get("/api/v1/users/me", headers=owner)).status_code == 200
+    actions = [row.action for row in (await db_session.execute(select(AuditLog))).scalars().all()]
+    assert actions.count("account.secured_on_first_proof") == 1

@@ -118,7 +118,10 @@ func (s *Session) speakStream(sentences <-chan string, stale func() bool) time.T
 	first, played := pipeline(
 		sentences,
 		s.synthesize,
-		func(audio string) { s.sendAudio(audio, false) },
+		func(audio string) {
+			defer s.recoverPanic("playback") // runs on the pipeline's own goroutine
+			s.sendAudio(audio, false)
+		},
 		interrupted,
 		s.appendAgentText,
 	)
@@ -142,7 +145,10 @@ func (s *Session) streamingTurn(
 	onSentence := func(sentence string) {
 		once.Do(func() {
 			stopFiller() // the first words are here; no "one moment" needed
-			go func() { spoke <- s.speakStream(sentences, stale) }()
+			go func() {
+				defer s.recoverPanic("reply")
+				spoke <- s.speakStream(sentences, stale)
+			}()
 		})
 		sentences <- sentence
 	}

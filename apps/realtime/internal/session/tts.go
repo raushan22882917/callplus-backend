@@ -36,6 +36,7 @@ func (s *Session) socketFor(language string) *sarvam.TTSSocket {
 
 // warmTTS opens the connections a reply is most likely to need.
 func (s *Session) warmTTS() {
+	defer s.recoverPanic("tts warm-up")
 	for _, language := range uniqueStrings(fallbackLanguage(s.language), "en-IN") {
 		sock := s.socketFor(language)
 		if sock == nil {
@@ -80,6 +81,7 @@ func (s *Session) synthesize(chunk string) <-chan ttsResult {
 	out := make(chan ttsResult, 64)
 	go func() {
 		defer close(out)
+		defer s.recoverPanic("tts")
 		if sock := s.socketFor(language); sock != nil {
 			delivered, err := sock.Stream(chunk, func(audio string) { out <- ttsResult{audio: audio} })
 			if err == nil {
@@ -116,6 +118,7 @@ func (s *Session) synthesizeEleven(chunk string) <-chan ttsResult {
 	out := make(chan ttsResult, 64)
 	go func() {
 		defer close(out)
+		defer s.recoverPanic("tts")
 		if _, err := s.eleven.Stream(chunk, s.voice, func(audio string) { out <- ttsResult{audio: audio} }); err != nil {
 			log.Printf("[session %s] elevenlabs tts failed: %v", s.callID, err)
 			out <- ttsResult{err: err}
@@ -131,6 +134,7 @@ func (s *Session) synthesizeClone(chunk string) <-chan ttsResult {
 	out := make(chan ttsResult, 64)
 	go func() {
 		defer close(out)
+		defer s.recoverPanic("tts")
 		if _, err := s.cloneTTS.Stream(chunk, s.voice, language, func(audio string) { out <- ttsResult{audio: audio} }); err != nil {
 			log.Printf("[session %s] sarvam cloned-voice tts failed: %v", s.callID, err)
 			out <- ttsResult{err: err}

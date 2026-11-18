@@ -16,7 +16,7 @@ from app.integrations.credentials import SharedAccountError, require_own_twilio
 from app.integrations.email_client import send_email
 from app.integrations.twilio_client import TwilioClientError, place_outbound_call
 from app.integrations.whatsapp import WhatsAppAPIError, send_template_message
-from app.services import dialer, email_compliance, email_tracking, exotel, plans, privacy, telephony_plus
+from app.services import dialer, email_compliance, email_tracking, exotel, plans, privacy, telephony_plus, whatsapp_consent
 from app.services.cost_controls import SpendGuardError, guard_outbound
 from app.services.voicemail_detection import amd_callback_for_agent
 from app.services.webhooks import enqueue_webhook_event
@@ -91,6 +91,9 @@ async def _run_campaign(campaign_id: str) -> None:
         settings = get_settings()
         interval = _campaign_interval(settings, campaign.channel)
         requires_consent = False
+        wa_needs_consent = False
+        if campaign.channel == CampaignChannel.WHATSAPP:
+            wa_needs_consent = await whatsapp_consent.needs_consent(db, campaign.tenant_id, campaign.whatsapp_template_name)
         if campaign.channel == CampaignChannel.EMAIL:
             requires_consent = (await email_compliance.profile(db, campaign.tenant_id)).email_marketing_requires_consent
 
@@ -136,6 +139,14 @@ async def _run_campaign(campaign_id: str) -> None:
                 if on_dnd:
                     contact.status = CampaignContactStatus.FAILED
                     contact.result = {"error": "number is on the do-not-disturb list", "skipped": True}
+                    contact.attempted_at = datetime.now(UTC)
+                    continue
+                # Checked per contact too, so a consent withdrawn mid-run stops the next send.
+                if wa_needs_consent and not await whatsapp_consent.has_marketing_consent(
+                    db, campaign.tenant_id, customer.phone
+                ):
+                    contact.status = CampaignContactStatus.FAILED
+                    contact.result = {"error": "no WhatsApp marketing opt-in on record", "skipped": True}
                     contact.attempted_at = datetime.now(UTC)
                     continue
 

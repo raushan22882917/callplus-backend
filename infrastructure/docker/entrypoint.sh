@@ -18,4 +18,8 @@ if [ -n "${MIGRATION_DATABASE_URL:-}" ]; then
 else
   uv run --no-sync alembic upgrade head
 fi
-exec uv run --no-sync uvicorn app.main:app --host 0.0.0.0 --port 8000 --app-dir apps/api
+# UVICORN_WORKERS: one process per CPU core is a good start. Rate limits live in Redis, so
+# several workers share them. Size DB_POOL_SIZE + DB_MAX_OVERFLOW so workers x total stays
+# under Postgres max_connections.
+exec uv run --no-sync uvicorn app.main:app --host 0.0.0.0 --port 8000 --app-dir apps/api \
+  --workers "${UVICORN_WORKERS:-1}" --timeout-keep-alive 30

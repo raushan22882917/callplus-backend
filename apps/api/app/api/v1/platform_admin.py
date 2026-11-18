@@ -18,7 +18,7 @@ from app.schemas.platform import (
     AdminTenantDetail,
     AdminTenantRow,
 )
-from app.services import plans
+from app.services import email_proof, plans
 from app.services.platform_usage import usage_summary
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select, text
@@ -68,6 +68,25 @@ async def _control_is_open(db: AsyncSession) -> bool:
     return flagged == 0 and listed == 0
 
 
+def _claim_allowlist() -> set[str]:
+    return {e.strip().lower() for e in get_settings().platform_admin_emails.split(",") if e.strip()}
+
+
+async def _may_claim(db: AsyncSession, ctx: RequestContext) -> bool:
+    """Taking control needs more than being first. Signup is public, so the operator names who may
+    do it in PLATFORM_ADMIN_EMAILS, and the account must have proved it owns that address: otherwise
+    anyone could register the operator's email before the operator does."""
+    if ctx.api_key_id is not None:
+        return False
+    user = await db.get(User, ctx.user_id)
+    return (
+        user is not None
+        and user.is_active
+        and email_proof.is_proven(user)
+        and user.email.lower() in _claim_allowlist()
+    )
+
+
 @router.get("/me")
 async def admin_me(
     ctx: RequestContext = Depends(get_current_context), db: AsyncSession = Depends(get_db)
@@ -75,7 +94,7 @@ async def admin_me(
     """Lets the frontend decide whether to show the admin area."""
     return {
         "is_platform_admin": await is_super_admin(db, ctx),
-        "claim_open": await _control_is_open(db),
+        "claim_open": await _control_is_open(db) and await _may_claim(db, ctx),
     }
 
 
@@ -83,12 +102,18 @@ async def admin_me(
 async def claim_platform_admin(
     ctx: RequestContext = Depends(get_current_context), db: AsyncSession = Depends(get_db)
 ) -> dict[str, bool]:
-    """Hands control to the signed-in account only while nobody is a platform admin.
+    """Hands control to the signed-in account only while nobody is a platform admin, and only if the
+    operator listed its email in PLATFORM_ADMIN_EMAILS and that email is proven (see _may_claim).
     After that, Operators is the only way to add another admin."""
     if ctx.api_key_id is not None:
         raise PermissionDeniedError("Sign in with your account to take control")
     if await is_super_admin(db, ctx):
         return {"is_platform_admin": True}
+    if not await _may_claim(db, ctx):
+        raise PermissionDeniedError(
+            "This account cannot take control. Its email must be listed in PLATFORM_ADMIN_EMAILS on the "
+            "server and confirmed, by signing in with Google or Microsoft or by completing Forgot password."
+        )
     await db.execute(text("SELECT pg_advisory_xact_lock(814201)"))
     if not await _control_is_open(db):
         raise HTTPException(status.HTTP_409_CONFLICT, "A platform admin already controls this system")

@@ -23,7 +23,7 @@ from app.integrations.oauth import state as state_mod
 from app.integrations.oauth.errors import OAuthError
 from app.integrations.oauth.http import new_client
 from app.integrations.oauth.providers import get_provider
-from app.services import workspace_signup
+from app.services import email_proof, workspace_signup
 from app.services.platform_totp import get_enabled_totp
 from app.services.user_sessions import alert_new_sign_in, create_session
 from fastapi import APIRouter, Depends, Query, Request
@@ -140,10 +140,18 @@ async def oauth_callback(
                     "This account uses two-factor authentication; sign in with your password and code.",
                     status_code=403,
                 )
-        if user.email_verified_at is None:
-            from datetime import UTC, datetime
-
-            user.email_verified_at = datetime.now(UTC)  # the IdP verified it
+        # The provider vouches for the address. If nobody had proved it before, the password and
+        # sessions on the account were set up by someone unproven and are dropped here.
+        if await email_proof.claim_for_proven_owner(db, user):
+            await log_audit_event(
+                db,
+                tenant_id=membership.tenant_id,
+                actor_user_id=user.id,
+                action="account.secured_on_first_proof",
+                resource_type="user",
+                resource_id=user.id,
+                extra={"provider": provider},
+            )
         await log_audit_event(
             db,
             tenant_id=membership.tenant_id,

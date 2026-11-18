@@ -53,4 +53,16 @@ echo "==> waiting for the API"
 ssh "${SSH_OPTS[@]}" "$TARGET" "cd $REMOTE/app/deploy/digitalocean && for i in \$(seq 1 40); do \
   s=\$(docker compose -f docker-compose.prod.yml ps api --format '{{.Health}}'); [ \"\$s\" = healthy ] && break; sleep 5; done; \
   echo api: \$s; docker compose -f docker-compose.prod.yml ps"
-echo "Done. Dashboard: https://\$(grep ^APP_DOMAIN= '$HERE/.env' 2>/dev/null | cut -d= -f2 || echo your-app-domain)"
+# Caddy reads its Caddyfile through a single-file mount. rsync replaces that file, and the running
+# container keeps seeing the old one until it is restarted, so a changed Caddyfile never took effect.
+echo "==> checking Caddy's config is current"
+ssh "${SSH_OPTS[@]}" "$TARGET" "cd $REMOTE/app/deploy/digitalocean && \
+  a=\$(md5sum < Caddyfile); b=\$(docker exec \$(docker compose -f docker-compose.prod.yml ps -q caddy) cat /etc/caddy/Caddyfile 2>/dev/null | md5sum); \
+  if [ \"\$a\" != \"\$b\" ]; then echo 'Caddyfile changed: restarting Caddy (a second of downtime)'; docker compose -f docker-compose.prod.yml restart caddy; else echo 'Caddy is current'; fi"
+APP_DOMAIN_VALUE=$(grep ^APP_DOMAIN= "$HERE/.env" 2>/dev/null | cut -d= -f2)
+case "$APP_DOMAIN_VALUE" in
+  http://*|https://*) DASHBOARD_URL="$APP_DOMAIN_VALUE" ;;
+  "") DASHBOARD_URL="your-app-domain" ;;
+  *) DASHBOARD_URL="https://$APP_DOMAIN_VALUE" ;;
+esac
+echo "Done. Dashboard: $DASHBOARD_URL"

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -21,6 +22,9 @@ type Config struct {
 	// EngineURL is the gateway's own Twilio-shaped endpoint, e.g. ws://127.0.0.1:9000/ws/twilio.
 	EngineURL string
 	Start     StartFunc
+	// Sign returns the extra start parameters that prove to the engine this call was accepted by the
+	// backend (see session.SignStream). Nil in tests that run without the check.
+	Sign func(callID string) map[string]string
 }
 
 // Handle bridges one Exotel call until either side hangs up. streamKey is the secret from the
@@ -48,6 +52,7 @@ type bridge struct {
 
 func (b *bridge) run() {
 	defer b.close()
+	defer b.recoverPanic()
 	for {
 		_ = b.ex.SetReadDeadline(time.Now().Add(idleTimeout))
 		_, raw, err := b.ex.ReadMessage()
@@ -101,6 +106,12 @@ func (b *bridge) handleStart(m inbound) bool {
 		return false
 	}
 	b.eng = eng
+	params := map[string]string{"callId": info.CallID, "tenantId": info.TenantID, "closeOnFinalize": "1"}
+	if b.cfg.Sign != nil {
+		for k, v := range b.cfg.Sign(info.CallID) {
+			params[k] = v
+		}
+	}
 	b.toEngine(map[string]any{
 		"event":     "start",
 		"streamSid": b.streamSID,
@@ -110,7 +121,7 @@ func (b *bridge) handleStart(m inbound) bool {
 			CallSID:          m.Start.CallSID,
 			Tracks:           []string{"inbound"},
 			MediaFormat:      twilio.MediaFormat{Encoding: "audio/x-mulaw", SampleRate: 8000, Channels: 1},
-			CustomParameters: map[string]string{"callId": info.CallID, "tenantId": info.TenantID, "closeOnFinalize": "1"},
+			CustomParameters: params,
 		},
 	})
 	go b.pumpEngine()
@@ -136,6 +147,7 @@ func (b *bridge) handleMedia(m *mediaBody) {
 // pumpEngine carries the agent's speech back to the caller until the engine hangs up.
 func (b *bridge) pumpEngine() {
 	defer b.close()
+	defer b.recoverPanic()
 	for {
 		_, raw, err := b.eng.ReadMessage()
 		if err != nil {
@@ -204,4 +216,11 @@ func (b *bridge) close() {
 		}
 		_ = b.ex.Close()
 	})
+}
+
+// recoverPanic keeps a bug in one bridged call from crashing the gateway and every other live call.
+func (b *bridge) recoverPanic() {
+	if r := recover(); r != nil {
+		log.Printf("[exotel %s] panic: %v\n%s", b.callID, r, debug.Stack())
+	}
 }

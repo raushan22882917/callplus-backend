@@ -21,6 +21,11 @@ x-app-env: &app-env
     CORS_ALLOW_ORIGINS: ${CORS_ORIGINS_JSON}
     REALTIME_WS_URL: wss://${REALTIME_DOMAIN}/ws/twilio
     TRUST_X_FORWARDED_FOR: "true"  # the real client address, from Caddy, for rate limits
+    # Capacity knobs. Keep UVICORN_WORKERS x (DB_POOL_SIZE + DB_MAX_OVERFLOW) plus the worker
+    # concurrency under the Postgres max_connections below.
+    UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+    DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+    DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
 
 services:
   postgres:
@@ -81,7 +86,7 @@ services:
       dockerfile: infrastructure/docker/api.Dockerfile
     restart: unless-stopped
     # Same image; passing a command skips migrations (the api container runs them).
-    command: ["uv", "run", "--no-sync", "celery", "-A", "app.worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    command: ["uv", "run", "--no-sync", "celery", "-A", "app.worker.celery_app", "worker", "--loglevel=info", "--concurrency=${WORKER_CONCURRENCY:-4}"]
     <<: *app-env
     depends_on:
       api: {condition: service_healthy}
@@ -111,6 +116,9 @@ services:
     environment:
       BACKEND_BASE_URL: http://api:8000/api/v1/internal
       PORT: "9000"
+      # Calls this one gateway accepts at once; more are turned away so the ones in progress keep
+      # clear audio. Raise it together with this container's memory limit and the server's size.
+      MAX_SESSIONS: ${MAX_SESSIONS:-150}
     depends_on:
       api: {condition: service_healthy}
     mem_limit: 512m

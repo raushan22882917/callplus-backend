@@ -6,6 +6,7 @@ layer (app/api/v1/telephony_plus.py) and the orchestration service
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
+from app.services import stream_auth
 from twilio.twiml.voice_response import Connect, Dial, Gather, VoiceResponse
 
 IVR_ACTIONS = ("ai_agent", "queue", "ring_group", "forward", "voicemail", "submenu", "hangup")
@@ -83,6 +84,8 @@ def build_stream_twiml(*, stream_url: str, call_id: str, tenant_id: str) -> str:
     stream = connect.stream(url=stream_url)
     stream.parameter(name="callId", value=call_id)
     stream.parameter(name="tenantId", value=tenant_id)
+    for name, value in stream_auth.stream_params(call_id).items():
+        stream.parameter(name=name, value=value)
     response.append(connect)
     return str(response)
 

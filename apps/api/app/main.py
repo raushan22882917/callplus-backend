@@ -45,6 +45,10 @@ async def _keep_warm() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_engine(settings.database_url, echo=settings.debug)
+    from app.integrations.email_client import email_setup_warnings
+
+    for problem in email_setup_warnings():
+        logger.warning("email setup: %s", problem)
     warm = asyncio.create_task(_keep_warm())
     # A mounted sub-application's own lifespan never runs, so the MCP
     # session manager has to be entered here instead (see app/mcp/server.py).

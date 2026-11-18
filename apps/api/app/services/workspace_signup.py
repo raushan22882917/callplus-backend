@@ -38,8 +38,10 @@ async def create_workspace(
     full_name: str,
     email: str,
     hashed_password: str,
+    email_proven: bool = False,
 ) -> tuple[Tenant, User, TenantUser]:
-    """Adds the workspace, its first user (owner, email already verified) and the membership, and flushes.
+    """Adds the workspace, its first user (owner) and the membership, and flushes. `email_proven` is True only
+    when a provider vouched for the address; a password signup proves nothing (see app/services/email_proof.py).
     A taken slug or email raises IntegrityError for the caller to turn into a message."""
     owner_role = (
         await db.execute(select(Role).where(Role.tenant_id.is_(None), Role.name == "OWNER"))
@@ -49,7 +51,10 @@ async def create_workspace(
     tier = get_settings().signup_plan_tier
     tenant = Tenant(name=company_name, slug=slug, plan_tier=tier if tier in plans.TIERS else "free")
     user = User(
-        email=email.lower(), hashed_password=hashed_password, full_name=full_name, email_verified_at=datetime.now(UTC)
+        email=email.lower(),
+        hashed_password=hashed_password,
+        full_name=full_name,
+        email_verified_at=datetime.now(UTC) if email_proven else None,
     )
     db.add_all([tenant, user])
     await db.flush()
@@ -74,5 +79,6 @@ async def create_from_identity(
         full_name=full_name,
         email=email,
         hashed_password=hash_password(secrets.token_urlsafe(32)),
+        email_proven=True,
     )
 

@@ -4,6 +4,7 @@ across all tenants — see WhatsAppAccount docstring)."""
 import hmac
 import uuid
 
+from app.core.audit import log_audit_event
 from app.core.config import get_settings
 from app.core.crypto import encrypt_secret
 from app.core.deps import RequestContext, get_db, require_permission
@@ -11,7 +12,7 @@ from app.core.permissions import Permissions
 from app.core.repository import TenantScopedRepository
 from app.integrations.whatsapp import check_account_details, verify_webhook_signature
 from app.schemas.whatsapp import WhatsAppAccountConnect, WhatsAppAccountRead, WhatsAppAccountUpdate
-from app.services import connection_health
+from app.services import connection_health, outreach, privacy
 from app.services import whatsapp_inbound as wa
 from app.services import whatsapp_templates as tpl
 from fastapi import (
@@ -24,9 +25,11 @@ from fastapi import (
     Response,
     status,
 )
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from packages.database.models import AIAgent, WhatsAppAccount
+from packages.database.models import AIAgent, ConsentRecord, Tenant, WhatsAppAccount
 
 router = APIRouter(tags=["whatsapp"])
 
@@ -143,3 +146,69 @@ async def receive_whatsapp_webhook(
             background.add_task(wa.process_message_safely, message)
             queued += 1
     return {"status": "ok", "queued": queued, "receipts": receipts}
+
+
+class OptInPerson(BaseModel):
+    phone: str = Field(min_length=7, max_length=32)
+    name: str | None = Field(default=None, max_length=255)
+
+
+class OptInBatch(BaseModel):
+    people: list[OptInPerson] = Field(min_length=1, max_length=1000)
+    # Where the agreement came from, kept as proof: a sign-up form, a signed page, a call.
+    how: str = Field(default="staff", pattern="^(staff|form|import)$")
+
+
+@router.post("/whatsapp/consents", status_code=status.HTTP_201_CREATED)
+async def record_whatsapp_opt_ins(
+    payload: OptInBatch,
+    ctx: RequestContext = Depends(require_permission(Permissions.CAMPAIGNS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Records that these people agreed to WhatsApp marketing. Numbers on the do-not-disturb list are left out:
+    someone who opted out has to ask to be added again."""
+    tenant = await db.get(Tenant, ctx.tenant_id)
+    recorded, skipped = 0, []
+    for person in payload.people:
+        clean = privacy._clean_phone(person.phone)
+        if not clean or sum(ch.isdigit() for ch in clean) < 7:
+            skipped.append({"phone": person.phone, "reason": "not a phone number"})
+        elif await outreach.phone_opted_out(db, ctx.tenant_id, clean):
+            skipped.append({"phone": person.phone, "reason": "opted out earlier"})
+        else:
+            await privacy.record_consent(
+                db, ctx.tenant_id, purposes=["marketing"], source=payload.how,
+                business=tenant.name if tenant else "us", name=person.name, phone=clean,
+            )
+            recorded += 1
+    await log_audit_event(
+        db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="whatsapp_opt_in.recorded",
+        resource_type="consent_record", resource_id=None,
+    )
+    await db.commit()
+    return {"recorded": recorded, "skipped": skipped}
+
+
+@router.get("/whatsapp/consents")
+async def list_whatsapp_opt_ins(
+    ctx: RequestContext = Depends(require_permission(Permissions.CAMPAIGNS_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """How many numbers have agreed to WhatsApp marketing, and the latest 100 with when and how."""
+    granted = (
+        ConsentRecord.tenant_id == ctx.tenant_id,
+        ConsentRecord.purpose == "marketing",
+        ConsentRecord.status == "granted",
+        ConsentRecord.subject_phone.is_not(None),
+    )
+    total = (await db.execute(select(func.count(func.distinct(ConsentRecord.subject_phone))).where(*granted))).scalar_one()
+    rows = (
+        await db.execute(select(ConsentRecord).where(*granted).order_by(ConsentRecord.granted_at.desc()).limit(100))
+    ).scalars().all()
+    return {
+        "total": total,
+        "recent": [
+            {"phone": r.subject_phone, "name": r.subject_name, "source": r.source, "granted_at": r.granted_at}
+            for r in rows
+        ],
+    }

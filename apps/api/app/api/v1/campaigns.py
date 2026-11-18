@@ -18,7 +18,7 @@ from app.schemas.campaign import (
 from app.integrations.credentials import get_llm_key
 from app.integrations.sarvam import SarvamAPIError
 from app.schemas.campaign import PlanRequest, PlanResponse, FromPlanRequest
-from app.services import campaign_planner, email_ai, email_compliance, outreach, plans
+from app.services import campaign_planner, email_ai, email_compliance, outreach, plans, whatsapp_consent
 from app.services.customer_lookup import find_or_create_customer_by_phone
 from app.worker.campaign_tasks import run_campaign_task
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -34,6 +34,8 @@ from packages.database.models import (
     Customer,
     PhoneNumber,
     Tenant,
+    WhatsAppAccount,
+    WhatsAppTemplate,
 )
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
@@ -188,6 +190,16 @@ async def enroll_audience(
     if campaign.channel == CampaignChannel.WHATSAPP:
         # Numbers on the do-not-disturb list (anyone who opted out on any channel) never join.
         customers = [c for c in customers if not await outreach.phone_opted_out(db, ctx.tenant_id, c.phone)]
+        if customers and await whatsapp_consent.needs_consent(db, ctx.tenant_id, campaign.whatsapp_template_name):
+            # Marketing goes only to people who agreed to it (record that under WhatsApp > Opt-ins).
+            before = len(customers)
+            customers = await whatsapp_consent.filter_audience(db, ctx.tenant_id, customers)
+            if before and not customers:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"None of the {before} matching customers has agreed to WhatsApp marketing. "
+                    "Record their opt-in first, or use a utility template for service messages.",
+                )
     contacts = [
         CampaignContact(tenant_id=ctx.tenant_id, campaign_id=campaign.id, customer_id=customer.id)
         for customer in customers
@@ -269,6 +281,34 @@ async def launch_campaign(
     if campaign.channel == CampaignChannel.SMS:
         # SMS campaigns were retired; a leftover one cannot start.
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "SMS campaigns are no longer available.")
+    if campaign.channel == CampaignChannel.WHATSAPP:
+        # Check here, not per contact: otherwise every contact would fail one by one after launch.
+        if (
+            await db.execute(select(WhatsAppAccount.id).where(WhatsAppAccount.tenant_id == ctx.tenant_id).limit(1))
+        ).first() is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Connect a WhatsApp number before this campaign can send.",
+            )
+        template_name = (campaign.whatsapp_template_name or "").strip()
+        if not template_name:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Choose an approved WhatsApp message template for this campaign.",
+            )
+        own = (
+            await db.execute(
+                select(WhatsAppTemplate.status).where(
+                    WhatsAppTemplate.tenant_id == ctx.tenant_id, WhatsAppTemplate.name == template_name
+                )
+            )
+        ).scalars().all()
+        if own and "APPROVED" not in own:  # a template written here that Meta has not approved cannot be sent
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"The template \"{template_name}\" is {own[0].lower()}, not approved by WhatsApp yet. "
+                "Wait for approval or choose another template.",
+            )
     if campaign.channel == CampaignChannel.EMAIL:
         from app.core.config import get_settings
         from app.services.mailbox import connected_mailbox

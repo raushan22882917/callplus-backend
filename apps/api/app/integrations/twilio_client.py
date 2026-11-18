@@ -14,6 +14,7 @@ it's for.
 
 from app.core.config import get_settings
 from app.integrations.credentials import TwilioCredentials
+from app.services import stream_auth
 from twilio.base.exceptions import TwilioRestException
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
@@ -66,6 +67,8 @@ def build_stream_twiml(*, call_id: str, tenant_id: str) -> str:
     stream = connect.stream(url=settings.realtime_ws_url)
     stream.parameter(name="callId", value=call_id)
     stream.parameter(name="tenantId", value=tenant_id)
+    for name, value in stream_auth.stream_params(call_id).items():
+        stream.parameter(name=name, value=value)
     response.append(connect)
     return str(response)
 

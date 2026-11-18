@@ -1,7 +1,7 @@
 import logging
 import secrets
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from app.api.v1.auth import PASSWORD_RESET_PURPOSE
 from app.core.audit import log_audit_event
@@ -113,7 +113,8 @@ async def invite_user(
             email=payload.email.lower(),
             full_name=payload.full_name,
             hashed_password=hash_password(temporary_password),
-            email_verified_at=datetime.now(UTC),
+            # The inviter knows this password and nobody has shown they own the address yet
+            # (see app/services/email_proof.py), so the email is not marked verified.
         )
         db.add(user)
         await db.flush()

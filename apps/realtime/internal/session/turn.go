@@ -88,6 +88,7 @@ func (s *Session) onCallerSpeaking(text string) {
 }
 
 func (s *Session) runTurn(gen int) {
+	defer s.recoverPanic("turn")
 	s.turnRunMu.Lock() // one turn at a time: backend history stays ordered
 	defer s.turnRunMu.Unlock()
 
@@ -120,6 +121,7 @@ func (s *Session) runTurn(gen int) {
 	}
 	go func() {
 		defer close(fillerDone)
+		defer s.recoverPanic("filler")
 		select {
 		case <-time.After(fillerDelay):
 			if !s.turnIsStale(gen) && !s.isEnded() {

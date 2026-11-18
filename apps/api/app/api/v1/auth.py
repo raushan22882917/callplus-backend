@@ -35,7 +35,7 @@ from app.schemas.auth import (
     TenantOption,
     TokenPair,
 )
-from app.services import workspace_signup
+from app.services import email_proof, workspace_signup
 from app.services.platform_totp import get_enabled_totp, verify_second_factor
 from app.services.user_sessions import (
     alert_new_sign_in,
@@ -320,6 +320,7 @@ async def reset_password(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired reset token")
 
     user.hashed_password = hash_password(payload.new_password)
+    email_proof.mark_proven(user)  # the link went to their inbox
     # Whoever knew the old password (or stole a session) is signed out everywhere.
     await revoke_others(db, user.id, keep=None)
     await db.commit()

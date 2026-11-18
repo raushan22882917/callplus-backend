@@ -5,6 +5,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -21,8 +22,9 @@ import (
 var upgrader = websocket.Upgrader{
 	// Twilio doesn't send an Origin header matching this service's own
 	// origin (there isn't a browser involved), so the default same-origin
-	// check would reject every connection — allow all origins here and
-	// rely on the callId/tenantId the backend already validates per call.
+	// check would reject every connection. Allow all origins here; each
+	// endpoint proves the caller another way (a signed address, or the
+	// signature in a carrier's start message, see session/streamauth.go).
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
@@ -38,22 +40,49 @@ func main() {
 		// per sentence instead of ~1s for the REST call. TTS_WEBSOCKET=false forces REST.
 		TTSWebSocket:  getEnv("TTS_WEBSOCKET", "true") != "false",
 		StreamReplies: getEnv("STREAM_REPLIES", "true") != "false",
+		// Carrier streams must carry the API's signature for their call. ALLOW_UNSIGNED_STREAMS=true
+		// turns that off for local development and load tests; never set it in production.
+		AllowUnsignedStreams: getEnv("ALLOW_UNSIGNED_STREAMS", "false") == "true",
+	}
+	if cfg.AllowUnsignedStreams {
+		log.Printf("WARNING: ALLOW_UNSIGNED_STREAMS is on: /ws/twilio accepts any caller")
 	}
 	port := getEnv("PORT", "9000")
+	maxSessions, _ := strconv.Atoi(getEnv("MAX_SESSIONS", "0"))
+	cap := newCapacity(maxSessions)
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
+	// Live numbers for a dashboard or an autoscaler: calls now, the busiest moment, calls turned away.
+	http.HandleFunc("/statz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"active":%d,"peak":%d,"denied":%d,"max":%d}`,
+			cap.active.Load(), cap.peak.Load(), cap.denied.Load(), cap.max)
+	})
+
+	// busy turns a call away with a 503 before the WebSocket opens, so the carrier or caller can retry
+	// or fail over instead of joining a gateway that is already full.
+	busy := func(w http.ResponseWriter) {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "gateway at capacity", http.StatusServiceUnavailable)
+	}
+
 	http.HandleFunc("/ws/twilio", func(w http.ResponseWriter, r *http.Request) {
+		if !cap.acquire() {
+			busy(w)
+			return
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
+			cap.release()
 			log.Printf("websocket upgrade failed: %v", err)
 			return
 		}
 		sess := session.New(conn, cfg)
-		go sess.Run()
+		go func() { defer cap.release(); sess.Run() }()
 	})
 
 	// Exotel Voicebot: an Indian carrier streaming 16-bit audio. The bridge translates it to the
@@ -61,11 +90,18 @@ func main() {
 	exotelCfg := exotel.Config{
 		EngineURL: "ws://127.0.0.1:" + port + "/ws/twilio",
 		Start:     exotel.HTTPStart(cfg.BackendBaseURL, cfg.InternalToken),
+		Sign: func(callID string) map[string]string {
+			return session.SignStream(cfg.InternalToken, callID, time.Now())
+		},
 	}
 	http.HandleFunc("/ws/exotel", func(w http.ResponseWriter, r *http.Request) {
 		key := r.URL.Query().Get("k")
 		if key == "" {
 			http.Error(w, "missing key", http.StatusUnauthorized)
+			return
+		}
+		if cap.full() { // counted once the bridge reaches /ws/twilio
+			busy(w)
 			return
 		}
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -85,13 +121,18 @@ func main() {
 			http.Error(w, "missing test session", http.StatusBadRequest)
 			return
 		}
+		if !cap.acquire() {
+			busy(w)
+			return
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
+			cap.release()
 			log.Printf("websocket upgrade failed: %v", err)
 			return
 		}
 		sess := session.NewBrowserTest(conn, cfg, sessionID, token)
-		go sess.Run()
+		go func() { defer cap.release(); sess.Run() }()
 	})
 
 	// A visitor calling from a web page. The API created the call and signed this address for a few
@@ -104,13 +145,18 @@ func main() {
 			http.Error(w, "this call address is invalid or has expired", http.StatusForbidden)
 			return
 		}
+		if !cap.acquire() {
+			busy(w)
+			return
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
+			cap.release()
 			log.Printf("websocket upgrade failed: %v", err)
 			return
 		}
 		sess := session.NewWebCall(conn, cfg, callID)
-		go sess.Run()
+		go func() { defer cap.release(); sess.Run() }()
 	})
 
 	log.Printf("realtime gateway listening on :%s", port)

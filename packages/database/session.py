@@ -1,3 +1,4 @@
+import os
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -24,7 +25,16 @@ def init_engine(database_url: str, *, echo: bool = False, null_pool: bool = Fals
     if null_pool:
         _engine = create_async_engine(database_url, echo=echo, poolclass=NullPool)
     else:
-        _engine = create_async_engine(database_url, echo=echo, pool_pre_ping=True)
+        # Every live call turn borrows a connection, so a busy server needs more than the
+        # default 5+10. Size it as workers x (pool + overflow) <= Postgres max_connections.
+        _engine = create_async_engine(
+            database_url,
+            echo=echo,
+            pool_pre_ping=True,
+            pool_size=int(os.environ.get("DB_POOL_SIZE", "5")),
+            max_overflow=int(os.environ.get("DB_MAX_OVERFLOW", "10")),
+            pool_timeout=int(os.environ.get("DB_POOL_TIMEOUT", "30")),
+        )
     _session_factory = async_sessionmaker(
         bind=_engine, expire_on_commit=False, autoflush=False
     )

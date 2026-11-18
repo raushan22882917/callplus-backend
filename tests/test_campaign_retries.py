@@ -52,6 +52,11 @@ async def test_transient_failures_are_retried_and_permanent_ones_are_not(
     campaign, _ = await _make_campaign(db_session, ["+911", "+912", "+913"])
     calls: dict[str, int] = {}
 
+    async def no_consent_needed(*_a, **_k) -> bool:  # this test is about retries, not opt-in
+        return False
+
+    monkeypatch.setattr(campaign_tasks.whatsapp_consent, "needs_consent", no_consent_needed)
+
     async def fake_send(db, campaign, whatsapp_account, customer) -> None:
         calls[customer.phone] = calls.get(customer.phone, 0) + 1
         if customer.phone == "+911" and calls[customer.phone] < 3:

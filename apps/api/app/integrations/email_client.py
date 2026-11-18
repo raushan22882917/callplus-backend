@@ -127,3 +127,30 @@ async def _send_via_api(
             )
     if resp.status_code >= 400:
         raise RuntimeError(f"email provider {provider} rejected the message ({resp.status_code})")
+
+
+_FREE_MAIL = ("gmail.com", "googlemail.com", "yahoo.com", "outlook.com", "hotmail.com", "example.com")
+
+
+def email_setup_warnings() -> list[str]:
+    """Plain-words problems with how platform email (password reset, invites, invoices) is set up.
+    Logged at start so a bad setup is seen in the logs, not found when a customer never gets a mail."""
+    s = get_settings()
+    out: list[str] = []
+    if not s.email_api_key and not s.smtp_host:
+        out.append("Platform email is not configured: password-reset and invite emails are only logged.")
+        return out
+    domain = (s.smtp_from_email or "").rpartition("@")[2].lower()
+    if domain in _FREE_MAIL:
+        out.append(
+            f"Platform email sends from a {domain} address. Mail from a free address is limited and often lands "
+            "in spam. Use a verified domain of your own."
+        )
+    if not s.email_api_key:
+        out.append(
+            "Platform email uses SMTP. Many hosts, DigitalOcean included, block SMTP ports. "
+            "Set EMAIL_API_KEY (Resend or Brevo) to send over HTTPS."
+        )
+    elif s.email_api_provider.lower() == "resend" and not s.email_resend_webhook_secret:
+        out.append("EMAIL_RESEND_WEBHOOK_SECRET is empty, so bounce and complaint events are rejected.")
+    return out

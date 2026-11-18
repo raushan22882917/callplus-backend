@@ -37,7 +37,7 @@ def sent(monkeypatch):
 
     async def email(*, to_email, subject, body, in_reply_to, references, reply_to, **_workspace):
         log.append(("email", to_email, subject, body))
-        return "<follow-up-1@callpulse.test>"
+        return "<follow-up-1@callplus.test>"
 
     monkeypatch.setattr(follow_up, "send_text_message", wa)
     monkeypatch.setattr(follow_up, "send_sms_message", sms)
@@ -170,14 +170,14 @@ async def test_email_after_a_call_uses_a_default_subject_and_keeps_the_message_i
         )
     ]
     saved = await _messages(uuid.UUID(resp.json()["conversation_id"]))
-    assert saved[0].provider_message_id == "<follow-up-1@callpulse.test>"
+    assert saved[0].provider_message_id == "<follow-up-1@callplus.test>"
 
     # The customer's reply quotes our Message-ID, and the inbound email path finds this same thread.
     from app.services import channels as svc
 
     async with session_scope() as db:
         found = await svc.find_email_conversation_id(
-            db, tenant_id, ["<follow-up-1@callpulse.test>"]
+            db, tenant_id, ["<follow-up-1@callplus.test>"]
         )
     assert str(found) == resp.json()["conversation_id"]
 
